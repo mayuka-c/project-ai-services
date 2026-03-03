@@ -35,7 +35,6 @@ var (
 	skipChecks            []string
 	valuesFiles           []string
 	rawArgImagePullPolicy string
-	imagePullPolicy       image.ImagePullPolicy
 
 	// openshift flags.
 	timeout time.Duration
@@ -85,7 +84,7 @@ var createCmd = &cobra.Command{
 			SkipImageDownload: skipImageDownload,
 			ArgParams:         argParams,
 			ValuesFiles:       valuesFiles,
-			ImagePullPolicy:   imagePullPolicy,
+			ImagePullPolicy:   image.ImagePullPolicy(rawArgImagePullPolicy),
 			Timeout:           timeout,
 		}
 
@@ -281,11 +280,10 @@ func validateValuesFlag(cmd *cobra.Command) error {
 
 // validateImagePullPolicyFlag validates the image-pull-policy flag.
 func validateImagePullPolicyFlag(cmd *cobra.Command) error {
-	imagePullPolicy = image.ImagePullPolicy(rawArgImagePullPolicy)
-	if ok := imagePullPolicy.Valid(); !ok {
+	if ok := image.ImagePullPolicy(rawArgImagePullPolicy).Valid(); !ok {
 		return fmt.Errorf(
 			"invalid value %q: must be one of %q, %q, %q",
-			imagePullPolicy, image.PullAlways, image.PullNever, image.PullIfNotPresent,
+			image.ImagePullPolicy(rawArgImagePullPolicy), image.PullAlways, image.PullNever, image.PullIfNotPresent,
 		)
 	}
 
