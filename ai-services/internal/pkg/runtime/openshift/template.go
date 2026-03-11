@@ -12,16 +12,6 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
 )
 
-// TemplateExists checks if an OpenShift Template exists in the specified namespace.
-func TemplateExists(name, namespace string) (bool, error) {
-	ocClient, err := NewOpenshiftClient()
-	if err != nil {
-		return false, fmt.Errorf("failed to create OpenShift client: %w", err)
-	}
-
-	return templateExists(ocClient, name, namespace)
-}
-
 // GetTemplate retrieves an OpenShift Template from the cluster.
 func GetTemplate(name, namespace string) (*unstructured.Unstructured, error) {
 	ocClient, err := NewOpenshiftClient()
@@ -54,31 +44,6 @@ func ApplyObjectsWithLabels(objects []unstructured.Unstructured, namespace strin
 	}
 
 	return applyProcessedObjectsWithLabels(ocClient, objects, namespace, labels)
-}
-
-// templateExists checks if an OpenShift Template exists in the specified namespace.
-func templateExists(ocClient *OpenshiftClient, name, namespace string) (bool, error) {
-	template := &unstructured.Unstructured{}
-	template.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "template.openshift.io",
-		Version: "v1",
-		Kind:    "Template",
-	})
-
-	err := ocClient.Client.Get(ocClient.Ctx, client.ObjectKey{
-		Name:      name,
-		Namespace: namespace,
-	}, template)
-
-	if err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			return false, nil
-		}
-
-		return false, err
-	}
-
-	return true, nil
 }
 
 // getTemplate retrieves an OpenShift Template from the cluster.

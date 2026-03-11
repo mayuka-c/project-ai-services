@@ -191,23 +191,7 @@ func processOpenShiftTemplateWithLabels(ctx context.Context, opts TemplateProces
 	s.Start(ctx)
 
 	// Check if template exists
-	exists, err := openshift.TemplateExists(opts.TemplateName, opts.TemplateNamespace)
-	if err != nil {
-		s.Fail("failed to check template existence")
-
-		return fmt.Errorf("failed to check if template exists: %w", err)
-	}
-
-	if !exists {
-		// Template doesn't exist - this is not an error for idempotency
-		// Just log and skip processing
-		s.Stop(fmt.Sprintf("Template '%s' not found in namespace '%s', skipping", opts.TemplateName, opts.TemplateNamespace))
-		logger.Infof("Template '%s' not found in namespace '%s', skipping template processing\n", opts.TemplateName, opts.TemplateNamespace)
-
-		return nil
-	}
-
-	// Get the template
+	// Get the template - will error if not found
 	template, err := openshift.GetTemplate(opts.TemplateName, opts.TemplateNamespace)
 	if err != nil {
 		s.Fail("failed to get template")
