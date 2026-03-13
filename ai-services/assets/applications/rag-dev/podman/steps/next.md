@@ -1,3 +1,7 @@
+- Upload the documents that you want to serve via this RAG application using the web interface at http://{{ .HOST_IP }}:{{ .DIGITIZE_UI_PORT }}.
+        
+                    or
+
 - Move the documents that you want to serve via this RAG application inside "/var/lib/ai-services/applications/{{ .AppName }}/docs" directory
 
 - Start the ingestion with below command to feed the documents placed in previous step into the DB
@@ -11,4 +15,14 @@
 {{- if ne .BACKEND_PORT "" }}
 
 - Chatbot Backend is available to use at http://{{ .HOST_IP }}:{{ .BACKEND_PORT }}.
+{{- end }}
+
+{{- if ne .DIGITIZE_UI_PORT "" }}
+
+- Digitize UI is available to use at http://{{ .HOST_IP }}:{{ .DIGITIZE_UI_PORT }}.
+{{- end }}
+
+{{- if ne .DIGITIZE_API_PORT "" }}
+
+- Digitize API is available to use at http://{{ .HOST_IP }}:{{ .DIGITIZE_API_PORT }}.
 {{- end }}
