@@ -21,6 +21,8 @@ import {
   Checkbox,
   CheckboxGroup,
   ActionableNotification,
+  TextInput,
+  InlineLoading,
 } from '@carbon/react';
 import { SidePanel, NoDataEmptyState } from '@carbon/ibm-products';
 import { Download, Renew, Add, CheckmarkFilled, InProgress, ErrorFilled, TrashCan } from '@carbon/icons-react';
@@ -28,6 +30,7 @@ import { useTheme } from '../../contexts/useTheme';
 import { getAllJobs, getJobById, uploadDocuments, deleteJob, Job } from '../../services/api';
 import IngestSidePanel from '../../components/IngestSidePanel';
 import { calculateDuration } from '../../utils/dateUtils';
+import { exportToCSV, validateFilename } from '../../utils/csvExport';
 import { JOB_STATUS, DISPLAY_STATUS, JOB_OPERATION, JOB_TYPE_DISPLAY } from '../../constants/jobConstants';
 import styles from './JobMonitorPage.module.scss';
 
@@ -37,6 +40,8 @@ interface NotificationStatus {
   title: string;
   subtitle?: string;
 }
+
+export type ExportStatus = 'idle' | 'exporting' | 'success' | 'error';
 
 interface JobMonitorState {
   jobs: Job[];
@@ -57,6 +62,10 @@ interface JobMonitorState {
   errorMessage: string;
   errorJobName: string;
   isDeleting: boolean;
+  isExportDialogOpen: boolean;
+  csvFileName: string;
+  exportStatus: ExportStatus;
+  exportErrorMessage: string;
 }
 
 type JobMonitorAction =
@@ -78,7 +87,13 @@ type JobMonitorAction =
   | { type: 'SHOW_ERROR'; payload: { message: string; jobName?: string } }
   | { type: 'HIDE_ERROR' }
   | { type: 'SET_IS_DELETING'; payload: boolean }
-  | { type: 'DELETE_JOB'; payload: string };
+  | { type: 'DELETE_JOB'; payload: string }
+  | { type: 'OPEN_EXPORT_DIALOG' }
+  | { type: 'CLOSE_EXPORT_DIALOG' }
+  | { type: 'SET_CSV_FILENAME'; payload: string }
+  | { type: 'SET_EXPORT_STATUS'; payload: ExportStatus }
+  | { type: 'SET_EXPORT_ERROR'; payload: string }
+  | { type: 'CLEAR_EXPORT_ERROR' };
 
 const initialState: JobMonitorState = {
   jobs: [],
@@ -99,6 +114,10 @@ const initialState: JobMonitorState = {
   errorMessage: '',
   errorJobName: '',
   isDeleting: false,
+  isExportDialogOpen: false,
+  csvFileName: '',
+  exportStatus: 'idle',
+  exportErrorMessage: '',
 };
 
 const jobMonitorReducer = (
@@ -207,6 +226,30 @@ const jobMonitorReducer = (
       };
     case 'SET_IS_DELETING':
       return { ...state, isDeleting: action.payload };
+    case 'OPEN_EXPORT_DIALOG':
+      return {
+        ...state,
+        isExportDialogOpen: true,
+        csvFileName: '',
+        exportErrorMessage: '',
+        exportStatus: 'idle',
+      };
+    case 'CLOSE_EXPORT_DIALOG':
+      return {
+        ...state,
+        isExportDialogOpen: false,
+      };
+    case 'SET_CSV_FILENAME':
+      return { ...state, csvFileName: action.payload };
+    case 'SET_EXPORT_STATUS':
+      return { ...state, exportStatus: action.payload };
+    case 'SET_EXPORT_ERROR':
+      return {
+        ...state,
+        exportErrorMessage: action.payload,
+      };
+    case 'CLEAR_EXPORT_ERROR':
+      return { ...state, exportErrorMessage: '' };
     default:
       return state;
   }
@@ -398,6 +441,74 @@ const JobMonitorPage = () => {
     return 'Error message goes here';
   };
 
+  const handleExportCSV = async () => {
+    const filename = state.csvFileName.trim();
+    const validationError = validateFilename(filename);
+
+    if (validationError) {
+      dispatch({
+        type: 'SET_EXPORT_ERROR',
+        payload: validationError,
+      });
+      return;
+    }
+
+    if (filteredJobs.length === 0) {
+      dispatch({
+        type: 'SET_EXPORT_ERROR',
+        payload: 'No data available to export',
+      });
+      return;
+    }
+
+    dispatch({
+      type: 'SET_EXPORT_STATUS',
+      payload: 'exporting',
+    });
+
+    try {
+      // Create rows for export (excluding action columns)
+      const exportRows = filteredJobs.map((job) => ({
+        job_name: getJobName(job),
+        type: getJobType(job),
+        status: getJobStatus(job),
+        started: job.submitted_at
+          ? new Date(job.submitted_at).toLocaleString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+              hour12: true,
+            })
+          : 'N/A',
+        duration: calculateDuration(job.submitted_at, job.completed_at),
+      }));
+
+      exportToCSV({
+        filename,
+        headers,
+        rows: exportRows,
+        excludeColumns: ['view_action', 'delete_action'],
+      });
+
+      dispatch({
+        type: 'SET_EXPORT_STATUS',
+        payload: 'success',
+      });
+    } catch (error: any) {
+      dispatch({
+        type: 'SET_EXPORT_STATUS',
+        payload: 'error',
+      });
+
+      dispatch({
+        type: 'SET_EXPORT_ERROR',
+        payload: error.message || 'An error occurred while exporting the CSV file. Please try again.',
+      });
+    }
+  };
+
   const filteredJobs = state.jobs.filter((job) => {
     if (state.searchValue === '') return true;
     const jobName = getJobName(job).toLowerCase();
@@ -554,6 +665,7 @@ const JobMonitorPage = () => {
                         renderIcon={Download}
                         iconDescription="Download"
                         tooltipPosition="bottom"
+                        onClick={() => dispatch({ type: 'OPEN_EXPORT_DIALOG' })}
                       />
                       <Button
                         kind="ghost"
@@ -797,6 +909,62 @@ const JobMonitorPage = () => {
               />
             </CheckboxGroup>
           </div>
+        </Modal>
+
+        {/* Export CSV Modal */}
+        <Modal
+          open={state.isExportDialogOpen}
+          size="sm"
+          modalHeading="Export as CSV"
+          passiveModal={state.exportStatus !== 'idle'}
+          preventCloseOnClickOutside
+          {...(state.exportStatus === 'idle' && {
+            primaryButtonText: 'Export',
+            secondaryButtonText: 'Cancel',
+            onRequestSubmit: handleExportCSV,
+          })}
+          onRequestClose={() => dispatch({ type: 'CLOSE_EXPORT_DIALOG' })}
+        >
+          {state.exportStatus === 'idle' && (
+            <TextInput
+              id="csv-file-name"
+              labelText="File name"
+              value={state.csvFileName}
+              invalid={!!state.exportErrorMessage}
+              invalidText={state.exportErrorMessage}
+              onChange={(e) => {
+                dispatch({
+                  type: 'SET_CSV_FILENAME',
+                  payload: e.target.value,
+                });
+                dispatch({ type: 'CLEAR_EXPORT_ERROR' });
+              }}
+            />
+          )}
+
+          {state.exportStatus === 'exporting' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <InlineLoading status="active" description="Exporting..." />
+            </div>
+          )}
+
+          {state.exportStatus === 'success' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <InlineLoading
+                status="finished"
+                description="The file has been exported"
+              />
+            </div>
+          )}
+
+          {state.exportStatus === 'error' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <InlineLoading
+                status="error"
+                description={state.exportErrorMessage}
+              />
+            </div>
+          )}
         </Modal>
       </div>
     </Theme>

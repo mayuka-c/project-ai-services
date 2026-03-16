@@ -21,16 +21,21 @@ import {
   Checkbox,
   CheckboxGroup,
   ActionableNotification,
+  TextInput,
+  InlineLoading,
 } from '@carbon/react';
 import { Renew, TrashCan, Download, CheckmarkFilled, ErrorFilled, InProgress } from '@carbon/icons-react';
 import { useTheme } from '../../contexts/useTheme';
 import { listDocuments, getDocumentContent, deleteDocument, Document } from '../../services/api';
+import { exportToCSV, validateFilename } from '../../utils/csvExport';
 import styles from './DocumentListPage.module.scss';
 
 interface DocumentContentData {
   result: any;
   output_format: string;
 }
+
+export type ExportStatus = 'idle' | 'exporting' | 'success' | 'error';
 
 interface DocumentListState {
   documents: Document[];
@@ -50,6 +55,10 @@ interface DocumentListState {
   errorMessage: string;
   errorDocName: string;
   isDeleting: boolean;
+  isExportDialogOpen: boolean;
+  csvFileName: string;
+  exportStatus: ExportStatus;
+  exportErrorMessage: string;
 }
 
 type DocumentListAction =
@@ -72,7 +81,13 @@ type DocumentListAction =
   | { type: 'SHOW_ERROR'; payload: { message: string; docName?: string } }
   | { type: 'HIDE_ERROR' }
   | { type: 'SET_IS_DELETING'; payload: boolean }
-  | { type: 'DELETE_DOCUMENT'; payload: string };
+  | { type: 'DELETE_DOCUMENT'; payload: string }
+  | { type: 'OPEN_EXPORT_DIALOG' }
+  | { type: 'CLOSE_EXPORT_DIALOG' }
+  | { type: 'SET_CSV_FILENAME'; payload: string }
+  | { type: 'SET_EXPORT_STATUS'; payload: ExportStatus }
+  | { type: 'SET_EXPORT_ERROR'; payload: string }
+  | { type: 'CLEAR_EXPORT_ERROR' };
 
 const initialState: DocumentListState = {
   documents: [],
@@ -92,6 +107,10 @@ const initialState: DocumentListState = {
   errorMessage: '',
   errorDocName: '',
   isDeleting: false,
+  isExportDialogOpen: false,
+  csvFileName: '',
+  exportStatus: 'idle',
+  exportErrorMessage: '',
 };
 
 const documentListReducer = (
@@ -210,6 +229,30 @@ const documentListReducer = (
       };
     case 'SET_IS_DELETING':
       return { ...state, isDeleting: action.payload };
+    case 'OPEN_EXPORT_DIALOG':
+      return {
+        ...state,
+        isExportDialogOpen: true,
+        csvFileName: '',
+        exportErrorMessage: '',
+        exportStatus: 'idle',
+      };
+    case 'CLOSE_EXPORT_DIALOG':
+      return {
+        ...state,
+        isExportDialogOpen: false,
+      };
+    case 'SET_CSV_FILENAME':
+      return { ...state, csvFileName: action.payload };
+    case 'SET_EXPORT_STATUS':
+      return { ...state, exportStatus: action.payload };
+    case 'SET_EXPORT_ERROR':
+      return {
+        ...state,
+        exportErrorMessage: action.payload,
+      };
+    case 'CLEAR_EXPORT_ERROR':
+      return { ...state, exportErrorMessage: '' };
     default:
       return state;
   }
@@ -402,6 +445,72 @@ const DocumentListPage = () => {
     }
   };
 
+  const handleExportCSV = async () => {
+    const filename = state.csvFileName.trim();
+    const validationError = validateFilename(filename);
+
+    if (validationError) {
+      dispatch({
+        type: 'SET_EXPORT_ERROR',
+        payload: validationError,
+      });
+      return;
+    }
+
+    if (state.documents.length === 0) {
+      dispatch({
+        type: 'SET_EXPORT_ERROR',
+        payload: 'No data available to export',
+      });
+      return;
+    }
+
+    dispatch({
+      type: 'SET_EXPORT_STATUS',
+      payload: 'exporting',
+    });
+
+    try {
+      // Create rows for export (excluding action columns)
+      const exportRows = state.documents.map((doc) => ({
+        name: doc.name || doc.filename || 'N/A',
+        status: doc.status,
+        created_at: doc.created_at
+          ? new Date(doc.created_at).toLocaleString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+              hour12: true,
+            })
+          : 'N/A',
+      }));
+
+      exportToCSV({
+        filename,
+        headers,
+        rows: exportRows,
+        excludeColumns: ['view_action', 'delete_action'],
+      });
+
+      dispatch({
+        type: 'SET_EXPORT_STATUS',
+        payload: 'success',
+      });
+    } catch (error: any) {
+      dispatch({
+        type: 'SET_EXPORT_STATUS',
+        payload: 'error',
+      });
+
+      dispatch({
+        type: 'SET_EXPORT_ERROR',
+        payload: error.message || 'An error occurred while exporting the CSV file. Please try again.',
+      });
+    }
+  };
+
   const rows = state.documents.map((doc) => ({
     id: doc.id,
     name: doc.name || doc.filename || 'N/A',
@@ -506,6 +615,7 @@ const DocumentListPage = () => {
                         renderIcon={Download}
                         iconDescription="Download"
                         tooltipPosition="bottom"
+                        onClick={() => dispatch({ type: 'OPEN_EXPORT_DIALOG' })}
                       />
                       <Button
                         kind="ghost"
@@ -632,6 +742,62 @@ const DocumentListPage = () => {
             />
           </CheckboxGroup>
         </div>
+      </Modal>
+
+      {/* Export CSV Modal */}
+      <Modal
+        open={state.isExportDialogOpen}
+        size="sm"
+        modalHeading="Export as CSV"
+        passiveModal={state.exportStatus !== 'idle'}
+        preventCloseOnClickOutside
+        {...(state.exportStatus === 'idle' && {
+          primaryButtonText: 'Export',
+          secondaryButtonText: 'Cancel',
+          onRequestSubmit: handleExportCSV,
+        })}
+        onRequestClose={() => dispatch({ type: 'CLOSE_EXPORT_DIALOG' })}
+      >
+        {state.exportStatus === 'idle' && (
+          <TextInput
+            id="csv-file-name"
+            labelText="File name"
+            value={state.csvFileName}
+            invalid={!!state.exportErrorMessage}
+            invalidText={state.exportErrorMessage}
+            onChange={(e) => {
+              dispatch({
+                type: 'SET_CSV_FILENAME',
+                payload: e.target.value,
+              });
+              dispatch({ type: 'CLEAR_EXPORT_ERROR' });
+            }}
+          />
+        )}
+
+        {state.exportStatus === 'exporting' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <InlineLoading status="active" description="Exporting..." />
+          </div>
+        )}
+
+        {state.exportStatus === 'success' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <InlineLoading
+              status="finished"
+              description="The file has been exported"
+            />
+          </div>
+        )}
+
+        {state.exportStatus === 'error' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <InlineLoading
+              status="error"
+              description={state.exportErrorMessage}
+            />
+          </div>
+        )}
       </Modal>
     </div>
     </Theme>
