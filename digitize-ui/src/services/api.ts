@@ -17,7 +17,7 @@ export interface Document {
   name: string;
   filename?: string;
   status: string;
-  created_at?: string;
+  submitted_at?: string;
   output_format?: string;
 }
 

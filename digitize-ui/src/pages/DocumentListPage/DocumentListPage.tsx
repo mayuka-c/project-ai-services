@@ -260,9 +260,9 @@ const documentListReducer = (
 };
 
 const headers = [
-  { key: 'name', header: 'Document name' },
+  { key: 'name', header: 'Document Name' },
   { key: 'status', header: 'Status' },
-  { key: 'created_at', header: 'Created' },
+  { key: 'submitted_at', header: 'Submitted' },
   { key: 'view_action', header: '' },
   { key: 'delete_action', header: '' },
 ];
@@ -476,8 +476,8 @@ const DocumentListPage = () => {
       const exportRows = state.documents.map((doc) => ({
         name: doc.name || doc.filename || 'N/A',
         status: doc.status,
-        created_at: doc.created_at
-          ? new Date(doc.created_at).toLocaleString('en-US', {
+        submitted_at: doc.submitted_at
+          ? new Date(doc.submitted_at).toLocaleString('en-US', {
               month: 'short',
               day: 'numeric',
               year: 'numeric',
@@ -521,8 +521,8 @@ const DocumentListPage = () => {
         <span className={styles.statusText}>{doc.status}</span>
       </div>
     ),
-    created_at: doc.created_at
-      ? new Date(doc.created_at).toLocaleString('en-US', {
+    submitted_at: doc.submitted_at
+      ? new Date(doc.submitted_at).toLocaleString('en-US', {
           month: 'short',
           day: 'numeric',
           year: 'numeric',
