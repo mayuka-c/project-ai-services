@@ -11,21 +11,21 @@ import {
   TableToolbar,
   TableToolbarContent,
   TableToolbarSearch,
-  TableBatchActions,
-  TableBatchAction,
-  TableSelectAll,
-  TableSelectRow,
   Pagination,
   Button,
   Tag,
   Theme,
   Link,
   InlineNotification,
+  Modal,
+  Checkbox,
+  CheckboxGroup,
+  ActionableNotification,
 } from '@carbon/react';
 import { SidePanel, NoDataEmptyState } from '@carbon/ibm-products';
 import { Download, Renew, Add, CheckmarkFilled, InProgress, ErrorFilled, TrashCan } from '@carbon/icons-react';
 import { useTheme } from '../../contexts/useTheme';
-import { getAllJobs, getJobById, uploadDocuments, deleteJob, bulkDeleteJobs, Job } from '../../services/api';
+import { getAllJobs, getJobById, uploadDocuments, deleteJob, Job } from '../../services/api';
 import IngestSidePanel from '../../components/IngestSidePanel';
 import { calculateDuration } from '../../utils/dateUtils';
 import { JOB_STATUS, DISPLAY_STATUS, JOB_OPERATION, JOB_TYPE_DISPLAY } from '../../constants/jobConstants';
@@ -50,6 +50,13 @@ interface JobMonitorState {
   isIngestSidePanelOpen: boolean;
   uploadStatus: NotificationStatus;
   deleteStatus: NotificationStatus;
+  showDeleteModal: boolean;
+  jobToDelete: string | null;
+  isConfirmed: boolean;
+  toastOpen: boolean;
+  errorMessage: string;
+  errorJobName: string;
+  isDeleting: boolean;
 }
 
 type JobMonitorAction =
@@ -64,7 +71,14 @@ type JobMonitorAction =
   | { type: 'SET_UPLOAD_STATUS'; payload: NotificationStatus }
   | { type: 'SET_DELETE_STATUS'; payload: NotificationStatus }
   | { type: 'HIDE_UPLOAD_STATUS' }
-  | { type: 'HIDE_DELETE_STATUS' };
+  | { type: 'HIDE_DELETE_STATUS' }
+  | { type: 'OPEN_DELETE_MODAL'; payload: string }
+  | { type: 'CLOSE_DELETE_MODAL' }
+  | { type: 'SET_CONFIRMED'; payload: boolean }
+  | { type: 'SHOW_ERROR'; payload: { message: string; jobName?: string } }
+  | { type: 'HIDE_ERROR' }
+  | { type: 'SET_IS_DELETING'; payload: boolean }
+  | { type: 'DELETE_JOB'; payload: string };
 
 const initialState: JobMonitorState = {
   jobs: [],
@@ -78,6 +92,13 @@ const initialState: JobMonitorState = {
   isIngestSidePanelOpen: false,
   uploadStatus: { show: false, kind: 'info', title: '' },
   deleteStatus: { show: false, kind: 'info', title: '' },
+  showDeleteModal: false,
+  jobToDelete: null,
+  isConfirmed: false,
+  toastOpen: false,
+  errorMessage: '',
+  errorJobName: '',
+  isDeleting: false,
 };
 
 const jobMonitorReducer = (
@@ -146,6 +167,46 @@ const jobMonitorReducer = (
         ...state,
         deleteStatus: { show: false, kind: 'info', title: '' },
       };
+    case 'OPEN_DELETE_MODAL':
+      return {
+        ...state,
+        jobToDelete: action.payload,
+        showDeleteModal: true,
+        toastOpen: false,
+      };
+    case 'CLOSE_DELETE_MODAL':
+      return {
+        ...state,
+        showDeleteModal: false,
+        isConfirmed: false,
+        jobToDelete: null,
+      };
+    case 'SET_CONFIRMED':
+      return { ...state, isConfirmed: action.payload };
+    case 'DELETE_JOB':
+      return {
+        ...state,
+        jobs: state.jobs.filter((j) => j.job_id !== action.payload),
+        showDeleteModal: false,
+        isConfirmed: false,
+      };
+    case 'SHOW_ERROR':
+      return {
+        ...state,
+        errorMessage: action.payload.message,
+        errorJobName: action.payload.jobName ?? '',
+        toastOpen: true,
+        isDeleting: false,
+      };
+    case 'HIDE_ERROR':
+      return {
+        ...state,
+        toastOpen: false,
+        jobToDelete: null,
+        errorJobName: '',
+      };
+    case 'SET_IS_DELETING':
+      return { ...state, isDeleting: action.payload };
     default:
       return state;
   }
@@ -157,7 +218,8 @@ const headers = [
   { key: 'status', header: 'Status' },
   { key: 'started', header: 'Started' },
   { key: 'duration', header: 'Duration' },
-  { key: 'actions', header: '' },
+  { key: 'view_action', header: '' },
+  { key: 'delete_action', header: '' },
 ];
 
 const getStatusIcon = (status: string) => {
@@ -285,58 +347,25 @@ const JobMonitorPage = () => {
     }
   };
 
-  const handleDeleteJobs = async (selectedRows: any[]) => {
+  const handleDeleteConfirm = async () => {
+    if (!state.jobToDelete) return;
+
+    dispatch({ type: 'SET_IS_DELETING', payload: true });
+
     try {
-      const jobIds = selectedRows.map(row => row.id);
-      
-      dispatch({
-        type: 'SET_DELETE_STATUS',
-        payload: {
-          show: true,
-          kind: 'info',
-          title: 'Deleting jobs...',
-          subtitle: `Deleting ${jobIds.length} job(s)`,
-        },
-      });
-
-      if (jobIds.length === 1) {
-        await deleteJob(jobIds[0]);
-      } else {
-        await bulkDeleteJobs(jobIds);
-      }
-
-      dispatch({
-        type: 'SET_DELETE_STATUS',
-        payload: {
-          show: true,
-          kind: 'success',
-          title: 'Jobs deleted successfully',
-          subtitle: `${jobIds.length} job(s) deleted`,
-        },
-      });
-
-      // Refresh jobs list after successful deletion
-      setTimeout(() => {
-        fetchJobs();
-        dispatch({ type: 'HIDE_DELETE_STATUS' });
-      }, 2000);
+      await deleteJob(state.jobToDelete);
+      dispatch({ type: 'DELETE_JOB', payload: state.jobToDelete });
+      fetchJobs();
     } catch (error: any) {
-      console.error('Error deleting jobs:', error);
-      const errorMessage = error.response?.data?.detail || error.response?.data?.message || error.message || 'An error occurred';
+      const msg = error.response?.data?.detail || error.message || 'Failed deleting job';
+      const name = getJobName(state.jobs.find((j) => j.job_id === state.jobToDelete)!);
       dispatch({
-        type: 'SET_DELETE_STATUS',
-        payload: {
-          show: true,
-          kind: 'error',
-          title: 'Delete failed',
-          subtitle: errorMessage,
-        },
+        type: 'SHOW_ERROR',
+        payload: { message: msg, jobName: name },
       });
-
-      // Hide error after 5 seconds
-      setTimeout(() => {
-        dispatch({ type: 'HIDE_DELETE_STATUS' });
-      }, 5000);
+    } finally {
+      dispatch({ type: 'SET_IS_DELETING', payload: false });
+      dispatch({ type: 'CLOSE_DELETE_MODAL' });
     }
   };
 
@@ -408,7 +437,7 @@ const JobMonitorPage = () => {
           })
         : 'N/A',
       duration: calculateDuration(job.submitted_at, job.completed_at),
-      actions: hasError ? (
+      view_action: hasError ? (
         <div className={styles.errorMessage}>
           <ErrorFilled size={16} className={styles.errorIcon} />
           <span>{getErrorMessage(job)}</span>
@@ -422,12 +451,41 @@ const JobMonitorPage = () => {
           View details
         </Button>
       ),
+      delete_action: (
+        <Button
+          hasIconOnly
+          kind="ghost"
+          size="sm"
+          renderIcon={TrashCan}
+          iconDescription="Delete"
+          onClick={() => dispatch({ type: 'OPEN_DELETE_MODAL', payload: job.job_id })}
+        />
+      ),
     };
   });
 
   return (
     <Theme theme={effectiveTheme}>
       <div className={styles.jobMonitorPage}>
+        {state.toastOpen && (
+          <ActionableNotification
+            actionButtonLabel="Try again"
+            aria-label="close notification"
+            kind="error"
+            closeOnEscape
+            title={`Delete job ${state.errorJobName} failed`}
+            subtitle={state.errorMessage}
+            onCloseButtonClick={() => {
+              dispatch({ type: 'HIDE_ERROR' });
+            }}
+            style={{
+              position: 'fixed',
+              top: '4rem',
+              right: '2rem',
+              zIndex: 9999,
+            }}
+          />
+        )}
         {/* Upload Status Notification */}
         {state.uploadStatus.show && (
           <div className={styles.notificationWrapper}>
@@ -475,29 +533,14 @@ const JobMonitorPage = () => {
               getHeaderProps,
               getRowProps,
               getTableProps,
-              getSelectionProps,
-              getToolbarProps,
-              getBatchActionProps,
-              selectedRows,
               getTableContainerProps,
             }) => {
-              const batchActionProps = getBatchActionProps();
-              
               return (
                 <TableContainer
                   {...getTableContainerProps()}
                   className={styles.tableContainer}
                 >
-                  <TableToolbar {...getToolbarProps()}>
-                    <TableBatchActions {...batchActionProps}>
-                      <TableBatchAction
-                        tabIndex={batchActionProps.shouldShowBatchActions ? 0 : -1}
-                        renderIcon={TrashCan}
-                        onClick={() => handleDeleteJobs(selectedRows)}
-                      >
-                        Delete
-                      </TableBatchAction>
-                    </TableBatchActions>
+                  <TableToolbar>
                     <TableToolbarContent>
                       <TableToolbarSearch
                         persistent
@@ -533,7 +576,6 @@ const JobMonitorPage = () => {
                   <Table {...getTableProps()} className={styles.table}>
                     <TableHead>
                       <TableRow>
-                        <TableSelectAll {...getSelectionProps()} />
                         {headers.map((header) => {
                           const { key, ...rest } = getHeaderProps({ header });
                           return (
@@ -547,7 +589,7 @@ const JobMonitorPage = () => {
                     <TableBody>
                       {rows.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={headers.length + 1} className={styles.emptyStateCell}>
+                          <TableCell colSpan={headers.length} className={styles.emptyStateCell}>
                             <NoDataEmptyState
                               illustrationTheme="light"
                               size="lg"
@@ -561,7 +603,6 @@ const JobMonitorPage = () => {
                           const { key: rowKey, ...rowProps } = getRowProps({ row });
                           return (
                             <TableRow key={rowKey} {...rowProps}>
-                              <TableSelectRow {...getSelectionProps({ row })} />
                               {row.cells.map((cell) => (
                                 <TableCell key={cell.id}>{cell.value}</TableCell>
                               ))}
@@ -716,6 +757,47 @@ const JobMonitorPage = () => {
             </div>
           )}
         </SidePanel>
+
+        {/* Delete Confirmation Modal */}
+        <Modal
+          open={state.showDeleteModal}
+          danger
+          size="sm"
+          modalLabel="Delete Job"
+          modalHeading="Confirm delete"
+          primaryButtonText="Delete"
+          secondaryButtonText="Cancel"
+          primaryButtonDisabled={!state.isConfirmed}
+          onRequestClose={() => dispatch({ type: 'CLOSE_DELETE_MODAL' })}
+          onRequestSubmit={handleDeleteConfirm}
+        >
+          <p>
+            Deleting a job permanently removes it from the system. This action cannot be undone.
+          </p>
+          <div>
+            <CheckboxGroup
+              legendText="Confirm job to be deleted"
+            >
+              <Checkbox
+                id="checkbox-delete-job"
+                labelText={
+                  <strong>
+                    {state.jobToDelete
+                      ? getJobName(state.jobs.find((j) => j.job_id === state.jobToDelete)!)
+                      : ''}
+                  </strong>
+                }
+                checked={state.isConfirmed}
+                onChange={(_, { checked }) =>
+                  dispatch({
+                    type: 'SET_CONFIRMED',
+                    payload: checked,
+                  })
+                }
+              />
+            </CheckboxGroup>
+          </div>
+        </Modal>
       </div>
     </Theme>
   );

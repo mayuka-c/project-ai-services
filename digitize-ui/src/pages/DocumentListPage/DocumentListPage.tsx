@@ -12,16 +12,15 @@ import {
   TableToolbar,
   TableToolbarContent,
   TableToolbarSearch,
-  TableBatchActions,
-  TableBatchAction,
-  TableSelectAll,
-  TableSelectRow,
   Pagination,
   Button,
   Modal,
   Theme,
   Link,
   Loading,
+  Checkbox,
+  CheckboxGroup,
+  ActionableNotification,
 } from '@carbon/react';
 import { Renew, TrashCan, Download, CheckmarkFilled, ErrorFilled, InProgress } from '@carbon/icons-react';
 import { useTheme } from '../../contexts/useTheme';
@@ -46,6 +45,11 @@ interface DocumentListState {
   loadingContent: boolean;
   showDeleteModal: boolean;
   docToDelete: string | null;
+  isConfirmed: boolean;
+  toastOpen: boolean;
+  errorMessage: string;
+  errorDocName: string;
+  isDeleting: boolean;
 }
 
 type DocumentListAction =
@@ -63,7 +67,12 @@ type DocumentListAction =
   | { type: 'OPEN_CONTENT_MODAL'; payload: { doc: Document; content: DocumentContentData } }
   | { type: 'CLOSE_CONTENT_MODAL' }
   | { type: 'OPEN_DELETE_MODAL'; payload: string }
-  | { type: 'CLOSE_DELETE_MODAL' };
+  | { type: 'CLOSE_DELETE_MODAL' }
+  | { type: 'SET_CONFIRMED'; payload: boolean }
+  | { type: 'SHOW_ERROR'; payload: { message: string; docName?: string } }
+  | { type: 'HIDE_ERROR' }
+  | { type: 'SET_IS_DELETING'; payload: boolean }
+  | { type: 'DELETE_DOCUMENT'; payload: string };
 
 const initialState: DocumentListState = {
   documents: [],
@@ -78,6 +87,11 @@ const initialState: DocumentListState = {
   loadingContent: false,
   showDeleteModal: false,
   docToDelete: null,
+  isConfirmed: false,
+  toastOpen: false,
+  errorMessage: '',
+  errorDocName: '',
+  isDeleting: false,
 };
 
 const documentListReducer = (
@@ -161,13 +175,41 @@ const documentListReducer = (
         ...state,
         docToDelete: action.payload,
         showDeleteModal: true,
+        toastOpen: false,
       };
     case 'CLOSE_DELETE_MODAL':
       return {
         ...state,
         showDeleteModal: false,
+        isConfirmed: false,
         docToDelete: null,
       };
+    case 'SET_CONFIRMED':
+      return { ...state, isConfirmed: action.payload };
+    case 'DELETE_DOCUMENT':
+      return {
+        ...state,
+        documents: state.documents.filter((d) => d.id !== action.payload),
+        showDeleteModal: false,
+        isConfirmed: false,
+      };
+    case 'SHOW_ERROR':
+      return {
+        ...state,
+        errorMessage: action.payload.message,
+        errorDocName: action.payload.docName ?? '',
+        toastOpen: true,
+        isDeleting: false,
+      };
+    case 'HIDE_ERROR':
+      return {
+        ...state,
+        toastOpen: false,
+        docToDelete: null,
+        errorDocName: '',
+      };
+    case 'SET_IS_DELETING':
+      return { ...state, isDeleting: action.payload };
     default:
       return state;
   }
@@ -177,7 +219,8 @@ const headers = [
   { key: 'name', header: 'Document name' },
   { key: 'status', header: 'Status' },
   { key: 'created_at', header: 'Created' },
-  { key: 'actions', header: '' },
+  { key: 'view_action', header: '' },
+  { key: 'delete_action', header: '' },
 ];
 
 const getStatusIcon = (status: string) => {
@@ -339,12 +382,23 @@ const DocumentListPage = () => {
 
   const handleDeleteConfirm = async () => {
     if (!state.docToDelete) return;
+
+    dispatch({ type: 'SET_IS_DELETING', payload: true });
+
     try {
       await deleteDocument(state.docToDelete);
-      dispatch({ type: 'CLOSE_DELETE_MODAL' });
+      dispatch({ type: 'DELETE_DOCUMENT', payload: state.docToDelete });
       fetchDocuments();
-    } catch (error) {
-      console.error('Error deleting document:', error);
+    } catch (error: any) {
+      const msg = error.response?.data?.detail || error.message || 'Failed deleting document';
+      const name = state.documents.find((d) => d.id === state.docToDelete)?.name || '';
+      dispatch({
+        type: 'SHOW_ERROR',
+        payload: { message: msg, docName: name },
+      });
+    } finally {
+      dispatch({ type: 'SET_IS_DELETING', payload: false });
+      dispatch({ type: 'CLOSE_DELETE_MODAL' });
     }
   };
 
@@ -367,7 +421,7 @@ const DocumentListPage = () => {
           hour12: true,
         })
       : 'N/A',
-    actions: (
+    view_action: (
       <Button
         kind="ghost"
         size="sm"
@@ -376,27 +430,42 @@ const DocumentListPage = () => {
         View content
       </Button>
     ),
+    delete_action: (
+      <Button
+        hasIconOnly
+        kind="ghost"
+        size="sm"
+        renderIcon={TrashCan}
+        iconDescription="Delete"
+        onClick={() => dispatch({ type: 'OPEN_DELETE_MODAL', payload: doc.id })}
+      />
+    ),
   }));
 
   const noSearchResults = state.documents.length === 0 && state.search;
 
-  const handleDeleteJobs = async (selectedRows: any[]) => {
-    try {
-      const docIds = selectedRows.map(row => row.id);
-      
-      for (const docId of docIds) {
-        await deleteDocument(docId);
-      }
-      
-      fetchDocuments();
-    } catch (error) {
-      console.error('Error deleting documents:', error);
-    }
-  };
-
   return (
     <Theme theme={effectiveTheme}>
       <div className={styles.documentListPage}>
+        {state.toastOpen && (
+          <ActionableNotification
+            actionButtonLabel="Try again"
+            aria-label="close notification"
+            kind="error"
+            closeOnEscape
+            title={`Delete document ${state.errorDocName} failed`}
+            subtitle={state.errorMessage}
+            onCloseButtonClick={() => {
+              dispatch({ type: 'HIDE_ERROR' });
+            }}
+            style={{
+              position: 'fixed',
+              top: '4rem',
+              right: '2rem',
+              zIndex: 9999,
+            }}
+          />
+        )}
         {/* Page Header */}
         <div className={styles.pageHeader}>
           <div className={styles.headerContent}>
@@ -416,29 +485,14 @@ const DocumentListPage = () => {
               getHeaderProps,
               getRowProps,
               getTableProps,
-              getSelectionProps,
-              getToolbarProps,
-              getBatchActionProps,
-              selectedRows,
               getTableContainerProps,
             }) => {
-              const batchActionProps = getBatchActionProps();
-              
               return (
                 <TableContainer
                   {...getTableContainerProps()}
                   className={styles.tableContainer}
                 >
-                  <TableToolbar {...getToolbarProps()}>
-                    <TableBatchActions {...batchActionProps}>
-                      <TableBatchAction
-                        tabIndex={batchActionProps.shouldShowBatchActions ? 0 : -1}
-                        renderIcon={TrashCan}
-                        onClick={() => handleDeleteJobs(selectedRows)}
-                      >
-                        Delete
-                      </TableBatchAction>
-                    </TableBatchActions>
+                  <TableToolbar>
                     <TableToolbarContent>
                       <TableToolbarSearch
                         persistent
@@ -467,7 +521,6 @@ const DocumentListPage = () => {
                   <Table {...getTableProps()} className={styles.table}>
                     <TableHead>
                       <TableRow>
-                        <TableSelectAll {...getSelectionProps()} />
                         {headers.map((header) => {
                           const { key, ...rest } = getHeaderProps({ header });
                           return (
@@ -481,7 +534,7 @@ const DocumentListPage = () => {
                     <TableBody>
                       {rows.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={headers.length + 1} className={styles.emptyStateCell}>
+                          <TableCell colSpan={headers.length} className={styles.emptyStateCell}>
                             <NoDataEmptyState
                               illustrationTheme="light"
                               size="lg"
@@ -495,7 +548,6 @@ const DocumentListPage = () => {
                           const { key: rowKey, ...rowProps } = getRowProps({ row });
                           return (
                             <TableRow key={rowKey} {...rowProps}>
-                              <TableSelectRow {...getSelectionProps({ row })} />
                               {row.cells.map((cell) => (
                                 <TableCell key={cell.id}>{cell.value}</TableCell>
                               ))}
@@ -545,14 +597,41 @@ const DocumentListPage = () => {
       <Modal
         open={state.showDeleteModal}
         danger
-        onRequestClose={() => dispatch({ type: 'CLOSE_DELETE_MODAL' })}
-        modalHeading="Delete Document"
+        size="sm"
+        modalLabel="Delete Document"
+        modalHeading="Confirm delete"
         primaryButtonText="Delete"
         secondaryButtonText="Cancel"
+        primaryButtonDisabled={!state.isConfirmed}
+        onRequestClose={() => dispatch({ type: 'CLOSE_DELETE_MODAL' })}
         onRequestSubmit={handleDeleteConfirm}
-        onSecondarySubmit={() => dispatch({ type: 'CLOSE_DELETE_MODAL' })}
       >
-        <p>Are you sure you want to delete this document? This action cannot be undone.</p>
+        <p>
+          Deleting a document permanently removes it from the system. This action cannot be undone.
+        </p>
+        <div>
+          <CheckboxGroup
+            legendText="Confirm document to be deleted"
+          >
+            <Checkbox
+              id="checkbox-delete-doc"
+              labelText={
+                <strong>
+                  {state.docToDelete
+                    ? state.documents.find((d) => d.id === state.docToDelete)?.name || 'Document'
+                    : ''}
+                </strong>
+              }
+              checked={state.isConfirmed}
+              onChange={(_, { checked }) =>
+                dispatch({
+                  type: 'SET_CONFIRMED',
+                  payload: checked,
+                })
+              }
+            />
+          </CheckboxGroup>
+        </div>
       </Modal>
     </div>
     </Theme>
