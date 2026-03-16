@@ -11,8 +11,6 @@ import {
   TableToolbar,
   TableToolbarContent,
   TableToolbarSearch,
-  TableToolbarMenu,
-  TableToolbarAction,
   TableBatchActions,
   TableBatchAction,
   TableSelectAll,
@@ -25,7 +23,7 @@ import {
   InlineNotification,
 } from '@carbon/react';
 import { SidePanel, NoDataEmptyState } from '@carbon/ibm-products';
-import { Download, Renew, Settings, Add, CheckmarkFilled, InProgress, ErrorFilled, TrashCan } from '@carbon/icons-react';
+import { Download, Renew, Add, CheckmarkFilled, InProgress, ErrorFilled, TrashCan } from '@carbon/icons-react';
 import { useTheme } from '../../contexts/useTheme';
 import { getAllJobs, getJobById, uploadDocuments, deleteJob, bulkDeleteJobs, Job } from '../../services/api';
 import IngestSidePanel from '../../components/IngestSidePanel';
@@ -462,7 +460,7 @@ const JobMonitorPage = () => {
         <div className={styles.pageHeader}>
           <div className={styles.headerContent}>
             <h1 className={styles.pageTitle}>Ingested documents log</h1>
-            <Link href="#" className={styles.learnMore}>
+            <Link href="https://www.ibm.com/docs/en/aiservices/2025.12.0?topic=services-introduction" className={styles.learnMore} target="_blank" rel="noopener noreferrer">
               Learn more →
             </Link>
           </div>
@@ -523,20 +521,6 @@ const JobMonitorPage = () => {
                         disabled={state.loading}
                         tooltipPosition="bottom"
                       />
-                      <TableToolbarMenu
-                        renderIcon={Settings}
-                        iconDescription="Settings"
-                      >
-                        <TableToolbarAction onClick={() => console.log('Action 1')}>
-                          Action 1
-                        </TableToolbarAction>
-                        <TableToolbarAction onClick={() => console.log('Action 2')}>
-                          Action 2
-                        </TableToolbarAction>
-                        <TableToolbarAction onClick={() => console.log('Action 3')}>
-                          Action 3
-                        </TableToolbarAction>
-                      </TableToolbarMenu>
                       <Button
                         kind="primary"
                         renderIcon={Add}

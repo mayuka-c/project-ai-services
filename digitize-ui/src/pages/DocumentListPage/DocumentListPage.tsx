@@ -401,7 +401,7 @@ const DocumentListPage = () => {
         <div className={styles.pageHeader}>
           <div className={styles.headerContent}>
             <h1 className={styles.pageTitle}>Documents</h1>
-            <Link href="#" className={styles.learnMore}>
+            <Link href="https://www.ibm.com/docs/en/aiservices/2025.12.0?topic=services-introduction" className={styles.learnMore} target="_blank" rel="noopener noreferrer">
               Learn more →
             </Link>
           </div>
