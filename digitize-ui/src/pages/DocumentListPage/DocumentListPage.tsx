@@ -24,6 +24,7 @@ import {
   ActionableNotification,
   TextInput,
   InlineLoading,
+  Tooltip,
 } from '@carbon/react';
 import { Renew, TrashCan, Download, CheckmarkFilled, ErrorFilled, InProgress } from '@carbon/icons-react';
 import { useTheme } from '../../contexts/useTheme';
@@ -535,45 +536,64 @@ const DocumentListPage = () => {
     }
   };
 
-  const rows = state.documents.map((doc) => ({
-    id: doc.id,
-    name: doc.name || doc.filename || 'N/A',
-    status: (
-      <div className={styles.statusCell}>
-        {getStatusIcon(doc.status)}
-        <span className={styles.statusText}>{doc.status}</span>
-      </div>
-    ),
-    submitted_at: doc.submitted_at
-      ? new Date(doc.submitted_at).toLocaleString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          year: 'numeric',
-          hour: 'numeric',
-          minute: '2-digit',
-          hour12: true,
-        })
-      : 'N/A',
-    view_action: (
-      <Button
-        kind="ghost"
-        size="sm"
-        onClick={() => handleViewContent(doc)}
-      >
-        View content
-      </Button>
-    ),
-    delete_action: (
-      <Button
-        hasIconOnly
-        kind="ghost"
-        size="sm"
-        renderIcon={TrashCan}
-        iconDescription="Delete"
-        onClick={() => dispatch({ type: 'OPEN_DELETE_MODAL', payload: doc.id })}
-      />
-    ),
-  }));
+  const rows = state.documents.map((doc) => {
+    const hasError = doc.status === 'failed';
+    
+    return {
+      id: doc.id,
+      name: doc.name || doc.filename || 'N/A',
+      status: (
+        <div className={styles.statusCell}>
+          {getStatusIcon(doc.status)}
+          <span className={styles.statusText}>{doc.status}</span>
+          {hasError && (
+            <Tooltip
+              align="top"
+              label="Document processing failed. Please try re-uploading the document."
+              className={styles.errorTooltip}
+            >
+              <button
+                type="button"
+                className={styles.errorInfoButton}
+                aria-label="Error details"
+              >
+                <ErrorFilled size={16} className={styles.errorInfoIcon} />
+              </button>
+            </Tooltip>
+          )}
+        </div>
+      ),
+      submitted_at: doc.submitted_at
+        ? new Date(doc.submitted_at).toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+          })
+        : 'N/A',
+      view_action: (
+        <Button
+          kind="ghost"
+          size="sm"
+          onClick={() => handleViewContent(doc)}
+        >
+          View content
+        </Button>
+      ),
+      delete_action: (
+        <Button
+          hasIconOnly
+          kind="ghost"
+          size="sm"
+          renderIcon={TrashCan}
+          iconDescription="Delete"
+          onClick={() => dispatch({ type: 'OPEN_DELETE_MODAL', payload: doc.id })}
+        />
+      ),
+    };
+  });
 
   const noSearchResults = state.documents.length === 0 && state.search;
 

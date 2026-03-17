@@ -24,6 +24,7 @@ import {
   ActionableNotification,
   TextInput,
   InlineLoading,
+  Tooltip,
 } from '@carbon/react';
 import { SidePanel, NoDataEmptyState } from '@carbon/ibm-products';
 import { Download, Renew, Add, CheckmarkFilled, InProgress, ErrorFilled, TrashCan } from '@carbon/icons-react';
@@ -583,6 +584,21 @@ const JobMonitorPage = () => {
         <div className={styles.statusCell}>
           {getStatusIcon(jobStatus)}
           <span className={styles.statusText}>{jobStatus}</span>
+          {hasError && (
+            <Tooltip
+              align="top"
+              label={getErrorMessage(job)}
+              className={styles.errorTooltip}
+            >
+              <button
+                type="button"
+                className={styles.errorInfoButton}
+                aria-label="Error details"
+              >
+                <ErrorFilled size={16} className={styles.errorInfoIcon} />
+              </button>
+            </Tooltip>
+          )}
         </div>
       ),
       started: job.submitted_at
@@ -596,12 +612,7 @@ const JobMonitorPage = () => {
           })
         : 'N/A',
       duration: calculateDuration(job.submitted_at, job.completed_at),
-      view_action: hasError ? (
-        <div className={styles.errorMessage}>
-          <ErrorFilled size={16} className={styles.errorIcon} />
-          <span>{getErrorMessage(job)}</span>
-        </div>
-      ) : (
+      view_action: (
         <Button
           kind="ghost"
           size="sm"
