@@ -20,6 +20,8 @@ import {
   CheckboxGroup,
   ActionableNotification,
   Modal,
+  TextInput,
+  InlineLoading,
   type DataTableHeader,
 } from "@carbon/react";
 import {
@@ -118,19 +120,27 @@ const initialState: AppState = {
   rowsData: rows,
   selectedRowId: null,
   toastOpen: false,
-  errorMessage: "",
-  errorRowName: "",
+  deleteErrorMessage: "",
+  deleteErrorRowName: "",
   isDeleting: false,
+  hasError: false,
+  isExportDialogOpen: false,
+  csvFileName: "",
+  exportStatus: "idle",
+  exportErrorMessage: "",
 };
 
 const appReducer = (state: AppState, action: AppAction): AppState => {
   switch (action.type) {
     case ACTION_TYPES.SET_SEARCH:
       return { ...state, search: action.payload };
+
     case ACTION_TYPES.SET_PAGE:
       return { ...state, page: action.payload };
+
     case ACTION_TYPES.SET_PAGE_SIZE:
       return { ...state, pageSize: action.payload };
+
     case ACTION_TYPES.OPEN_DELETE_DIALOG:
       return {
         ...state,
@@ -138,15 +148,18 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
         isDeleteDialogOpen: true,
         toastOpen: false,
       };
+
     case ACTION_TYPES.CLOSE_DELETE_DIALOG:
       return {
         ...state,
         isDeleteDialogOpen: false,
         isConfirmed: false,
-        selectedRowId: null,
+        selectedRowId: state.hasError ? state.selectedRowId : null,
       };
+
     case ACTION_TYPES.SET_CONFIRMED:
       return { ...state, isConfirmed: action.payload };
+
     case ACTION_TYPES.DELETE_ROW:
       return {
         ...state,
@@ -154,23 +167,62 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
         isDeleteDialogOpen: false,
         isConfirmed: false,
       };
+
     case ACTION_TYPES.SHOW_ERROR:
       return {
         ...state,
-        errorMessage: action.payload.message,
-        errorRowName: action.payload.rowName ?? "",
+        deleteErrorMessage: action.payload.message,
+        deleteErrorRowName: action.payload.rowName ?? "",
         toastOpen: true,
         isDeleting: false,
+        hasError: true,
       };
+
     case ACTION_TYPES.HIDE_ERROR:
       return {
         ...state,
         toastOpen: false,
         selectedRowId: null,
-        errorRowName: "",
+        hasError: false,
+        deleteErrorRowName: "",
       };
+
     case ACTION_TYPES.SET_IS_DELETING:
       return { ...state, isDeleting: action.payload };
+
+    case ACTION_TYPES.SET_SELECTED_ROW_ID:
+      return { ...state, selectedRowId: action.payload };
+
+    case ACTION_TYPES.OPEN_EXPORT_DIALOG:
+      return {
+        ...state,
+        isExportDialogOpen: true,
+        csvFileName: "",
+        exportErrorMessage: "",
+        exportStatus: "idle",
+      };
+
+    case ACTION_TYPES.CLOSE_EXPORT_DIALOG:
+      return {
+        ...state,
+        isExportDialogOpen: false,
+      };
+
+    case ACTION_TYPES.SET_CSV_FILENAME:
+      return { ...state, csvFileName: action.payload };
+
+    case ACTION_TYPES.SET_EXPORT_STATUS:
+      return { ...state, exportStatus: action.payload };
+
+    case ACTION_TYPES.SET_EXPORT_ERROR:
+      return {
+        ...state,
+        exportErrorMessage: action.payload,
+      };
+
+    case ACTION_TYPES.CLEAR_EXPORT_ERROR:
+      return { ...state, exportErrorMessage: "" };
+
     default:
       return state;
   }
@@ -217,6 +269,75 @@ const ApplicationsListPage = () => {
       dispatch({ type: ACTION_TYPES.CLOSE_DELETE_DIALOG }); // still ok; the name is preserved
     }
   };
+
+  const downloadCSV = async () => {
+    const name = state.csvFileName.trim();
+
+    if (!name) {
+      dispatch({
+        type: ACTION_TYPES.SET_EXPORT_ERROR,
+        payload: "Provide a valid file name",
+      });
+      return;
+    }
+
+    const filename = `${name.replace(/\.[^/.]+$/, "")}.csv`;
+
+    if (filteredRows.length === 0) {
+      dispatch({
+        type: ACTION_TYPES.SET_EXPORT_ERROR,
+        payload: "No data available to export",
+      });
+      return;
+    }
+
+    dispatch({
+      type: ACTION_TYPES.SET_EXPORT_STATUS,
+      payload: "exporting",
+    });
+
+    try {
+      const exportableHeaders = headers.filter((h) => h.key !== "actions");
+      const csvHeaders = exportableHeaders.map((h) => h.header);
+
+      const escapeCSV = (value: unknown) =>
+        `"${String(value ?? "").replace(/"/g, '""')}"`;
+
+      const csvRows = filteredRows.map((row) =>
+        exportableHeaders.map((h) =>
+          escapeCSV(row[h.key as keyof ApplicationRow]),
+        ),
+      );
+
+      const csv = [csvHeaders, ...csvRows].map((r) => r.join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      dispatch({
+        type: ACTION_TYPES.SET_EXPORT_STATUS,
+        payload: "success",
+      });
+    } catch {
+      dispatch({
+        type: ACTION_TYPES.SET_EXPORT_STATUS,
+        payload: "error",
+      });
+
+      dispatch({
+        type: ACTION_TYPES.SET_EXPORT_ERROR,
+        payload:
+          "An error occurred while exporting the CSV file. Please try again.",
+      });
+    }
+  };
+
   const filteredRows = state.rowsData.filter((row) =>
     [
       row.name,
@@ -248,10 +369,19 @@ const ApplicationsListPage = () => {
           aria-label="close notification"
           kind="error"
           closeOnEscape
-          title={`Delete technical template ${state.errorRowName} failed`}
-          subtitle={state.errorMessage}
+          title={`Delete technical template ${state.deleteErrorRowName} failed`}
+          subtitle={state.deleteErrorMessage}
           onCloseButtonClick={() => {
             dispatch({ type: ACTION_TYPES.HIDE_ERROR });
+          }}
+          onActionButtonClick={async () => {
+            const currentRowId = state.selectedRowId;
+            dispatch({ type: ACTION_TYPES.HIDE_ERROR });
+            dispatch({
+              type: ACTION_TYPES.SET_SELECTED_ROW_ID,
+              payload: currentRowId,
+            });
+            await handleDelete();
           }}
           style={{
             position: "fixed",
@@ -318,6 +448,9 @@ const ApplicationsListPage = () => {
                           renderIcon={Download}
                           iconDescription="Download"
                           size="lg"
+                          onClick={() =>
+                            dispatch({ type: ACTION_TYPES.OPEN_EXPORT_DIALOG })
+                          }
                         />
                         <Button
                           hasIconOnly
@@ -459,7 +592,7 @@ const ApplicationsListPage = () => {
             <Modal
               open={state.isDeleteDialogOpen}
               size="sm"
-              modalLabel="Delete Case routing"
+              modalLabel={`Delete ${state.rowsData.find((r) => r.id === state.selectedRowId)?.name || "Application"}`}
               modalHeading="Confirm delete"
               primaryButtonText="Delete"
               secondaryButtonText="Cancel"
@@ -502,6 +635,62 @@ const ApplicationsListPage = () => {
                   />
                 </CheckboxGroup>
               </div>
+            </Modal>
+            <Modal
+              open={state.isExportDialogOpen}
+              size="sm"
+              modalHeading="Export as CSV"
+              passiveModal={state.exportStatus !== "idle"}
+              preventCloseOnClickOutside
+              {...(state.exportStatus === "idle" && {
+                primaryButtonText: "Export",
+                secondaryButtonText: "Cancel",
+                onRequestSubmit: downloadCSV,
+              })}
+              onRequestClose={() =>
+                dispatch({ type: ACTION_TYPES.CLOSE_EXPORT_DIALOG })
+              }
+            >
+              {state.exportStatus === "idle" && (
+                <TextInput
+                  id="csv-file-name"
+                  labelText="File name"
+                  value={state.csvFileName}
+                  invalid={!!state.exportErrorMessage}
+                  invalidText={state.exportErrorMessage}
+                  onChange={(e) => {
+                    dispatch({
+                      type: ACTION_TYPES.SET_CSV_FILENAME,
+                      payload: e.target.value,
+                    });
+                    dispatch({ type: ACTION_TYPES.CLEAR_EXPORT_ERROR });
+                  }}
+                />
+              )}
+
+              {state.exportStatus === "exporting" && (
+                <div className={styles.exportStatus}>
+                  <InlineLoading status="active" description="Exporting..." />
+                </div>
+              )}
+
+              {state.exportStatus === "success" && (
+                <div className={styles.exportStatus}>
+                  <InlineLoading
+                    status="finished"
+                    description="The file has been exported"
+                  />
+                </div>
+              )}
+
+              {state.exportStatus === "error" && (
+                <div className={styles.exportStatus}>
+                  <InlineLoading
+                    status="error"
+                    description={state.exportErrorMessage}
+                  />
+                </div>
+              )}
             </Modal>
           </Column>
         </Grid>

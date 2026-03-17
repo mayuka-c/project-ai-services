@@ -20,6 +20,6 @@
 
 .loginLink {
   @include type.type-style("body-compact-01");
-  color: var(cds--link-primary);
+  color: var(--cds-link-primary);
   text-decoration: none;
 }
