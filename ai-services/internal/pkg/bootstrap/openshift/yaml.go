@@ -5,13 +5,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"github.com/project-ai-services/ai-services/internal/pkg/constants"
+	"github.com/project-ai-services/ai-services/internal/pkg/logger"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime/openshift"
 	"github.com/project-ai-services/ai-services/internal/pkg/spinner"
+	"github.com/project-ai-services/ai-services/internal/pkg/utils"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	apiyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,39 +87,76 @@ func applyObject(c *openshift.OpenshiftClient, object *unstructured.Unstructured
 	}
 
 	groupVersionKind := object.GroupVersionKind()
+	kind := groupVersionKind.Kind
 
-	// Special handling for Subscription objects - check if package already exists
-	if groupVersionKind.Kind == "Subscription" {
-		s = spinner.New("Applying operator configurations")
-		s.Start(c.Ctx)
-
-		if shouldSkipSubscription(c, object) {
-			return nil
-		}
+	// Pre-apply handling based on resource kind
+	skip, err := handlePreApply(c, object, kind)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
 	}
 
 	objDesc := fmt.Sprintf("(%s) %s/%s", groupVersionKind.String(), namespace, name)
 
 	// Apply the k8s object with provided version kind in given namespace.
-	err := c.Client.Apply(c.Ctx, client.ApplyConfigurationFromUnstructured(object), &client.ApplyOptions{FieldManager: constants.AIServices})
+	err = c.Client.Apply(c.Ctx, client.ApplyConfigurationFromUnstructured(object), &client.ApplyOptions{FieldManager: constants.AIServices})
 	if err != nil {
 		return fmt.Errorf("could not create %s. Error: %v", objDesc, err.Error())
 	}
 
-	// If this is a subscription, wait for the operator to be ready
-	if groupVersionKind.Kind == "Subscription" {
-		packageName, found, err := unstructured.NestedString(object.Object, "spec", "name")
-		if err == nil && found && packageName != "" {
-			operatorLabel := getOperatorLabel(packageName)
-			if err := waitForOperator(c, packageName, namespace); err != nil {
-				s.Fail(fmt.Sprintf("%s is not ready", operatorLabel))
+	// Post-apply handling based on resource kind
+	return handlePostApply(c, object, kind, namespace)
+}
 
-				return fmt.Errorf("operator %s not ready: %w", packageName, err)
-			}
-			// Print success message
-			s.Stop(fmt.Sprintf("%s is up and ready", operatorLabel))
+// handlePreApply performs pre-apply checks and modifications based on resource kind.
+// Returns true if the resource should be skipped.
+func handlePreApply(c *openshift.OpenshiftClient, object *unstructured.Unstructured, kind string) (bool, error) {
+	switch kind {
+	case "Subscription":
+		s = spinner.New("Applying operator configurations")
+		s.Start(c.Ctx)
+
+		if shouldSkipSubscription(c, object) {
+			return true, nil
+		}
+
+	case "DSCInitialization", "DataScienceCluster":
+		// Handle single-instance RHODS resources
+		if shouldSkipOrUpdateRHODSResource(c, object) {
+			return true, nil
 		}
 	}
+
+	return false, nil
+}
+
+// handlePostApply performs post-apply actions based on resource kind.
+func handlePostApply(c *openshift.OpenshiftClient, object *unstructured.Unstructured, kind, namespace string) error {
+	switch kind {
+	case "Subscription":
+		return handleSubscriptionPostApply(c, object, namespace)
+	default:
+		return nil
+	}
+}
+
+// handleSubscriptionPostApply waits for an operator to be ready after subscription is applied.
+func handleSubscriptionPostApply(c *openshift.OpenshiftClient, object *unstructured.Unstructured, namespace string) error {
+	packageName, found, err := unstructured.NestedString(object.Object, "spec", "name")
+	if err != nil || !found || packageName == "" {
+		return nil
+	}
+
+	operatorLabel := getOperatorLabel(packageName)
+	if err := waitForOperator(c, packageName, namespace); err != nil {
+		s.Fail(fmt.Sprintf("%s is not ready", operatorLabel))
+
+		return fmt.Errorf("operator %s not ready: %w", packageName, err)
+	}
+
+	s.Stop(fmt.Sprintf("%s is up and ready", operatorLabel))
 
 	return nil
 }
@@ -229,4 +270,46 @@ func getOperatorLabel(packageName string) string {
 	}
 
 	return packageName
+}
+
+// shouldSkipOrUpdateRHODSResource handles single-instance RHODS resources (DSC, DSCI).
+// Returns true if the resource should be skipped.
+func shouldSkipOrUpdateRHODSResource(c *openshift.OpenshiftClient, object *unstructured.Unstructured) bool {
+	kind := object.GetKind()
+
+	// Check if resource already exists
+	gvk := schema.GroupVersionKind{
+		Group:   strings.ToLower(kind) + ".opendatahub.io",
+		Version: constants.VersionV2,
+		Kind:    kind,
+	}
+	existingResource, exists, err := utils.GetExistingCustomResource(c, gvk)
+	if err != nil {
+		logger.Infof("Error checking for existing %s: %v", kind, err, logger.VerbosityLevelDebug)
+
+		return false
+	}
+
+	if !exists {
+		// Resource doesn't exist, proceed with creation
+		return false
+	}
+
+	existingName := existingResource.GetName()
+	logger.Infof("Found existing %s named '%s'", kind, existingName, logger.VerbosityLevelDebug)
+
+	// Check if resource has re-apply annotation set to false
+	annotations := object.GetAnnotations()
+	if annotations != nil {
+		if reApply, ok := annotations["ai-services.io/re-apply"]; ok && reApply == "false" {
+			logger.Infof("Skipping %s as re-apply annotation is set to false", kind, logger.VerbosityLevelDebug)
+
+			return true
+		}
+	}
+
+	// Update the object name to match existing resource
+	object.SetName(existingName)
+
+	return false
 }

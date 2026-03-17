@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/project-ai-services/ai-services/assets"
@@ -20,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -98,7 +96,7 @@ func waitForAllCRs(client *openshift.OpenshiftClient) error {
 	s = spinner.New("Waiting for DSCInitialization to be ready")
 	s.Start(client.Ctx)
 
-	err = waitForRHODSResource(client, "DSCInitialization", "default-dsci")
+	err = waitForRHODSResource(client, "DSCInitialization")
 	if err != nil {
 		s.Fail("DSCInitialization not ready")
 
@@ -110,7 +108,7 @@ func waitForAllCRs(client *openshift.OpenshiftClient) error {
 	s = spinner.New("Waiting for DataScienceCluster to be ready")
 	s.Start(client.Ctx)
 
-	err = waitForRHODSResource(client, "DataScienceCluster", "default-dsc")
+	err = waitForRHODSResource(client, "DataScienceCluster")
 	if err != nil {
 		s.Fail("DataScienceCluster not ready")
 
@@ -131,15 +129,6 @@ func applyYamlsFromFolder(client *openshift.OpenshiftClient, folder string) erro
 	yamls, err := tp.LoadYamls()
 	if err != nil {
 		return fmt.Errorf("error loading yamls from %s: %w", folder, err)
-	}
-
-	switch folder {
-	case operandFolder:
-		// For operands, check if single instance resource already exist and update existing ones
-		yamls, err = handleExistingOperands(client, yamls)
-		if err != nil {
-			return fmt.Errorf("error handling existing operands: %w", err)
-		}
 	}
 
 	for _, yaml := range yamls {
@@ -306,104 +295,27 @@ func waitForSpyreClusterPolicy(client *openshift.OpenshiftClient) error {
 	})
 }
 
-// handleExistingOperands checks if single instance resources already exist and update existing one's name.
-func handleExistingOperands(client *openshift.OpenshiftClient, yamls [][]byte) ([][]byte, error) {
-	resources := []string{
-		"DSCInitialization", "DataScienceCluster",
-	}
-
-	existingResources := make(map[string]string)
-	for _, kind := range resources {
+func waitForRHODSResource(client *openshift.OpenshiftClient, kind string) error {
+	return wait.PollUntilContextTimeout(client.Ctx, constants.OperatorPollInterval, constants.OperatorPollTimeout, true, func(ctx context.Context) (bool, error) {
+		// Get the existing resource from the cluster
 		gvk := schema.GroupVersionKind{
 			Group:   strings.ToLower(kind) + ".opendatahub.io",
-			Version: "v2",
+			Version: constants.VersionV2,
 			Kind:    kind,
 		}
-		if obj, exists, err := utils.GetExistingCustomResource(client, gvk); err != nil {
-			return nil, fmt.Errorf("error checking for existing %s: %w", kind, err)
-		} else if exists {
-			name := obj.GetName()
-			if name == "" {
-				return nil, fmt.Errorf("existing %s has no name", kind)
-			}
-			existingResources[kind] = name
-			logger.Infof("\nFound existing %s named '%s'", kind, name, logger.VerbosityLevelDebug)
-		}
-	}
-
-	updatedYamls := make([][]byte, 0, len(yamls))
-
-	for _, yamlBytes := range yamls {
-		updatedYaml, err := updateRHODSResourceNames(yamlBytes, existingResources, resources)
+		resource, exists, err := utils.GetExistingCustomResource(client, gvk)
 		if err != nil {
-			return nil, err
-		}
-		// Skip nil YAMLs (resources that should not be applied)
-		if updatedYaml != nil {
-			updatedYamls = append(updatedYamls, updatedYaml)
-		}
-	}
-
-	return updatedYamls, nil
-}
-
-// updateRHODSResourceNames checks if single instance resources exist and updates their names in the YAML.
-func updateRHODSResourceNames(yamlBytes []byte, existingResources map[string]string, resources []string) ([]byte, error) {
-	obj := &unstructured.Unstructured{}
-	if err := yaml.Unmarshal(yamlBytes, obj); err != nil {
-		// return nil here as file can be multi-resource YAML
-		return yamlBytes, nil
-	}
-
-	kind := obj.GetKind()
-	if !slices.Contains(resources, kind) {
-		// resource is not single instance, we skip it
-		return yamlBytes, nil
-	}
-
-	existingName, exists := existingResources[kind]
-	if !exists {
-		// resource does not exist, we create it
-		return yamlBytes, nil
-	}
-
-	annotations := obj.GetAnnotations()
-	if annotations != nil {
-		if reApply, ok := annotations["ai-services.io/re-apply"]; ok && reApply == "false" {
-			// we skip resources which have re-apply annotation set to false
-			return nil, nil
-		}
-	}
-
-	obj.SetName(existingName)
-	updatedYaml, err := yaml.Marshal(obj)
-	if err != nil {
-		return nil, err
-	}
-
-	return updatedYaml, nil
-}
-
-func waitForRHODSResource(client *openshift.OpenshiftClient, kind, name string) error {
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   strings.ToLower(kind) + ".opendatahub.io",
-		Version: "v2",
-		Kind:    kind,
-	})
-
-	return wait.PollUntilContextTimeout(client.Ctx, constants.OperatorPollInterval, constants.OperatorPollTimeout, true, func(ctx context.Context) (bool, error) {
-		if err := client.Client.Get(ctx, k8stypes.NamespacedName{Name: name}, obj); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Infof("%s not found yet, waiting...", kind, logger.VerbosityLevelDebug)
-
-				return false, nil
-			}
-
 			return false, fmt.Errorf("failed to get %s: %w", kind, err)
 		}
 
-		phase, found, err := unstructured.NestedString(obj.Object, "status", "phase")
+		if !exists {
+			logger.Infof("%s not found yet, waiting...", kind, logger.VerbosityLevelDebug)
+
+			return false, nil
+		}
+
+		// Check the status.phase of the resource
+		phase, found, err := unstructured.NestedString(resource.Object, "status", "phase")
 		if err != nil {
 			return false, fmt.Errorf("failed to parse status.phase: %w", err)
 		}
