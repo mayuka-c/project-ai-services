@@ -303,8 +303,29 @@ const DocumentListPage = () => {
           totalItems: response.pagination?.total || 0,
         },
       });
-    } catch (error) {
-      console.error('Error fetching documents:', error);
+    } catch (error: any) {
+      
+      // Handle 5xx server errors with appropriate user-facing messages
+      if (error.response && error.response.status >= 500 && error.response.status < 600) {
+        const errorMessage = error.response.status === 503
+          ? 'The service is temporarily unavailable. Please try again in a few moments.'
+          : 'A server error occurred while fetching documents. Please try again later.';
+        
+        dispatch({
+          type: 'SHOW_ERROR',
+          payload: {
+            message: errorMessage,
+          },
+        });
+      } else if (error.code === 'ECONNABORTED' || error.message === 'Network Error') {
+        // Handle network/timeout errors
+        dispatch({
+          type: 'SHOW_ERROR',
+          payload: {
+            message: 'Unable to connect to the server. Please check your network connection and try again.',
+          },
+        });
+      }
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
@@ -565,8 +586,12 @@ const DocumentListPage = () => {
             aria-label="close notification"
             kind="error"
             closeOnEscape
-            title={`Delete document ${state.errorDocName} failed`}
+            title={state.errorDocName ? `Delete document ${state.errorDocName} failed` : 'Error loading documents'}
             subtitle={state.errorMessage}
+            onActionButtonClick={() => {
+              dispatch({ type: 'HIDE_ERROR' });
+              fetchDocuments();
+            }}
             onCloseButtonClick={() => {
               dispatch({ type: 'HIDE_ERROR' });
             }}
