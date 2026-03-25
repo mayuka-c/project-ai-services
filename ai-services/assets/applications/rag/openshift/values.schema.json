@@ -12,6 +12,16 @@
         "storage": {
           "type": "string",
           "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei)$"
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "password": {
+              "type": "string",
+              "pattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&#^()_+\\-=\\[\\]{};':\"\\\\|,.<>\\/`~])[A-Za-z\\d@$!%*?&#^()_+\\-=\\[\\]{};':\"\\\\|,.<>\\/`~]{8,}$",
+              "description": "Password must be at least 8 characters and contain at least one uppercase letter, one lowercase letter, one digit, and one special character"
+            }
+          }
         }
       }
     }
