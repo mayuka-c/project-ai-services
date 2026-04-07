@@ -151,13 +151,7 @@ func (pc *PodmanClient) StopPod(id string) error {
 }
 
 func (pc *PodmanClient) StartPod(id string) error {
-	//nolint:godox
-	// TODO: perform pod start SDK way
-	cmdExec := exec.Command("podman", "pod", "start", id)
-	cmdExec.Stdout = os.Stdout
-	cmdExec.Stderr = os.Stderr
-
-	err := cmdExec.Run()
+	_, err := pods.Start(pc.Context, id, &pods.StartOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to start the pod: %w", err)
 	}
