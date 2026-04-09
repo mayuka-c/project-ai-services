@@ -11,6 +11,8 @@ spec:
   serviceName: "opensearch-headless"
   podManagementPolicy: Parallel
   replicas: {{ .Values.opensearch.replicas }}
+  persistentVolumeClaimRetentionPolicy:
+    whenScaled: Delete
   selector:
     matchLabels:
       ai-services.io/application: {{ .Release.Name }}
@@ -23,9 +25,35 @@ spec:
         ai-services.io/version: {{ default .Chart.AppVersion | quote }}
         ai-services.io/component: vectordb
     spec:
+      # Give nodes time to migrate data before K8s kills the pod
+      terminationGracePeriodSeconds: 300
       containers:
         - name: opensearch
           image: "{{ .Values.opensearch.image }}"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - "/bin/bash"
+                  - "-c"
+                  - |
+                    # Get admin password from env
+                    AUTH="admin:$OPENSEARCH_INITIAL_ADMIN_PASSWORD"
+
+                    # A. Exclude node from voting (Fixes Quorum/Cluster-Manager error)
+                    curl -X POST "https://localhost:9200/_cluster/voting_config_exclusions?node_names=$HOSTNAME" \
+                      -u "$AUTH" --insecure || true
+
+                    # B. Exclude node from shard allocation (Moves data)
+                    curl -X PUT "https://localhost:9200/_cluster/settings" \
+                      -u "$AUTH" --insecure -H 'Content-Type: application/json' \
+                      -d "{\"persistent\": {\"cluster.routing.allocation.exclude._name\": \"$HOSTNAME\"}}"
+
+                    # C. Wait for shards to leave (Prevents data loss)
+                    while [ $(curl -s -u "$AUTH" --insecure "https://localhost:9200/_cat/shards" | grep $HOSTNAME | wc -l) -gt 0 ]; do
+                      echo "Waiting for shards to migrate..."
+                      sleep 5
+                    done
           env:
             - name: cluster.name
               value: opensearch-cluster
@@ -76,11 +104,15 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 10
           readinessProbe:
-            tcpSocket:
-              port: 9200
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 3
+            exec:
+              command:
+              - sh
+              - -c
+              - 'curl -fk -u "admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health'
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
   volumeClaimTemplates:
     - metadata:
         name: data
