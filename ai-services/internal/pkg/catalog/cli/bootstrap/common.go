@@ -61,7 +61,7 @@ func getPodmanURI() string {
 		return uri
 	}
 	// Return default local Unix socket
-	return "unix:///run/podman/podman.sock"
+	return "/run/podman/podman.sock"
 }
 
 // hashPasswordPBKDF2 generates a PBKDF2 hash of the password with a random salt.

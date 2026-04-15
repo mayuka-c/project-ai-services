@@ -8,6 +8,7 @@ import (
 	"sync"
 	"text/template"
 
+	"github.com/project-ai-services/ai-services/assets"
 	"github.com/project-ai-services/ai-services/internal/pkg/cli/helpers"
 	clipodman "github.com/project-ai-services/ai-services/internal/pkg/cli/podman"
 	"github.com/project-ai-services/ai-services/internal/pkg/cli/templates"
@@ -35,15 +36,27 @@ func DeployCatalog(ctx context.Context, podmanURI, passwordHash string, argParam
 		return fmt.Errorf("failed to initialize podman client: %w", err)
 	}
 
-	// Check if catalog pod already exists
-	if err := checkExistingCatalogPods(rt, s); err != nil {
-		return err
-	}
-
 	// Load template provider and metadata
 	tp, appMetadata, tmpls, err := loadCatalogTemplates(s)
 	if err != nil {
+		s.Fail("failed to load catalog templates")
+
 		return err
+	}
+
+	// Check if catalog pod already exists
+	existingPods, err := helpers.CheckExistingPodsForApplication(rt, catalogAppName)
+	if err != nil {
+		s.Fail("failed to check existing pods")
+
+		return err
+	}
+
+	if len(existingPods) == len(tmpls) {
+		s.Stop("Catalog service already deployed")
+		logger.Infof("Catalog pod already exists: %v\n", existingPods)
+
+		return nil
 	}
 
 	// Prepare values with bootstrap-specific configuration
@@ -63,7 +76,7 @@ func DeployCatalog(ctx context.Context, podmanURI, passwordHash string, argParam
 	logger.Infoln("-------")
 
 	// Print next steps similar to application create
-	if err := helpers.PrintNextSteps(tp, rt, catalogAppName, ""); err != nil {
+	if err := helpers.PrintNextSteps(tp, rt, catalogAppName, catalogAppTemplate); err != nil {
 		// do not want to fail the overall bootstrap if we cannot print next steps
 		logger.Infof("failed to display next steps: %v\n", err)
 	}
@@ -71,42 +84,22 @@ func DeployCatalog(ctx context.Context, podmanURI, passwordHash string, argParam
 	return nil
 }
 
-// checkExistingCatalogPods checks if catalog pods already exist.
-func checkExistingCatalogPods(rt *podman.PodmanClient, s *spinner.Spinner) error {
-	existingPods, err := helpers.CheckExistingPodsForApplication(rt, catalogAppName)
-	if err != nil {
-		s.Fail("failed to check existing pods")
-
-		return fmt.Errorf("failed to check existing pods: %w", err)
-	}
-
-	if len(existingPods) > 0 {
-		s.Stop("Catalog service already deployed")
-		logger.Infof("Catalog pod already exists: %v\n", existingPods)
-
-		return nil
-	}
-
-	return nil
-}
-
 // loadCatalogTemplates loads the catalog template provider, metadata, and templates.
 func loadCatalogTemplates(s *spinner.Spinner) (templates.Template, *templates.AppMetadata, map[string]*template.Template, error) {
-	// Load template provider - catalog is at assets/catalog, not assets/applications/catalog
 	tp := templates.NewEmbedTemplateProvider(templates.EmbedOptions{
-		Root: "catalog",
+		FS: &assets.CatalogFS,
 	})
 
-	// Load metadata from podman subdirectory
-	appMetadata, err := tp.LoadMetadata("", true)
+	// Load metadata from catalog/podman
+	appMetadata, err := tp.LoadMetadata(catalogAppTemplate, true)
 	if err != nil {
 		s.Fail("failed to load catalog metadata")
 
 		return nil, nil, nil, fmt.Errorf("failed to load catalog metadata: %w", err)
 	}
 
-	// Load all templates - use empty string since root is already "catalog"
-	tmpls, err := tp.LoadAllTemplates("")
+	// Load all templates from catalog
+	tmpls, err := tp.LoadAllTemplates(catalogAppTemplate)
 	if err != nil {
 		s.Fail("failed to load catalog templates")
 
@@ -127,8 +120,8 @@ func prepareCatalogValues(tp templates.Template, podmanURI, passwordHash string,
 	argParams["backend.runtime"] = "podman"
 	argParams["backend.podman.uri"] = podmanURI
 
-	// Load values - use empty string since root is already "catalog"
-	return tp.LoadValues("", nil, argParams)
+	// Load values from catalog
+	return tp.LoadValues(catalogAppTemplate, nil, argParams)
 }
 
 // executePodLayers executes all pod template layers.
@@ -161,8 +154,7 @@ func executeLayer(rt *podman.PodmanClient, tp templates.Template, tmpls map[stri
 		wg.Add(1)
 		go func(t string) {
 			defer wg.Done()
-			// Use empty string for appTemplateName since root is already "catalog"
-			if err := executePodTemplate(rt, tp, tmpls, t, "", catalogAppName, values, version, nil, argParams); err != nil {
+			if err := executePodTemplate(rt, tp, tmpls, t, catalogAppTemplate, catalogAppName, values, version, nil, argParams); err != nil {
 				errCh <- err
 			}
 		}(podTemplateName)
@@ -172,7 +164,7 @@ func executeLayer(rt *podman.PodmanClient, tp templates.Template, tmpls map[stri
 	close(errCh)
 
 	// collect all errors for this layer
-	var errs []error
+	errs := make([]error, 0, len(layer))
 	for e := range errCh {
 		errs = append(errs, fmt.Errorf("layer %d: %w", layerIndex+1, e))
 	}

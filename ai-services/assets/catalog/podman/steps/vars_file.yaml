@@ -1,5 +1,5 @@
 pods:
-  - name: "{{ .AppName }}"
+  - name: "{{ .AppName }}--catalog"
     format: "index .Ports \"3000/tcp\" 0"
     default: ""
     alias: UI_PORT
