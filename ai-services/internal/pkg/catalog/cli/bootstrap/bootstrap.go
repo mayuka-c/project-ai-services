@@ -1,0 +1,85 @@
+package bootstrap
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"os"
+
+	catalogPodman "github.com/project-ai-services/ai-services/internal/pkg/catalog/cli/bootstrap/podman"
+	"github.com/project-ai-services/ai-services/internal/pkg/constants"
+	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
+	"golang.org/x/crypto/pbkdf2"
+)
+
+const (
+	defaultAdminUsername      = "admin"
+	defaultPasswordIterations = 100000
+)
+
+// BootstrapOptions contains the configuration for bootstrapping the catalog service.
+type BootstrapOptions struct {
+	AdminPassword string
+	Runtime       types.RuntimeType
+	ArgParams     map[string]string
+}
+
+// Run executes the bootstrap process for the catalog service.
+func Run(opts BootstrapOptions) error {
+	ctx := context.Background()
+
+	// Generate password hash using PBKDF2
+	passwordHash, err := hashPasswordPBKDF2(opts.AdminPassword, defaultPasswordIterations)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	// Deploy catalog service based on runtime
+	switch opts.Runtime {
+	case types.RuntimeTypePodman:
+		// Determine Podman URI
+		podmanURI := getPodmanURI()
+
+		return catalogPodman.DeployCatalog(ctx, podmanURI, passwordHash, opts.ArgParams)
+
+	case types.RuntimeTypeOpenShift:
+		return fmt.Errorf("openshift runtime is not yet supported for catalog bootstrap")
+
+	default:
+		return fmt.Errorf("unsupported runtime type: %s", opts.Runtime)
+	}
+}
+
+// getPodmanURI determines the Podman socket URI.
+// It checks the CONTAINER_HOST environment variable first, otherwise returns the default Unix socket.
+func getPodmanURI() string {
+	// Check if CONTAINER_HOST is set (for remote connections)
+	// TODO: Need to take care for getting rootless socket
+	if uri, found := os.LookupEnv("CONTAINER_HOST"); found {
+		return uri
+	}
+	// Return default local Unix socket
+	return "unix:///run/podman/podman.sock"
+}
+
+// hashPasswordPBKDF2 generates a PBKDF2 hash of the password with a random salt.
+func hashPasswordPBKDF2(password string, iteration int) (string, error) {
+	salt := make([]byte, constants.Pbkdf2SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+
+	hash := pbkdf2.Key([]byte(password), salt, iteration, constants.Pbkdf2KeyLen, sha256.New)
+
+	// Format: iterations.salt.hash (base64 encoded)
+	encoded := fmt.Sprintf("%d.%s.%s",
+		iteration,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(hash))
+
+	return encoded, nil
+}
+
+// Made with Bob

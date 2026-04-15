@@ -1,8 +1,10 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: "ai-services-catalog"
+  name: "{{ .AppName }}--catalog"
   labels:
+    ai-services.io/application: "{{ .AppName }}"
+    ai-services.io/template: "{{ .AppTemplateName }}"
     ai-services.io/version: "{{ .Version }}"
   annotations:
     ai-services.io/ports: "{{ .Values.ui.port }}:3000,{{ .Values.backend.port }}:8080"
@@ -17,7 +19,7 @@ spec:
           memory: "512Mi"
       env:
         - name: BACKEND_HOST
-          value: "ai-services-catalog"
+          value: "{{ .AppName }}--catalog"
         - name: BACKEND_PORT
           value: "8080" 
       ports:
@@ -40,8 +42,6 @@ spec:
         seLinuxOptions:
           type: "spc_t"
       env:
-        - name: AUTH_JWT_SECRET
-          value: "{{ .Values.backend.jwtSecret }}"
         - name: CONTAINER_HOST
           value: "unix://{{ .Values.backend.podman.uri }}"
         - name: RUNTIME
