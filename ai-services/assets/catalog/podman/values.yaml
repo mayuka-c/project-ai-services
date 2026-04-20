@@ -6,7 +6,6 @@ backend:
   port: ""
   image: icr.io/ai-services-cicd/ai-services:v0.0.3
   runtime: ""
+  adminPasswordHash: ""
   podman:
     uri: "/run/podman/podman.sock"
-  admin:
-    passwordHash: ""
