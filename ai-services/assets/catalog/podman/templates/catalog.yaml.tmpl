@@ -47,7 +47,10 @@ spec:
         - name: RUNTIME
           value: "{{ .Values.backend.runtime }}"
         - name: ADMIN_PASSWORD
-          value: "{{ .Values.backend.adminPasswordHash }}"
+          valueFrom:
+            secretKeyRef:
+              name: catalog-secret
+              key: admin-password
       ports:
         - containerPort: 8080
           protocol: TCP
