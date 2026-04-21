@@ -320,7 +320,7 @@ class OpensearchVectorStore(VectorStore):
         if mode == "dense":
             # 1. Define the k-NN search body
             search_body = {
-                "size": limit,
+                "size": top_k,
                 "_source": ["chunk_id", "text", "metadata"],
                 "query": {
                     "knn": {
@@ -339,7 +339,7 @@ class OpensearchVectorStore(VectorStore):
             # OpenSearch native Sparse Search (BM25 or Neural Sparse)
             # Standard full-text match for sparse/keyword logic
             search_body = {
-                "size": limit,
+                "size": top_k,
                 "_source": ["chunk_id", "text", "metadata"],
                 "query": {
                     "bool": {
