@@ -3,6 +3,7 @@ package podman
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -122,11 +123,14 @@ func prepareCatalogValues(tp templates.Template, podmanURI, passwordHash string,
 		return nil, fmt.Errorf("failed to generate database password: %w", err)
 	}
 
+	// Base64 encode the database password for Kubernetes secret
+	dbPasswordBase64 := base64.StdEncoding.EncodeToString([]byte(dbPassword))
+
 	// Set configure-specific values
 	argParams["backend.adminPasswordHash"] = passwordHash
 	argParams["backend.runtime"] = "podman"
 	argParams["backend.podman.uri"] = podmanURI
-	argParams["db.password"] = dbPassword
+	argParams["db.password"] = dbPasswordBase64
 
 	// Load values from catalog
 	return tp.LoadValues(catalogAppTemplate, nil, argParams)
