@@ -16,6 +16,7 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime/podman"
 	"github.com/project-ai-services/ai-services/internal/pkg/specs"
 	"github.com/project-ai-services/ai-services/internal/pkg/spinner"
+	"github.com/project-ai-services/ai-services/internal/pkg/utils"
 )
 
 const (
@@ -115,10 +116,17 @@ func prepareCatalogValues(tp templates.Template, podmanURI, passwordHash string,
 		argParams = make(map[string]string)
 	}
 
+	// Generate database password
+	dbPassword, err := utils.GenerateRandomPassword(utils.DefaultPasswordLength)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate database password: %w", err)
+	}
+
 	// Set configure-specific values
 	argParams["backend.adminPasswordHash"] = passwordHash
 	argParams["backend.runtime"] = "podman"
 	argParams["backend.podman.uri"] = podmanURI
+	argParams["db.password"] = dbPassword
 
 	// Load values from catalog
 	return tp.LoadValues(catalogAppTemplate, nil, argParams)
