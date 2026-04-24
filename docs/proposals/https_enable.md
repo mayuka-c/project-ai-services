@@ -311,9 +311,11 @@ func LoadUserCertificates(certPath, keyPath string) error {
    ai-services catalog configure --ssl-cert /path/to/cert.pem --ssl-key /path/to/key.pem
    ```
 
-2. **System reads certificate files:**
+2. **System reads and validates certificate files:**
    - Validates that both certificate and key files exist
    - Reads file contents into memory
+   - **Extracts hostname from certificate's Common Name (CN) or Subject Alternative Name (SAN)**
+   - **Verifies SAN contains wildcard entry** (e.g., `*.example.com`) to support multiple subdomains
 
 3. **Load into Caddy via Admin API:**
    - POST to `http://localhost:2019/config/apps/tls/certificates/load_pem`
@@ -324,6 +326,109 @@ func LoadUserCertificates(certPath, keyPath string) error {
    - Caddy uses loaded certificates for all HTTPS connections
    - No need to restart Caddy container
    - Certificates are immediately available for new routes
+
+**Certificate Hostname Extraction:**
+
+```go
+// Extract hostname from certificate
+func ExtractHostnameFromCert(certPath string) (string, error) {
+    certPEM, err := os.ReadFile(certPath)
+    if err != nil {
+        return "", fmt.Errorf("failed to read certificate: %w", err)
+    }
+    
+    block, _ := pem.Decode(certPEM)
+    if block == nil {
+        return "", fmt.Errorf("failed to decode PEM block")
+    }
+    
+    cert, err := x509.ParseCertificate(block.Bytes)
+    if err != nil {
+        return "", fmt.Errorf("failed to parse certificate: %w", err)
+    }
+    
+    // Check for wildcard in SAN
+    hasWildcard := false
+    for _, dnsName := range cert.DNSNames {
+        if strings.HasPrefix(dnsName, "*.") {
+            hasWildcard = true
+            // Extract base domain from wildcard (e.g., *.example.com -> example.com)
+            return strings.TrimPrefix(dnsName, "*."), nil
+        }
+    }
+    
+    if !hasWildcard {
+        return "", fmt.Errorf("certificate must contain wildcard SAN entry (e.g., *.example.com) to support multiple subdomains")
+    }
+    
+    // Fallback to Common Name if no wildcard SAN found
+    if cert.Subject.CommonName != "" {
+        return cert.Subject.CommonName, nil
+    }
+    
+    return "", fmt.Errorf("no hostname found in certificate")
+}
+```
+
+**Domain Selection Logic:**
+
+When registering routes with Caddy, the domain format depends on whether user-provided certificates are used:
+
+| Certificate Type | Domain Format | Example |
+|-----------------|---------------|---------|
+| Self-signed (default) | `<pod_name>-<container_name>.<ip>.nip.io` | `catalog-api.10.20.186.33.nip.io` |
+| User-provided | `<pod_name>-<container_name>.<hostname>` | `catalog-api.example.com` |
+
+**Implementation:**
+
+```go
+func GetDomainForService(podName, containerName, hostIP string, userCertPath string) (string, error) {
+    if userCertPath != "" {
+        // User provided certificate - extract hostname from cert
+        hostname, err := ExtractHostnameFromCert(userCertPath)
+        if err != nil {
+            return "", fmt.Errorf("failed to extract hostname from certificate: %w", err)
+        }
+        // Use hostname from certificate
+        return fmt.Sprintf("%s-%s.%s", podName, containerName, hostname), nil
+    }
+    
+    // No user certificate - use nip.io with IP
+    return fmt.Sprintf("%s-%s.%s.nip.io", podName, containerName, hostIP), nil
+}
+```
+
+**Certificate SAN Requirements:**
+
+For user-provided certificates to work with multiple services, the certificate **must** include a wildcard entry in the Subject Alternative Name (SAN) field:
+
+```
+Subject Alternative Name:
+    DNS: *.example.com
+    DNS: example.com
+```
+
+This allows the certificate to be valid for:
+- `catalog-api.example.com`
+- `rag-demo-chat-bot-ui.example.com`
+- `rag-demo-digitize-api.example.com`
+- Any other `<service>.example.com` subdomain
+
+**Example Certificate Generation with Wildcard SAN:**
+
+```bash
+# Generate private key
+openssl genrsa -out key.pem 2048
+
+# Create certificate signing request with SAN
+openssl req -new -key key.pem -out cert.csr \
+  -subj "/CN=example.com" \
+  -addext "subjectAltName=DNS:*.example.com,DNS:example.com"
+
+# Self-sign the certificate
+openssl x509 -req -in cert.csr -signkey key.pem -out cert.pem \
+  -days 365 -copy_extensions copy
+```
 
 **Benefits of this approach:**
 - No need to mount certificate files into Caddy container
@@ -336,13 +441,18 @@ func LoadUserCertificates(certPath, keyPath string) error {
 After deploying the Catalog assets, dynamically register the Catalog service route using the Caddy Admin API.
 
 **Domain Format:**
-```
-<pod_name>-<container_name>.<ip>.nip.io
-```
 
-**Example:** `ai-services--catalog-ui.<ip>.nip.io`
+The domain format depends on whether user-provided certificates are used:
 
-**Why nip.io?**
+- **With self-signed certificates (default):** `<pod_name>-<container_name>.<ip>.nip.io`
+  - Example: `ai-services--catalog-ui.10.20.186.33.nip.io`
+  - Hostname is extracted from the certificate's SAN field
+
+- **With user-provided certificates:** `<pod_name>-<container_name>.<hostname>`
+  - Example: `catalog-api.example.com`
+  - Hostname is extracted from the certificate's SAN wildcard entry
+
+**Why nip.io for self-signed certificates?**
 
 [nip.io](https://nip.io) is a wildcard DNS service that provides automatic DNS resolution for any IP address. It eliminates the need for:
 - Manual DNS configuration during development
@@ -352,9 +462,18 @@ After deploying the Catalog assets, dynamically register the Catalog service rou
 
 **How nip.io works:**
 - Any request to `<anything>.<ip>.nip.io` automatically resolves to `<ip>`
-- Example: `ai-services--catalog-ui.<ip>.nip.io` → resolves to `10.20.186.33`
+- Example: `ai-services--catalog-ui.10.20.186.33.nip.io` → resolves to `10.20.186.33`
 - Enables HTTPS with proper domain names without DNS infrastructure
 - Perfect for development, testing, and demo environments
+
+**Why hostname extraction for user-provided certificates?**
+
+When users provide their own certificates:
+- The certificate is issued for a specific domain (e.g., `*.example.com`)
+- We must use that domain when registering routes with Caddy
+- Using nip.io would cause certificate validation errors
+- The hostname is extracted from the certificate's SAN wildcard entry
+- All services use subdomains of the extracted hostname
 
 **Caddy Admin API Call:**
 
@@ -401,7 +520,7 @@ Next Steps:
 
 1. Access the Catalog API via HTTPS:
    
-   https://catalog-api.10.20.186.33.nip.io
+   https://ai-services--catalog-ui.10.20.186.33.nip.io
    
    Note: Using self-signed certificate. Your browser may show a security warning.
 
@@ -414,7 +533,7 @@ Next Steps:
 As part of the `ai-services application create` command, applications can be automatically exposed via HTTPS by registering their routes with Caddy.
 
 **Process:**
-1. During application deployment, scan for services with the annotation `ai-ai-services.io/ports`
+1. During application deployment, scan for services with the annotation `ai-services.io/ports`
 2. For each annotated service, make a Caddy Admin API call to register the route
 3. Display HTTPS endpoints in the application's "Next Steps" output
 
@@ -468,7 +587,7 @@ Container: `ui` with annotation `ai-ai-services.io/ports: "3000"`
 
 **Caddy Admin API Call:**
 ```bash
-curl http://localhost:2019/config/apps/http/servers/my_app_server/routes \
+curl http://caddy:2019/config/apps/http/servers/my_app_server/routes \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{
