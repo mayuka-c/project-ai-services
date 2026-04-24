@@ -237,9 +237,7 @@ ai-services catalog configure [options]
 }
 
 :443 {
-    tls internal {
-        on_demand
-    }
+    tls internal
 }
 
 
@@ -258,9 +256,9 @@ ai-services catalog configure [options]
 If the user provides custom certificates via `--ssl-cert` and `--ssl-key` flags, load them into Caddy using the Admin API:
 
 ```go
-// Load user-provided certificates into Caddy
+// Load user-provided certificates into Caddy with validation
 func LoadUserCertificates(certPath, keyPath string) error {
-    // Read certificate and key files
+    // Step 1: Read certificate and key files
     certBytes, err := os.ReadFile(certPath)
     if err != nil {
         return fmt.Errorf("failed to read certificate: %w", err)
@@ -271,7 +269,102 @@ func LoadUserCertificates(certPath, keyPath string) error {
         return fmt.Errorf("failed to read private key: %w", err)
     }
     
-    // Prepare payload for Caddy Admin API
+    // Step 2: Parse x509 certificate
+    certBlock, _ := pem.Decode(certBytes)
+    if certBlock == nil {
+        return fmt.Errorf("failed to decode certificate PEM")
+    }
+    
+    cert, err := x509.ParseCertificate(certBlock.Bytes)
+    if err != nil {
+        return fmt.Errorf("failed to parse certificate: %w", err)
+    }
+    
+    // Step 3: Validate certificate
+    
+    // 3a. Check for wildcard SAN (required for multiple subdomains)
+    hasWildcard := false
+    for _, dnsName := range cert.DNSNames {
+        if strings.HasPrefix(dnsName, "*.") {
+            hasWildcard = true
+            break
+        }
+    }
+    if !hasWildcard {
+        return fmt.Errorf("certificate must contain wildcard SAN entry (e.g., *.example.com)")
+    }
+    
+    // 3b. Check certificate expiry
+    now := time.Now()
+    if now.Before(cert.NotBefore) {
+        return fmt.Errorf("certificate is not yet valid (valid from: %s)", cert.NotBefore)
+    }
+    if now.After(cert.NotAfter) {
+        return fmt.Errorf("certificate has expired (expired on: %s)", cert.NotAfter)
+    }
+    
+    // Warn if certificate expires soon (within 30 days)
+    daysUntilExpiry := cert.NotAfter.Sub(now).Hours() / 24
+    if daysUntilExpiry < 30 {
+        log.Printf("Warning: Certificate expires in %.0f days (%s)", daysUntilExpiry, cert.NotAfter)
+    }
+    
+    // 3c. Verify key pair match
+    keyBlock, _ := pem.Decode(keyBytes)
+    if keyBlock == nil {
+        return fmt.Errorf("failed to decode private key PEM")
+    }
+    
+    privateKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+    if err != nil {
+        // Try PKCS1 format
+        privateKey, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+        if err != nil {
+            return fmt.Errorf("failed to parse private key: %w", err)
+        }
+    }
+    
+    // Verify the public key in cert matches the private key
+    switch pub := cert.PublicKey.(type) {
+    case *rsa.PublicKey:
+        priv, ok := privateKey.(*rsa.PrivateKey)
+        if !ok {
+            return fmt.Errorf("private key type does not match certificate public key type")
+        }
+        if pub.N.Cmp(priv.N) != 0 {
+            return fmt.Errorf("private key does not match certificate")
+        }
+    case *ecdsa.PublicKey:
+        priv, ok := privateKey.(*ecdsa.PrivateKey)
+        if !ok {
+            return fmt.Errorf("private key type does not match certificate public key type")
+        }
+        if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
+            return fmt.Errorf("private key does not match certificate")
+        }
+    default:
+        return fmt.Errorf("unsupported public key type")
+    }
+    
+    // Step 4 (Optional): Verify certificate chain
+    // This step validates that the certificate is signed by a trusted CA
+    // Uncomment if chain verification is required
+    /*
+    roots := x509.NewCertPool()
+    // Add system root CAs or custom CA certificates
+    roots.AppendCertsFromPEM([]byte(customCAcert))
+    
+    opts := x509.VerifyOptions{
+        Roots: roots,
+        DNSName: "", // Can specify expected DNS name
+    }
+    
+    if _, err := cert.Verify(opts); err != nil {
+        return fmt.Errorf("certificate chain verification failed: %w", err)
+    }
+    */
+    
+    // Step 5: Load certificates via Caddy Admin API
     payload := []map[string]string{
         {
             "certificate": string(certBytes),
@@ -284,8 +377,7 @@ func LoadUserCertificates(certPath, keyPath string) error {
         return fmt.Errorf("failed to marshal payload: %w", err)
     }
     
-    // Load certificates via Caddy Admin API
-    resp, err := http.Put(
+    resp, err := http.Post(
         "http://localhost:2019/config/apps/tls/certificates/load_pem",
         "application/json",
         bytes.NewBuffer(data),
@@ -300,9 +392,27 @@ func LoadUserCertificates(certPath, keyPath string) error {
         return fmt.Errorf("caddy returned error: %s", string(body))
     }
     
+    log.Printf("Successfully loaded certificate (expires: %s)", cert.NotAfter)
     return nil
 }
 ```
+
+**Certificate Validation Steps:**
+
+1. **Read certificate and key files** - Load PEM-encoded files from disk
+2. **Parse x509 certificate** - Decode and parse certificate structure
+3. **Validate certificate:**
+   - **SAN wildcard check** - Ensures certificate has wildcard entry (e.g., `*.example.com`)
+   - **Expiry check** - Verifies certificate is currently valid and warns if expiring soon
+   - **Key pair match** - Confirms private key corresponds to certificate's public key
+4. **Verify certificate chain (optional)** - Validates certificate is signed by trusted CA
+5. **Load via Caddy Admin API** - Upload validated certificate to Caddy
+
+**Validation Benefits:**
+- Prevents loading invalid or expired certificates
+- Catches key/certificate mismatches before deployment
+- Provides early warning for expiring certificates
+- Ensures wildcard SAN requirement is met
 
 **Certificate Loading Flow:**
 
@@ -347,26 +457,16 @@ func ExtractHostnameFromCert(certPath string) (string, error) {
         return "", fmt.Errorf("failed to parse certificate: %w", err)
     }
     
-    // Check for wildcard in SAN
-    hasWildcard := false
+    // Check for wildcard in SAN - REQUIRED for multiple services
     for _, dnsName := range cert.DNSNames {
         if strings.HasPrefix(dnsName, "*.") {
-            hasWildcard = true
             // Extract base domain from wildcard (e.g., *.example.com -> example.com)
             return strings.TrimPrefix(dnsName, "*."), nil
         }
     }
     
-    if !hasWildcard {
-        return "", fmt.Errorf("certificate must contain wildcard SAN entry (e.g., *.example.com) to support multiple subdomains")
-    }
-    
-    // Fallback to Common Name if no wildcard SAN found
-    if cert.Subject.CommonName != "" {
-        return cert.Subject.CommonName, nil
-    }
-    
-    return "", fmt.Errorf("no hostname found in certificate")
+    // No wildcard found - reject the certificate
+    return "", fmt.Errorf("certificate MUST contain wildcard SAN entry (e.g., *.example.com) to support multiple subdomains like catalog-api, rag-demo-chat-bot-ui, etc. Current certificate does not have wildcard SAN")
 }
 ```
 
