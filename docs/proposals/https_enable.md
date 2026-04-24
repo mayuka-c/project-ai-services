@@ -285,7 +285,7 @@ func LoadUserCertificates(certPath, keyPath string) error {
     }
     
     // Load certificates via Caddy Admin API
-    resp, err := http.Post(
+    resp, err := http.Put(
         "http://localhost:2019/config/apps/tls/certificates/load_pem",
         "application/json",
         bytes.NewBuffer(data),
@@ -376,8 +376,8 @@ When registering routes with Caddy, the domain format depends on whether user-pr
 
 | Certificate Type | Domain Format | Example |
 |-----------------|---------------|---------|
-| Self-signed (default) | `<pod_name>-<container_name>.<ip>.nip.io` | `catalog-api.10.20.186.33.nip.io` |
-| User-provided | `<pod_name>-<container_name>.<hostname>` | `catalog-api.example.com` |
+| Self-signed (default) | `<pod_name>-<container_name>.<ip>.nip.io` | `ai-services--catalog-ui.10.20.186.33.nip.io` |
+| User-provided | `<pod_name>-<container_name>.<hostname>` | `ai-services--catalog-ui.example.com` |
 
 **Implementation:**
 
@@ -409,7 +409,7 @@ Subject Alternative Name:
 ```
 
 This allows the certificate to be valid for:
-- `catalog-api.example.com`
+- `ai-services--catalog-ui.example.com`
 - `rag-demo-chat-bot-ui.example.com`
 - `rag-demo-digitize-api.example.com`
 - Any other `<service>.example.com` subdomain
@@ -449,7 +449,7 @@ The domain format depends on whether user-provided certificates are used:
   - Hostname is extracted from the certificate's SAN field
 
 - **With user-provided certificates:** `<pod_name>-<container_name>.<hostname>`
-  - Example: `catalog-api.example.com`
+  - Example: `ai-services--catalog-ui.example.com`
   - Hostname is extracted from the certificate's SAN wildcard entry
 
 **Why nip.io for self-signed certificates?**
@@ -638,7 +638,7 @@ Next Steps:
 func EnableHTTPSForApplication(podName string, containers []Container, hostIP string) error {
     for _, container := range containers {
         // Check for ports annotation
-        portsAnnotation := container.Annotations["ai-ai-services.io/ports"]
+        portsAnnotation := container.Annotations["ai-services.io/ports"]
         if portsAnnotation == "" {
             continue // Skip containers without the annotation
         }
@@ -673,6 +673,24 @@ func EnableHTTPSForApplication(podName string, containers []Container, hostIP st
 - No manual Caddy configuration required per application
 - Self-signed certificates work immediately for development
 - Easy transition to production certificates
+
+### Step 6: Trusting Self-Signed Certificates (Optional)
+
+When using Caddy's self-signed certificates, browsers will show security warnings. To avoid these warnings in development, install Caddy's root CA certificate.
+
+**Root CA Certificate Location:**
+```
+/var/lib/ai-services/data/caddy/pki/authorities/local/root.crt
+```
+
+**Installation:**
+- **macOS:** `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain root.crt`
+- **Linux:** Copy to `/usr/local/share/ca-certificates/` and run `sudo update-ca-certificates`
+- **Windows:** `certutil -addstore -f "ROOT" root.crt`
+
+**Alternative:** Use `curl -k` to skip certificate verification for testing.
+
+**Note:** This step is only needed for self-signed certificates. User-provided certificates from trusted CAs don't require this.
 
 ## Conclusion
 
