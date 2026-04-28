@@ -887,6 +887,76 @@ When using Caddy's self-signed certificates, browsers will show security warning
 
 **Note:** This step is only needed for self-signed certificates. User-provided certificates from trusted CAs don't require this.
 
+## Certificate CLI Management
+
+### Certificate Upload Subcommand
+
+**Command:**
+```bash
+ai-services catalog cert upload --ssl-cert <path> --ssl-key <path>
+```
+
+**Purpose:**
+Upload new user-provided certificates to Caddy at Day N.
+
+**Status:** TODO - Implementation pending
+
+---
+
+### Certificate Renewal Subcommand
+
+For renewing user-provided certificates before expiration, use the dedicated certificate renewal subcommand:
+
+**Command:**
+```bash
+ai-services catalog cert renew --ssl-cert <path> --ssl-key <path>
+```
+
+**Purpose:**
+Renew existing user-provided certificates in Caddy without service interruption.
+
+**Renewal Validation:**
+A certificate is considered a valid renewal if:
+- **New SANs == Old SANs** (same domains covered)
+- **New Serial != Old Serial** (different certificate)
+- **New Expiry > Old Expiry** (newer certificate with extended validity)
+
+**Process:**
+
+1. **Validate New Certificate:**
+   - Read and validate the provided certificate and private key files
+   - Extract SANs, serial number, and expiry date from new certificate
+
+2. **Retrieve Existing Certificates:**
+   - GET `http://localhost:2019/config/apps/tls/certificates/`
+   - Retrieve all currently loaded certificates from Caddy
+
+3. **Find Matching Certificate:**
+   - Search for existing certificate with matching SANs
+   - If no match found, fail with error: "No existing certificate found with matching SANs"
+
+4. **Validate Renewal Criteria:**
+   - Verify: New SANs == Old SANs
+   - Verify: New Serial != Old Serial
+   - Verify: New Expiry > Old Expiry
+   - If any check fails, reject the renewal
+
+5. **Replace Certificate:**
+   - Remove the old certificate from the payload
+   - Add the new certificate with ID `cert-<domain>`
+   - POST updated payload to `http://localhost:2019/config/apps/tls/certificates/`
+
+**Example:**
+```bash
+ai-services catalog cert renew --ssl-cert /path/to/new-cert.pem --ssl-key /path/to/new-key.pem
+
+# Output:
+# ✓ Certificate validated
+# ✓ Found matching certificate (SANs: *.example.com, example.com)
+# ✓ Renewal validated: SANs match, new serial, extended expiry
+# ✓ Certificate renewed successfully
+```
+
 ## Conclusion
 
 **Caddy Server** provides the optimal balance of simplicity, security, and functionality for the AI Services project. Its automatic HTTPS capabilities significantly reduce operational overhead while maintaining production-grade security. The existing Caddy configuration in the project demonstrates that this approach is already being adopted, and this proposal formalizes that decision with comprehensive justification.
