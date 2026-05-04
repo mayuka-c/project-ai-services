@@ -11,13 +11,13 @@ certified_by: "IBM"
 architectures:
   - rag
 
-# Dependencies on other services (version is optional, uses latest if not specified)
+# Component dependencies
 dependencies:
-  - id: opensearch
-    version: ">=1.0.0"
-  - id: instruct
-    version: ">=1.0.0"
-  - id: embedding
-    version: ">=1.0.0"
+  - type: vector_db
+    required: true
+  - type: llm
+    required: true
+  - type: embedding
+    required: true
 
 # Made with Bob

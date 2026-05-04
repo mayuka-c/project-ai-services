@@ -47,9 +47,9 @@ This document describes the dynamic API design for component selection when depl
 ### Dependency Hierarchy
 
 ```
-vector_store (independent)
+vector_db (independent)
     ↓
-instruct (independent)
+llm (independent)
     ↓
 embedding (independent)
     ↓
@@ -58,8 +58,8 @@ reranker (independent)
 
 ### Rules
 
-1. **vector_store**: Independent, can be selected anytime
-2. **instruct**: Independent, can be selected anytime
+1. **vector_db**: Independent, can be selected anytime
+2. **llm**: Independent, can be selected anytime
    - Instances include `accelerator` metadata (e.g., "spyre", "cpu")
    - Instances include `capabilities` array (e.g., ["fp16", "int8"])
 3. **embedding**: Independent, can be selected anytime
@@ -69,13 +69,13 @@ reranker (independent)
 
 ### Accelerator-Based Instance Filtering
 
-Component instances (instruct, embedding, reranker) include accelerator and capability metadata:
+Component instances (llm, embedding, reranker) include accelerator and capability metadata:
 
 1. **Accelerator**: Hardware type the instance runs on (e.g., "spyre", "cpu")
 2. **Capabilities**: Supported features (e.g., ["fp16", "int8"])
 
 **Example:**
-- Instruct instance: "Granite 3.3 8B on Spyre" has accelerator="spyre", capabilities=["fp16", "int8"]
+- LLM instance: "Granite 3.3 8B on Spyre" has accelerator="spyre", capabilities=["fp16", "int8"]
 - Embedding instance: "BGE Base on CPU" has accelerator="cpu", capabilities=["fp16", "fp32"]
 
 Users can filter instances based on their accelerator requirements.
@@ -118,12 +118,11 @@ Get all running instances for a specific component type.
 **Purpose**: Fetch existing, deployed instances for a specific component type to populate dropdowns. Returns all instances of that component type across the system.
 
 **Parameters:**
-- `component_type`: The type of component (e.g., "vector_store", "instruct", "embedding", "reranker")
+- `component_type`: The type of component (e.g., "vector_db", "llm", "embedding", "reranker")
 
 **Response Structure:**
 - Array of instances for the requested component type
-- Each instance includes: `instance_id`, `label`, `provider`, and additional metadata
-- For dependent components (instruct/embedding/reranker): includes `backend_id`, `model`, `accelerator`, and `capabilities`
+- Each instance includes: `instance_id`, `label`, `provider`
 
 #### 5. GET `/api/v1/services/{service_id}/params`
 
@@ -138,7 +137,7 @@ Get configuration form fields for a specific provider within a component type.
 **Purpose**: Fetch the configuration schema for a specific provider. This is used when creating a new component instance with a selected provider.
 
 **Parameters:**
-- `component_type`: The type of component (e.g., "vector_store", "instruct", "embedding", "reranker")
+- `component_type`: The type of component (e.g., "vector_db", "llm", "embedding", "reranker")
 - `provider_id`: The provider identifier (e.g., "opensearch", "vllm", "watsonx", "milvus")
 
 **Response Structure:**
@@ -174,8 +173,8 @@ Deploy application with component selections and configurations.
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. For each component: GET /api/v1/components/{type}/instances│
 │    → Fetch running instances per component type             │
-│    → GET /api/v1/components/vector_store/instances          │
-│    → GET /api/v1/components/instruct/instances              │
+│    → GET /api/v1/components/vector_db/instances             │
+│    → GET /api/v1/components/llm/instances                   │
 │    → GET /api/v1/components/embedding/instances             │
 │    → Returns array of instances for that component type     │
 └─────────────────────────────────────────────────────────────┘
@@ -226,7 +225,7 @@ Get providers and dependency rules (no instances).
       "service_id": "digitize",
       "service_name": "Digitize documents",
       "components": {
-        "vector_store": {
+        "vector_db": {
           "label": "Vector store",
           "required": true,
           "providers": [
@@ -245,7 +244,7 @@ Get providers and dependency rules (no instances).
           ]
         },
         "llm": {
-          "label": "Instruct Model",
+          "label": "LLM Model",
           "required": true,
           "providers": [
             {
@@ -320,7 +319,7 @@ Get providers and dependency rules (no instances).
       "service_id": "chat",
       "service_name": "Question and Answer",
       "components": {
-        "vector_store": {
+        "vector_db": {
           "label": "Vector store",
           "required": true,
           "providers": [
@@ -338,8 +337,8 @@ Get providers and dependency rules (no instances).
             }
           ]
         },
-        "instruct": {
-          "label": "Instruct Model",
+        "llm": {
+          "label": "LLM Model",
           "required": true,
           "providers": [
             {
@@ -456,7 +455,7 @@ Get components and providers for the digitize service (no instances).
   "service_id": "digitize",
   "service_name": "Digitize documents",
   "components": {
-    "vector_store": {
+    "vector_db": {
       "label": "Vector store",
       "required": true,
       "providers": [
@@ -474,8 +473,8 @@ Get components and providers for the digitize service (no instances).
         }
       ]
     },
-    "instruct": {
-      "label": "Instruct Model",
+    "llm": {
+      "label": "LLM Model",
       "required": true,
       "providers": [
         {
@@ -552,11 +551,11 @@ Get components and providers for the digitize service (no instances).
 
 Get all running instances for a specific component type.
 
-**Purpose**: Fetch existing, deployed instances for a specific component type to populate dropdowns. The `component_type` parameter specifies which component type to retrieve (e.g., "vector_store", "instruct", "embedding", "reranker").
+**Purpose**: Fetch existing, deployed instances for a specific component type to populate dropdowns. The `component_type` parameter specifies which component type to retrieve (e.g., "vector_db", "llm", "embedding", "reranker").
 
-**Example 1: Get vector_store instances**
+**Example 1: Get vector_db instances**
 
-**Request**: `GET /api/v1/components/vector_store/instances`
+**Request**: `GET /api/v1/components/vector_db/instances`
 
 **Response:**
 ```json
@@ -574,30 +573,22 @@ Get all running instances for a specific component type.
 ]
 ```
 
-**Example 2: Get instruct instances**
+**Example 2: Get llm instances**
 
-**Request**: `GET /api/v1/components/instruct/instances`
+**Request**: `GET /api/v1/components/llm/instances`
 
 **Response:**
 ```json
 [
   {
-    "instance_id": "instruct-vllm-granite",
+    "instance_id": "llm-vllm-granite",
     "label": "Granite 3.3 8B (vLLM on Spyre)",
-    "provider": "vllm",
-    "backend_id": "vllm-instance-1",
-    "model": "ibm-granite/granite-3.3-8b-instruct",
-    "accelerator": "spyre",
-    "capabilities": ["fp16", "int8"]
+    "provider": "vllm"
   },
   {
-    "instance_id": "instruct-vllm-llama",
+    "instance_id": "llm-vllm-llama",
     "label": "Llama 3.1 8B (vLLM on CPU)",
-    "provider": "vllm",
-    "backend_id": "vllm-instance-2",
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "accelerator": "cpu",
-    "capabilities": ["fp16", "fp32", "int8"]
+    "provider": "vllm"
   }
 ]
 ```
@@ -621,10 +612,7 @@ Get all running instances for a specific component type.
   {
     "instance_id": "reranker-vllm-1",
     "label": "BGE Reranker (vLLM on Spyre)",
-    "provider": "vllm",
-    "model": "BAAI/bge-reranker-v2-m3",
-    "accelerator": "spyre",
-    "capabilities": ["fp16", "int8"]
+    "provider": "vllm"
   }
 ]
 ```
@@ -673,7 +661,7 @@ Get configuration schema for a specific provider within a component type.
 
 **Example 1: Get params for Milvus vector store provider**
 
-**Request**: `GET /api/v1/components/vector_store/providers/milvus/params`
+**Request**: `GET /api/v1/components/vector_db/providers/milvus/params`
 
 **Response:**
 ```json
@@ -750,7 +738,7 @@ Get configuration schema for a specific provider within a component type.
 
 **Example 3: Get params for watsonx instruct provider**
 
-**Request**: `GET /api/v1/components/instruct/providers/watsonx/params`
+**Request**: `GET /api/v1/components/llm/providers/watsonx/params`
 
 **Response:**
 ```json
@@ -808,7 +796,7 @@ Get configuration schema for a specific provider within a component type.
     "digitize": {
       "enabled": true,
       "components": {
-        "vector_store": {
+        "vector_db": {
           "id": "create-new",
           "type": "create_new",
           "provider": "milvus",
@@ -823,8 +811,8 @@ Get configuration schema for a specific provider within a component type.
           "type": "existing",
           "provider": "vllm"
         },
-        "instruct": {
-          "id": "instruct-vllm-granite",
+        "llm": {
+          "id": "llm-vllm-granite",
           "type": "existing",
           "provider": "vllm",
           "backend_id": "vllm-instance-1"
@@ -850,7 +838,7 @@ Get configuration schema for a specific provider within a component type.
     "chat": {
       "enabled": true,
       "components": {
-        "vector_store": {
+        "vector_db": {
           "id": "opensearch-instance-1",
           "type": "existing"
         },
@@ -859,7 +847,7 @@ Get configuration schema for a specific provider within a component type.
           "type": "existing",
           "provider": "watsonx"
         },
-        "instruct": {
+        "llm": {
           "id": "create-new",
           "type": "create_new",
           "provider": "watsonx",
@@ -927,11 +915,11 @@ Get configuration schema for a specific provider within a component type.
 
 1. **Initial Load**
    - Call GET `/options` - receives all options including dependent component options for each backend
-   - Render dropdowns for independent components (vector_store, inference_backend)
+   - Render dropdowns for independent components (vector_db, inference_backend)
    - Show disabled/hidden state for dependent components with message "Select inference backend first"
 
 2. **After Inference Backend Selection**
-   - UI filters and displays instruct/embedding/reranker options based on selected backend
+   - UI filters and displays llm/embedding/reranker options based on selected backend
    - Enable and populate dropdowns using the `options_by_backend[selected_backend]` data
    - No additional API call needed - all data already available from step 1
 
@@ -956,7 +944,7 @@ Get configuration schema for a specific provider within a component type.
 
 This dependency-aware design provides:
 
-✅ **Component Dependencies**: instruct/embedding/reranker depend on inference_backend
+✅ **Component Dependencies**: llm/embedding/reranker depend on inference_backend
 ✅ **Progressive Disclosure**: Dependent dropdowns only appear after parent selection
 ✅ **Filtered Options**: Options filtered client-side based on parent's provider
 ✅ **Backend Tracking**: backend_id links dependent components to their backend

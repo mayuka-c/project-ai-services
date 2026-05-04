@@ -1,7 +1,7 @@
 # Service identification
 id: summarize
-name: "Summarize"
-description: "Consolidates input text into a brief statement of main points"
+name: "Summarize Documents"
+description: "Summarize documents and extract key information"
 type: service
 
 # Certification and support
@@ -11,9 +11,9 @@ certified_by: "IBM"
 architectures:
   - rag
 
-# Dependencies on other services (version is optional, uses latest if not specified)
+# Component dependencies
 dependencies:
-  - id: instruct
-    version: ">=1.0.0"
+  - type: llm
+    required: true
 
 # Made with Bob

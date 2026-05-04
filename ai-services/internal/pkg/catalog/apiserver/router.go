@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/project-ai-services/ai-services/assets"
 	_ "github.com/project-ai-services/ai-services/docs" // Import generated docs
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/handlers"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/middleware"
@@ -26,6 +27,8 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	authHandler := handlers.NewAuthHandler(authSvc)
+	optionsHandler := handlers.NewOptionsHandler(assets.CatalogFS)
+
 	v1 := router.Group("/api/v1")
 	{
 		v1.POST("/auth/login", authHandler.Login)
@@ -33,6 +36,11 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 		v1.POST("/auth/refresh", authHandler.Refresh)
 		v1.GET("/auth/me", middleware.AuthMiddleware(tokenMgr, blacklist), authHandler.Me)
 	}
+
+	// Component selection options endpoints
+	v1.GET("/architectures/:architecture_id/options", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetArchitectureOptions)
+	v1.GET("/services/:service_id/options", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetServiceOptions)
+	v1.GET("/components/:component_type/instances", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetComponentInstances)
 
 	applications := v1.Group("applications")
 	applications.Use(middleware.AuthMiddleware(tokenMgr, blacklist))
