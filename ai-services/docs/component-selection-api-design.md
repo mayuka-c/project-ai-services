@@ -104,92 +104,11 @@ Get configuration schemas (JSON Schema) for all component types used in the arch
 **Purpose**: Fetch configuration schemas for all component types (vector_db, llm, embedding, reranker) that are dependencies of services in this architecture. Returns schemas for all available providers within each component type.
 
 **Response Structure:**
-- Map of component_type to provider schemas
+- Top-level keys are component types (vector_db, llm, embedding, reranker)
 - Each component type contains a map of provider_id to JSON Schema
+- Each provider's schema has the component name as a nested property
 - Only includes component types that are used by services in the architecture
 - Does NOT include service-level schemas (use service-specific endpoint for those)
-
-**Example Response:**
-```json
-{
-  "vector_db": {
-    "opensearch": {
-      "$schema": "https://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "memoryLimit": {
-          "type": "string",
-          "description": "Memory limit for OpenSearch",
-          "default": "8Gi"
-        },
-        "storage": {
-          "type": "string",
-          "description": "Storage size",
-          "default": "20Gi"
-        }
-      }
-    },
-    "milvus": {
-      "$schema": "https://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "storage": {
-          "type": "string",
-          "default": "20Gi"
-        }
-      }
-    }
-  },
-  "llm": {
-    "vllm": {
-      "$schema": "https://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "apiSecretKey": {
-          "type": "string",
-          "description": "API secret key"
-        }
-      }
-    },
-    "watsonx": {
-      "$schema": "https://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "apiKey": {
-          "type": "string",
-          "description": "watsonx API key"
-        },
-        "projectId": {
-          "type": "string",
-          "description": "watsonx project ID"
-        }
-      }
-    }
-  },
-  "embedding": {
-    "vllm": {
-      "$schema": "https://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "apiSecretKey": {
-          "type": "string"
-        }
-      }
-    }
-  },
-  "reranker": {
-    "vllm": {
-      "$schema": "https://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "apiSecretKey": {
-          "type": "string"
-        }
-      }
-    }
-  }
-}
-```
 
 ### Service Level
 
@@ -308,36 +227,36 @@ Get providers and dependency rules (no instances).
 {
   "architecture_id": "rag",
   "architecture_name": "Digital Assistant",
-  "services": {
-    "digitize": {
+  "services": [
+    {
+      "type": "service",
       "service_id": "digitize",
       "service_name": "Digitize documents",
-      "components": {
-        "vector_db": {
+      "components": [
+        {
+          "type": "vector_db",
           "label": "Vector store",
           "required": true,
           "providers": [
             {
-              "provider_id": "opensearch",
-              "provider": "opensearch",
+              "id": "opensearch",
               "label": "OpenSearch",
               "description": "Distributed search and analytics engine"
             },
             {
-              "provider_id": "milvus",
-              "provider": "milvus",
+              "id": "milvus",
               "label": "Milvus",
               "description": "Cloud-native vector database"
             }
           ]
         },
-        "llm": {
+        {
+          "type": "llm",
           "label": "LLM Model",
           "required": true,
           "providers": [
             {
-              "provider_id": "vllm",
-              "provider": "vllm",
+              "id": "vllm",
               "label": "vLLM Instruct",
               "description": "Deploy new instruct model on vLLM",
               "supported_models": [
@@ -346,8 +265,7 @@ Get providers and dependency rules (no instances).
               ]
             },
             {
-              "provider_id": "watsonx",
-              "provider": "watsonx",
+              "id": "watsonx",
               "label": "IBM watsonx.ai Instruct",
               "description": "Configure watsonx.ai for instruct models",
               "supported_models": [
@@ -357,21 +275,20 @@ Get providers and dependency rules (no instances).
             }
           ]
         },
-        "embedding": {
+        {
+          "type": "embedding",
           "label": "Embedding Model",
           "required": true,
           "providers": [
             {
-              "provider_id": "vllm",
-              "provider": "vllm",
+              "id": "vllm",
               "label": "vLLM Embeddings",
               "supported_models": [
                 "BAAI/bge-base-en-v1.5"
               ]
             },
             {
-              "provider_id": "watsonx",
-              "provider": "watsonx",
+              "id": "watsonx",
               "label": "IBM watsonx.ai Embeddings",
               "supported_models": [
                 "ibm/slate-125m-english-rtrvr"
@@ -379,21 +296,20 @@ Get providers and dependency rules (no instances).
             }
           ]
         },
-        "reranker": {
+        {
+          "type": "reranker",
           "label": "Reranker Model",
           "required": false,
           "providers": [
             {
-              "provider_id": "vllm",
-              "provider": "vllm",
+              "id": "vllm",
               "label": "vLLM Reranker",
               "supported_models": [
                 "BAAI/bge-reranker-v2-m3"
               ]
             },
             {
-              "provider_id": "watsonx",
-              "provider": "watsonx",
+              "id": "watsonx",
               "label": "IBM watsonx.ai Reranker",
               "supported_models": [
                 "ibm/slate-125m-english-reranker"
@@ -401,13 +317,15 @@ Get providers and dependency rules (no instances).
             }
           ]
         }
-      }
+      ]
     },
-    "chat": {
+    {
+      "type": "service",
       "service_id": "chat",
       "service_name": "Question and Answer",
-      "components": {
-        "vector_db": {
+      "components": [
+        {
+          "type": "vector_db",
           "label": "Vector store",
           "required": true,
           "providers": [
@@ -425,7 +343,8 @@ Get providers and dependency rules (no instances).
             }
           ]
         },
-        "llm": {
+        {
+          "type": "llm",
           "label": "LLM Model",
           "required": true,
           "providers": [
@@ -458,7 +377,8 @@ Get providers and dependency rules (no instances).
             }
           ]
         },
-        "embedding": {
+        {
+          "type": "embedding",
           "label": "Embedding Model",
           "required": true,
           "providers": [
@@ -491,7 +411,8 @@ Get providers and dependency rules (no instances).
             }
           ]
         },
-        "reranker": {
+        {
+          "type": "reranker",
           "label": "Reranker Model",
           "required": false,
           "providers": [
@@ -524,9 +445,9 @@ Get providers and dependency rules (no instances).
             }
           ]
         }
-      }
+      ]
     }
-  }
+  ]
 }
 ```
 
@@ -542,32 +463,31 @@ Get components and providers for the digitize service (no instances).
 {
   "service_id": "digitize",
   "service_name": "Digitize documents",
-  "components": {
-    "vector_db": {
+  "components": [
+    {
+      "type": "vector_db",
       "label": "Vector store",
       "required": true,
       "providers": [
         {
-          "provider_id": "opensearch",
-          "provider": "opensearch",
+          "id": "opensearch",
           "label": "OpenSearch",
           "description": "Distributed search and analytics engine"
         },
         {
-          "provider_id": "milvus",
-          "provider": "milvus",
+          "id": "milvus",
           "label": "Milvus",
           "description": "Cloud-native vector database"
         }
       ]
     },
-    "llm": {
+    {
+      "type": "llm",
       "label": "LLM Model",
       "required": true,
       "providers": [
         {
-          "provider_id": "vllm",
-          "provider": "vllm",
+          "id": "vllm",
           "label": "vLLM Instruct",
           "description": "Deploy new instruct model on vLLM",
           "supported_models": [
@@ -576,8 +496,7 @@ Get components and providers for the digitize service (no instances).
           ]
         },
         {
-          "provider_id": "watsonx",
-          "provider": "watsonx",
+          "id": "watsonx",
           "label": "IBM watsonx.ai Instruct",
           "description": "Configure watsonx.ai for instruct models",
           "supported_models": [
@@ -587,21 +506,20 @@ Get components and providers for the digitize service (no instances).
         }
       ]
     },
-    "embedding": {
+    {
+      "type": "embedding",
       "label": "Embedding Model",
       "required": true,
       "providers": [
         {
-          "provider_id": "vllm",
-          "provider": "vllm",
+          "id": "vllm",
           "label": "vLLM Embeddings",
           "supported_models": [
             "BAAI/bge-base-en-v1.5"
           ]
         },
         {
-          "provider_id": "watsonx",
-          "provider": "watsonx",
+          "id": "watsonx",
           "label": "IBM watsonx.ai Embeddings",
           "supported_models": [
             "ibm/slate-125m-english-rtrvr"
@@ -609,21 +527,20 @@ Get components and providers for the digitize service (no instances).
         }
       ]
     },
-    "reranker": {
+    {
+      "type": "reranker",
       "label": "Reranker Model",
       "required": false,
       "providers": [
         {
-          "provider_id": "vllm",
-          "provider": "vllm",
+          "id": "vllm",
           "label": "vLLM Reranker",
           "supported_models": [
             "BAAI/bge-reranker-v2-m3"
           ]
         },
         {
-          "provider_id": "watsonx",
-          "provider": "watsonx",
+          "id": "watsonx",
           "label": "IBM watsonx.ai Reranker",
           "supported_models": [
             "ibm/slate-125m-english-reranker"
@@ -631,11 +548,171 @@ Get components and providers for the digitize service (no instances).
         }
       ]
     }
-  }
+  ]
 }
 ```
 
-### 3. GET `/api/v1/components/{component_type}/instances`
+### 3. GET `/api/v1/architectures/{architecture_id}/params`
+
+Get configuration schemas (JSON Schema) for all component types used in the architecture.
+
+**Purpose**: Fetch configuration schemas for all component types (vector_db, llm, embedding, reranker) that are dependencies of services in this architecture. Returns schemas for all available providers within each component type.
+
+**Example Request:**
+```
+GET /api/v1/architectures/rag/params
+```
+
+**Example Response:**
+```json
+[
+  {
+    "type": "component",
+    "component_type": "vector_db",
+    "provider_id": "opensearch",
+    "schema": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "opensearch": {
+          "type": "object",
+          "properties": {
+            "memoryLimit": {
+              "type": "string",
+              "description": "Sets the memory limit for the Opensearch service (Default: 8Gi). Override by passing a value with a unit suffix (e.g., Mi, Gi).",
+              "default": "8Gi",
+              "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei)$"
+            },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "username": {
+                  "type": "string",
+                  "default": "admin"
+                },
+                "password": {
+                  "type": "string",
+                  "minLength": 15,
+                  "description": "Password for OpenSearch authentication. Must be at least 15 characters and contain at least one uppercase letter, one lowercase letter, one digit, and one special character. Avoid common words, predictable patterns, or dictionary terms.",
+                  "allOf": [
+                    {
+                      "pattern": ".*[a-z].*",
+                      "description": "Must contain at least one lowercase letter"
+                    },
+                    {
+                      "pattern": ".*[A-Z].*",
+                      "description": "Must contain at least one uppercase letter"
+                    },
+                    {
+                      "pattern": ".*[0-9].*",
+                      "description": "Must contain at least one digit"
+                    },
+                    {
+                      "pattern": ".*[@$!%*?&#^()_+\\-=\\[\\]{};':\"\\\\|,.<>/`~].*",
+                      "description": "Must contain at least one special character"
+                    }
+                  ]
+                }
+              },
+              "required": ["password"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "component",
+    "component_type": "llm",
+    "provider_id": "vllm",
+    "schema": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "instruct": {
+          "type": "object",
+          "properties": {
+            "apiSecretKey": {
+              "type": "string",
+              "title": "API Secret Key",
+              "description": "Secret key for API authentication",
+              "minLength": 16
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "component",
+    "component_type": "llm",
+    "provider_id": "watsonx",
+    "schema": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "instruct": {
+          "type": "object",
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "title": "API Key",
+              "description": "IBM watsonx.ai API key for authentication",
+              "minLength": 1
+            },
+            "projectId": {
+              "type": "string",
+              "title": "Project ID",
+              "description": "IBM watsonx.ai project ID",
+              "minLength": 1
+            },
+            "endpoint": {
+              "type": "string",
+              "title": "Endpoint URL",
+              "description": "IBM watsonx.ai endpoint URL",
+              "format": "uri",
+              "default": "https://us-south.ml.cloud.ibm.com"
+            }
+          },
+          "required": ["apiKey", "projectId", "endpoint"]
+        }
+      }
+    }
+  },
+  {
+    "type": "component",
+    "component_type": "embedding",
+    "provider_id": "vllm",
+    "schema": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "embedding": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  },
+  {
+    "type": "component",
+    "component_type": "reranker",
+    "provider_id": "vllm",
+    "schema": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "reranker": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  }
+]
+```
+
+### 4. GET `/api/v1/components/{component_type}/instances`
 
 Get all running instances for a specific component type.
 
@@ -880,88 +957,146 @@ Get configuration schema for a specific provider within a component type.
 {
   "name": "Production RAG System",
   "architecture": "rag",
-  "services": {
-    "digitize": {
-      "enabled": true,
-      "components": {
-        "vector_db": {
-          "id": "create-new",
-          "type": "create_new",
-          "provider": "milvus",
-          "service_id": "milvus",
-          "config": {
-            "storage": "20Gi",
-            "port": 19530
-          }
-        },
-        "inference_backend": {
-          "id": "vllm-instance-1",
-          "type": "existing",
-          "provider": "vllm"
-        },
-        "llm": {
-          "id": "llm-vllm-granite",
-          "type": "existing",
-          "provider": "vllm",
-          "backend_id": "vllm-instance-1"
-        },
-        "embedding": {
-          "id": "create-new",
-          "type": "create_new",
-          "provider": "vllm",
-          "service_id": "embedding-vllm",
-          "backend_id": "vllm-instance-1",
-          "config": {
-            "model": "BAAI/bge-base-en-v1.5"
-          }
-        },
-        "reranker": {
-          "id": "reranker-vllm-1",
-          "type": "existing",
-          "provider": "vllm",
-          "backend_id": "vllm-instance-1"
-        }
-      }
-    },
-    "chat": {
-      "enabled": true,
-      "components": {
-        "vector_db": {
-          "id": "opensearch-instance-1",
-          "type": "existing"
-        },
-        "inference_backend": {
-          "id": "watsonx-instance-1",
-          "type": "existing",
-          "provider": "watsonx"
-        },
-        "llm": {
-          "id": "create-new",
-          "type": "create_new",
-          "provider": "watsonx",
-          "service_id": "instruct-watsonx",
-          "backend_id": "watsonx-instance-1",
-          "config": {
-            "model": "ibm/granite-13b-chat-v2",
-            "api_key": "ibm-cloud-api-key-456"
-          }
-        },
-        "embedding": {
-          "id": "create-new",
-          "type": "create_new",
-          "provider": "watsonx",
-          "service_id": "embedding-watsonx",
-          "backend_id": "watsonx-instance-1",
-          "config": {
-            "model": "ibm/slate-125m-english-rtrvr",
-            "api_key": "ibm-cloud-api-key-456"
-          }
+  "params": [
+    {
+      "type": "component",
+      "component_type": "vector_db",
+      "provider_id": "opensearch",
+      "config": {
+        "memoryLimit": "4Gi",
+        "auth": {
+          "username": "admin",
+          "password": "SecurePassword123!@#"
         }
       }
     }
-  }
+  ],
+  "services": [
+    {
+      "type": "service",
+      "service_id": "digitize",
+      "enabled": true,
+      "version": "1.0.0",
+      "params": {
+        "chunk_size": 512,
+        "overlap": 50
+      },
+      "components": [
+        {
+          "type": "component",
+          "component_type": "vector_db",
+          "provider_id": "opensearch",
+          "params": {
+            "memoryLimit": "8Gi",
+            "auth": {
+              "username": "admin",
+              "password": "AnotherSecurePass456!@#"
+            }
+          }
+        },
+        {
+          "type": "component",
+          "component_type": "llm",
+          "instance_id": "llm-vllm-granite",
+          "provider_id": "vllm"
+        },
+        {
+          "type": "component",
+          "component_type": "embedding",
+          "provider_id": "vllm",
+          "params": {
+            "model": "BAAI/bge-base-en-v1.5"
+          }
+        },
+        {
+          "type": "component",
+          "component_type": "reranker",
+          "instance_id": "reranker-vllm-1",
+          "provider_id": "vllm"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "service_id": "chat",
+      "enabled": true,
+      "version": "1.0.0",
+      "params": {
+        "max_history": 10,
+        "temperature": 0.7
+      },
+      "components": [
+        {
+          "type": "component",
+          "component_type": "vector_db",
+          "instance_id": "opensearch-instance-1",
+          "provider_id": "opensearch"
+        },
+        {
+          "type": "component",
+          "component_type": "llm",
+          "provider_id": "watsonx",
+          "params": {
+            "model": "ibm/granite-13b-chat-v2",
+            "apiKey": "ibm-cloud-api-key-456",
+            "projectId": "wx-project-123",
+            "endpoint": "https://us-south.ml.cloud.ibm.com"
+          }
+        },
+        {
+          "type": "component",
+          "component_type": "embedding",
+          "provider_id": "watsonx",
+          "params": {
+            "model": "ibm/slate-125m-english-rtrvr",
+            "apiKey": "ibm-cloud-api-key-456",
+            "projectId": "wx-project-123",
+            "endpoint": "https://us-south.ml.cloud.ibm.com"
+          }
+        }
+      ]
+    }
+  ]
 }
 ```
+
+**Request Structure:**
+
+The POST request body contains three main sections, all using array-based structures with type discriminators:
+
+1. **Global Architecture Params** (`params`):
+   - Array of architecture-level configurations
+   - Each element has: `type: "component"`, `component_type`, `provider_id`, `config`
+   - Structure: `params[].{type, component_type, provider_id, config}`
+   - Example: `{ "type": "component", "component_type": "vector_db", "provider_id": "opensearch", "config": {...} }`
+   - These params apply globally across all services using that component type and provider
+
+2. **Services** (`services`):
+   - Array of service configurations
+   - Each element has: `type: "service"`, `service_id`, `enabled`, `version`, `params`, `components`
+   - Service-level params are directly under `params` (no extra nesting)
+   - Example: `{ "type": "service", "service_id": "digitize", "params": { "chunk_size": 512 } }`
+
+3. **Components** (`services[].components`):
+   - Array of component configurations for each service
+   - Each element has: `type: "component"`, `component_type`, `provider_id`, and optionally `instance_id` or `params`
+   - Components can be either reused (with `instance_id`) or newly created (with `params`)
+
+**Component Selection Logic:**
+
+Each component in the components array can be specified in one of two ways:
+
+1. **Reuse Existing Component** - When `instance_id` field is present:
+   - The backend will use an existing, already-deployed component instance
+   - Required fields: `type: "component"`, `component_type`, `instance_id`, `provider_id`
+   - Example: `{ "type": "component", "component_type": "vector_db", "instance_id": "opensearch-instance-1", "provider_id": "opensearch" }`
+
+2. **Create New Component** - When `instance_id` field is absent:
+   - The backend will create and deploy a new component instance
+   - Required fields: `type: "component"`, `component_type`, `provider_id`, `params`
+   - Example: `{ "type": "component", "component_type": "vector_db", "provider_id": "opensearch", "params": { "memoryLimit": "8Gi", "auth": {...} } }`
+
+**Note:** The presence of `instance_id` indicates reusing an existing component. If `instance_id` is absent, a new component will be created using the provided `params`. The `type` field is always `"component"` and `component_type` identifies the specific component type (vector_db, llm, embedding, reranker).
 
 ---
 
@@ -1003,7 +1138,6 @@ Get configuration schema for a specific provider within a component type.
 
 1. **Initial Load**
    - Call GET `/options` - receives all options including dependent component options for each backend
-   - Render dropdowns for independent components (vector_db, inference_backend)
    - Show disabled/hidden state for dependent components with message "Select inference backend first"
 
 2. **After Inference Backend Selection**
@@ -1027,17 +1161,3 @@ Get configuration schema for a specific provider within a component type.
    - Submit to POST `/applications` with all selections and configs
 
 ---
-
-## Summary
-
-This dependency-aware design provides:
-
-✅ **Component Dependencies**: llm/embedding/reranker depend on inference_backend
-✅ **Progressive Disclosure**: Dependent dropdowns only appear after parent selection
-✅ **Filtered Options**: Options filtered client-side based on parent's provider
-✅ **Backend Tracking**: backend_id links dependent components to their backend
-✅ **Dynamic & Flexible**: Supports complex component relationships
-✅ **Clean API**: Two GET APIs - `options`, `params` (service-specific, no request body)
-✅ **Architecture & Service Level**: Works for both deployment modes
-✅ **Efficient**: Single options call, then individual params calls per service
-✅ **Service-Specific Schemas**: Each service gets its own tailored configuration schema

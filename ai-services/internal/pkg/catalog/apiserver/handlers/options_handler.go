@@ -25,8 +25,8 @@ func NewOptionsHandler(assetsFS embed.FS) *OptionsHandler {
 
 // Provider metadata structures
 type ProviderMetadata struct {
-	ProviderID      string   `yaml:"provider_id"`
-	Provider        string   `yaml:"provider"`
+	Type            string   `yaml:"type"`
+	ID              string   `yaml:"id"`
 	Label           string   `yaml:"label"`
 	Description     string   `yaml:"description"`
 	ComponentType   string   `yaml:"component_type"`
@@ -67,29 +67,30 @@ type ServiceRef struct {
 
 // Response structures
 type ProviderResponse struct {
-	ProviderID      string   `json:"provider_id"`
-	Provider        string   `json:"provider"`
+	ID              string   `json:"id"`
 	Label           string   `json:"label"`
 	Description     string   `json:"description,omitempty"`
 	SupportedModels []string `json:"supported_models,omitempty"`
 }
 
 type ComponentResponse struct {
+	Type      string             `json:"type"`
 	Label     string             `json:"label"`
 	Required  bool               `json:"required"`
 	Providers []ProviderResponse `json:"providers"`
 }
 
 type ServiceOptionsResponse struct {
-	ServiceID   string                       `json:"service_id"`
-	ServiceName string                       `json:"service_name"`
-	Components  map[string]ComponentResponse `json:"components"`
+	Type        string              `json:"type"`
+	ServiceID   string              `json:"service_id"`
+	ServiceName string              `json:"service_name"`
+	Components  []ComponentResponse `json:"components"`
 }
 
 type ArchitectureOptionsResponse struct {
-	ArchitectureID   string                            `json:"architecture_id"`
-	ArchitectureName string                            `json:"architecture_name"`
-	Services         map[string]ServiceOptionsResponse `json:"services"`
+	ArchitectureID   string                   `json:"architecture_id"`
+	ArchitectureName string                   `json:"architecture_name"`
+	Services         []ServiceOptionsResponse `json:"services"`
 }
 
 // GetArchitectureOptions godoc
@@ -124,7 +125,7 @@ func (h *OptionsHandler) GetArchitectureOptions(c *gin.Context) {
 	response := ArchitectureOptionsResponse{
 		ArchitectureID:   archMeta.ID,
 		ArchitectureName: archMeta.Name,
-		Services:         make(map[string]ServiceOptionsResponse),
+		Services:         []ServiceOptionsResponse{},
 	}
 
 	// Process each service in the architecture
@@ -134,7 +135,7 @@ func (h *OptionsHandler) GetArchitectureOptions(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get options for service %s", svcRef.ID), "details": err.Error()})
 			return
 		}
-		response.Services[svcRef.ID] = svcOptions
+		response.Services = append(response.Services, svcOptions)
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -179,9 +180,10 @@ func (h *OptionsHandler) getServiceOptions(serviceID, architectureID string) (Se
 	}
 
 	response := ServiceOptionsResponse{
+		Type:        "service",
 		ServiceID:   svcMeta.ID,
 		ServiceName: svcMeta.Name,
-		Components:  make(map[string]ComponentResponse),
+		Components:  []ComponentResponse{},
 	}
 
 	// Component type to label mapping
@@ -204,11 +206,12 @@ func (h *OptionsHandler) getServiceOptions(serviceID, architectureID string) (Se
 			label = dep.Type // Fallback to type if label not found
 		}
 
-		response.Components[dep.Type] = ComponentResponse{
+		response.Components = append(response.Components, ComponentResponse{
+			Type:      dep.Type,
 			Label:     label,
 			Required:  dep.Required,
 			Providers: providers,
-		}
+		})
 	}
 
 	return response, nil
@@ -256,8 +259,7 @@ func (h *OptionsHandler) getProvidersForComponentType(componentType, architectur
 		}
 
 		providers = append(providers, ProviderResponse{
-			ProviderID:      providerMeta.ProviderID,
-			Provider:        providerMeta.Provider,
+			ID:              providerMeta.ID,
 			Label:           providerMeta.Label,
 			Description:     providerMeta.Description,
 			SupportedModels: providerMeta.SupportedModels,
@@ -364,6 +366,14 @@ func (h *OptionsHandler) GetComponentProviderParams(c *gin.Context) {
 	c.JSON(http.StatusOK, schema)
 }
 
+// ComponentParamsResponse represents a component with its schema
+type ComponentParamsResponse struct {
+	Type          string                 `json:"type"`
+	ComponentType string                 `json:"component_type"`
+	ProviderID    string                 `json:"provider_id"`
+	Schema        map[string]interface{} `json:"schema"`
+}
+
 // GetArchitectureParams godoc
 //
 //	@Summary		Get architecture component parameters
@@ -372,7 +382,7 @@ func (h *OptionsHandler) GetComponentProviderParams(c *gin.Context) {
 //	@Produce		json
 //	@Security		BearerAuth
 //	@Param			architecture_id	path		string	true	"Architecture ID"
-//	@Success		200				{object}	map[string]interface{}	"JSON Schemas for all components in the architecture"
+//	@Success		200				{array}		ComponentParamsResponse	"JSON Schemas for all components in the architecture"
 //	@Failure		404				{object}	map[string]interface{}	"Architecture not found"
 //	@Failure		500				{object}	map[string]interface{}	"Internal server error"
 //	@Router			/architectures/{architecture_id}/params [get]
@@ -393,8 +403,8 @@ func (h *OptionsHandler) GetArchitectureParams(c *gin.Context) {
 		return
 	}
 
-	// Build response with schemas for components only
-	response := make(map[string]map[string]interface{})
+	// Build response as array
+	var response []ComponentParamsResponse
 
 	// Track unique component types across all services
 	componentTypes := make(map[string]bool)
@@ -422,8 +432,6 @@ func (h *OptionsHandler) GetArchitectureParams(c *gin.Context) {
 
 	// Collect schemas for all component types
 	for componentType := range componentTypes {
-		response[componentType] = make(map[string]interface{})
-
 		// List all providers for this component type
 		componentDir := filepath.Join("components", componentType)
 		entries, err := h.assetsFS.ReadDir(componentDir)
@@ -451,7 +459,12 @@ func (h *OptionsHandler) GetArchitectureParams(c *gin.Context) {
 				continue
 			}
 
-			response[componentType][providerID] = providerSchema
+			response = append(response, ComponentParamsResponse{
+				Type:          "component",
+				ComponentType: componentType,
+				ProviderID:    providerID,
+				Schema:        providerSchema,
+			})
 		}
 	}
 

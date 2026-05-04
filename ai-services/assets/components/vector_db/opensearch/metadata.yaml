@@ -1,6 +1,6 @@
-# Provider identification
-provider_id: opensearch
-provider: opensearch
+# Component identification
+type: component
+id: opensearch
 label: "OpenSearch"
 description: "Distributed search and analytics engine for vector storage"
 

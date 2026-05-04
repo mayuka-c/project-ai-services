@@ -1,5 +1,6 @@
 embedding:
   # @hidden
   image: icr.io/ppc64le-oss/vllm-ppc64le:0.9.1
+  model: "BAAI/bge-base-en-v1.5"
 
 # Made with Bob

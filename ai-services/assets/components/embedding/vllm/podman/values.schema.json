@@ -4,7 +4,19 @@
   "properties": {
     "embedding": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "model": {
+          "type": "string",
+          "title": "Model",
+          "description": "HuggingFace model path for embeddings",
+          "default": "BAAI/bge-base-en-v1.5",
+          "enum": [
+            "BAAI/bge-base-en-v1.5",
+            "BAAI/bge-large-en-v1.5",
+            "sentence-transformers/all-MiniLM-L6-v2"
+          ]
+        }
+      }
     }
   }
 }

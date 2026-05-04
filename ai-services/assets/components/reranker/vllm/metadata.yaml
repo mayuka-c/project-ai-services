@@ -1,6 +1,6 @@
-# Provider identification
-provider_id: vllm
-provider: vllm
+# Component identification
+type: component
+id: vllm
 label: "vLLM Reranker"
 description: "Deploy reranker models on vLLM inference engine"
 

@@ -1,6 +1,6 @@
-# Provider identification
-provider_id: watsonx
-provider: watsonx
+# Component identification
+type: component
+id: watsonx
 label: "IBM watsonx.ai LLM"
 description: "Deploy LLM models on IBM watsonx.ai platform"
 

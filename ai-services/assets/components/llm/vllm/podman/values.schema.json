@@ -5,6 +5,17 @@
     "instruct": {
       "type": "object",
       "properties": {
+        "model": {
+          "type": "string",
+          "title": "Model",
+          "description": "HuggingFace model path for instruct/LLM",
+          "default": "ibm-granite/granite-3.3-8b-instruct",
+          "enum": [
+            "ibm-granite/granite-3.3-8b-instruct",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "mistralai/Mistral-7B-Instruct-v0.3"
+          ]
+        },
         "apiSecretKey": {
           "type": "string",
           "title": "API Secret Key",
