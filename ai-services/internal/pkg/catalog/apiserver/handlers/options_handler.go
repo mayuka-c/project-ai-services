@@ -364,4 +364,98 @@ func (h *OptionsHandler) GetComponentProviderParams(c *gin.Context) {
 	c.JSON(http.StatusOK, schema)
 }
 
+// GetArchitectureParams godoc
+//
+//	@Summary		Get architecture component parameters
+//	@Description	Get configuration schemas (JSON Schema) for all component dependencies in an architecture
+//	@Tags			Parameters
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			architecture_id	path		string	true	"Architecture ID"
+//	@Success		200				{object}	map[string]interface{}	"JSON Schemas for all components in the architecture"
+//	@Failure		404				{object}	map[string]interface{}	"Architecture not found"
+//	@Failure		500				{object}	map[string]interface{}	"Internal server error"
+//	@Router			/architectures/{architecture_id}/params [get]
+func (h *OptionsHandler) GetArchitectureParams(c *gin.Context) {
+	architectureID := c.Param("architecture_id")
+
+	// Read architecture metadata to get list of services
+	archMetadataPath := filepath.Join("architectures", architectureID, "metadata.yaml")
+	archMetadataData, err := h.assetsFS.ReadFile(archMetadataPath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "architecture not found", "details": err.Error()})
+		return
+	}
+
+	var archMetadata ArchitectureMetadata
+	if err := yaml.Unmarshal(archMetadataData, &archMetadata); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse architecture metadata", "details": err.Error()})
+		return
+	}
+
+	// Build response with schemas for components only
+	response := make(map[string]map[string]interface{})
+
+	// Track unique component types across all services
+	componentTypes := make(map[string]bool)
+
+	for _, serviceRef := range archMetadata.Services {
+		serviceID := serviceRef.ID
+
+		// Read service metadata to get dependencies
+		serviceMetadataPath := filepath.Join("services", serviceID, "metadata.yaml")
+		serviceMetadataData, err := h.assetsFS.ReadFile(serviceMetadataPath)
+		if err != nil {
+			continue
+		}
+
+		var serviceMetadata ServiceMetadata
+		if err := yaml.Unmarshal(serviceMetadataData, &serviceMetadata); err != nil {
+			continue
+		}
+
+		// Collect component types from service dependencies
+		for _, dep := range serviceMetadata.Dependencies {
+			componentTypes[dep.Type] = true
+		}
+	}
+
+	// Collect schemas for all component types
+	for componentType := range componentTypes {
+		response[componentType] = make(map[string]interface{})
+
+		// List all providers for this component type
+		componentDir := filepath.Join("components", componentType)
+		entries, err := h.assetsFS.ReadDir(componentDir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			providerID := entry.Name()
+
+			// Read provider schema
+			providerSchemaPath := filepath.Join(componentDir, providerID, "podman", "values.schema.json")
+			providerSchemaData, err := h.assetsFS.ReadFile(providerSchemaPath)
+			if err != nil {
+				// Skip if schema doesn't exist
+				continue
+			}
+
+			var providerSchema map[string]interface{}
+			if err := json.Unmarshal(providerSchemaData, &providerSchema); err != nil {
+				continue
+			}
+
+			response[componentType][providerID] = providerSchema
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
 // Made with Bob

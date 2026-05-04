@@ -99,9 +99,97 @@ Get available providers and dependency rules for all services and their componen
 
 #### 2. GET `/api/v1/architectures/{architecture_id}/params`
 
-Get configuration form fields for all services in the architecture.
+Get configuration schemas (JSON Schema) for all component types used in the architecture.
 
-**Purpose**: Fetch all configuration schemas for services that can be created in this architecture.
+**Purpose**: Fetch configuration schemas for all component types (vector_db, llm, embedding, reranker) that are dependencies of services in this architecture. Returns schemas for all available providers within each component type.
+
+**Response Structure:**
+- Map of component_type to provider schemas
+- Each component type contains a map of provider_id to JSON Schema
+- Only includes component types that are used by services in the architecture
+- Does NOT include service-level schemas (use service-specific endpoint for those)
+
+**Example Response:**
+```json
+{
+  "vector_db": {
+    "opensearch": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "memoryLimit": {
+          "type": "string",
+          "description": "Memory limit for OpenSearch",
+          "default": "8Gi"
+        },
+        "storage": {
+          "type": "string",
+          "description": "Storage size",
+          "default": "20Gi"
+        }
+      }
+    },
+    "milvus": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "storage": {
+          "type": "string",
+          "default": "20Gi"
+        }
+      }
+    }
+  },
+  "llm": {
+    "vllm": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "apiSecretKey": {
+          "type": "string",
+          "description": "API secret key"
+        }
+      }
+    },
+    "watsonx": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "apiKey": {
+          "type": "string",
+          "description": "watsonx API key"
+        },
+        "projectId": {
+          "type": "string",
+          "description": "watsonx project ID"
+        }
+      }
+    }
+  },
+  "embedding": {
+    "vllm": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "apiSecretKey": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "reranker": {
+    "vllm": {
+      "$schema": "https://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "apiSecretKey": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
+```
 
 ### Service Level
 

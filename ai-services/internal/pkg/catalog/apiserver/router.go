@@ -42,6 +42,7 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 		v1.GET("/components/:component_type/instances", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetComponentInstances)
 
 		// Component selection parameters endpoints
+		v1.GET("/architectures/:architecture_id/params", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetArchitectureParams)
 		v1.GET("/services/:service_id/params", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetServiceParams)
 		v1.GET("/components/:component_type/providers/:provider_id/params", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetComponentProviderParams)
 	}
