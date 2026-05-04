@@ -1,0 +1,22 @@
+# Provider identification
+provider_id: vllm
+provider: vllm
+label: "vLLM Reranker"
+description: "Deploy reranker models on vLLM inference engine"
+
+# Component type this provider belongs to
+component_type: reranker
+
+# Certification and support
+certified_by: "IBM"
+
+# Supported models
+supported_models:
+  - "BAAI/bge-reranker-v2-m3"
+  - "BAAI/bge-reranker-large"
+
+# Architectures this provider supports
+architectures:
+  - rag
+
+# Made with Bob

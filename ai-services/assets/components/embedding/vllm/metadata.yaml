@@ -1,0 +1,23 @@
+# Provider identification
+provider_id: vllm
+provider: vllm
+label: "vLLM Embeddings"
+description: "Deploy embedding models on vLLM inference engine"
+
+# Component type this provider belongs to
+component_type: embedding
+
+# Certification and support
+certified_by: "IBM"
+
+# Supported models
+supported_models:
+  - "BAAI/bge-base-en-v1.5"
+  - "BAAI/bge-large-en-v1.5"
+  - "sentence-transformers/all-MiniLM-L6-v2"
+
+# Architectures this provider supports
+architectures:
+  - rag
+
+# Made with Bob
