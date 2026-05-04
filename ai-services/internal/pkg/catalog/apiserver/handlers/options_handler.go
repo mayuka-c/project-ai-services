@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -291,6 +292,76 @@ func (h *OptionsHandler) GetComponentInstances(c *gin.Context) {
 	instances := []InstanceResponse{}
 
 	c.JSON(http.StatusOK, instances)
+}
+
+// GetServiceParams godoc
+//
+//	@Summary		Get service parameters
+//	@Description	Get configuration schema (JSON Schema) for a specific service
+//	@Tags			Parameters
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			service_id	path		string	true	"Service ID"
+//	@Success		200			{object}	map[string]interface{}	"JSON Schema for service configuration"
+//	@Failure		404			{object}	map[string]interface{}	"Service not found"
+//	@Failure		500			{object}	map[string]interface{}	"Internal server error"
+//	@Router			/services/{service_id}/params [get]
+func (h *OptionsHandler) GetServiceParams(c *gin.Context) {
+	serviceID := c.Param("service_id")
+
+	fmt.Println("ServiceID: ", serviceID)
+
+	// Read service schema file from podman directory
+	schemaPath := filepath.Join("services", serviceID, "podman", "values.schema.json")
+	schemaData, err := h.assetsFS.ReadFile(schemaPath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "service schema not found", "details": err.Error()})
+		return
+	}
+
+	// Parse and return the JSON schema
+	var schema map[string]interface{}
+	if err := json.Unmarshal(schemaData, &schema); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse schema", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, schema)
+}
+
+// GetComponentProviderParams godoc
+//
+//	@Summary		Get component provider parameters
+//	@Description	Get configuration schema (JSON Schema) for a specific provider within a component type
+//	@Tags			Parameters
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			component_type	path		string	true	"Component type (vector_db, llm, embedding, reranker)"
+//	@Param			provider_id		path		string	true	"Provider ID (e.g., opensearch, vllm, watsonx)"
+//	@Success		200				{object}	map[string]interface{}	"JSON Schema for provider configuration"
+//	@Failure		404				{object}	map[string]interface{}	"Provider schema not found"
+//	@Failure		500				{object}	map[string]interface{}	"Internal server error"
+//	@Router			/components/{component_type}/providers/{provider_id}/params [get]
+func (h *OptionsHandler) GetComponentProviderParams(c *gin.Context) {
+	componentType := c.Param("component_type")
+	providerID := c.Param("provider_id")
+
+	// Read provider schema file from podman directory
+	schemaPath := filepath.Join("components", componentType, providerID, "podman", "values.schema.json")
+	schemaData, err := h.assetsFS.ReadFile(schemaPath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "provider schema not found", "details": err.Error()})
+		return
+	}
+
+	// Parse and return the JSON schema
+	var schema map[string]interface{}
+	if err := json.Unmarshal(schemaData, &schema); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse schema", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, schema)
 }
 
 // Made with Bob

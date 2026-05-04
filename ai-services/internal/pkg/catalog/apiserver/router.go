@@ -35,12 +35,16 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 		v1.POST("/auth/logout", middleware.AuthMiddleware(tokenMgr, blacklist), authHandler.Logout)
 		v1.POST("/auth/refresh", authHandler.Refresh)
 		v1.GET("/auth/me", middleware.AuthMiddleware(tokenMgr, blacklist), authHandler.Me)
-	}
 
-	// Component selection options endpoints
-	v1.GET("/architectures/:architecture_id/options", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetArchitectureOptions)
-	v1.GET("/services/:service_id/options", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetServiceOptions)
-	v1.GET("/components/:component_type/instances", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetComponentInstances)
+		// Component selection options endpoints
+		v1.GET("/architectures/:architecture_id/options", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetArchitectureOptions)
+		v1.GET("/services/:service_id/options", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetServiceOptions)
+		v1.GET("/components/:component_type/instances", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetComponentInstances)
+
+		// Component selection parameters endpoints
+		v1.GET("/services/:service_id/params", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetServiceParams)
+		v1.GET("/components/:component_type/providers/:provider_id/params", middleware.AuthMiddleware(tokenMgr, blacklist), optionsHandler.GetComponentProviderParams)
+	}
 
 	applications := v1.Group("applications")
 	applications.Use(middleware.AuthMiddleware(tokenMgr, blacklist))

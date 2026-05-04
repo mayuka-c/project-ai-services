@@ -1,0 +1,9 @@
+instruct:
+  # @description IBM watsonx.ai API key for authentication
+  apiKey: ""
+  # @description IBM watsonx.ai project ID
+  projectId: ""
+  # @description IBM watsonx.ai endpoint URL
+  endpoint: "https://us-south.ml.cloud.ibm.com"
+
+# Made with Bob

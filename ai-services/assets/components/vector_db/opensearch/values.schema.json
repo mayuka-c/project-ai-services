@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "OpenSearch Configuration",
+  "properties": {
+    "storage": {
+      "type": "string",
+      "title": "Storage Size",
+      "description": "Persistent storage size for OpenSearch",
+      "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei)$",
+      "default": "20Gi"
+    },
+    "memoryLimit": {
+      "type": "string",
+      "title": "Memory Limit",
+      "description": "Memory limit for OpenSearch",
+      "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei)$",
+      "default": "4Gi"
+    },
+    "auth": {
+      "type": "object",
+      "title": "Authentication",
+      "properties": {
+        "password": {
+          "type": "string",
+          "title": "Admin Password",
+          "description": "Password must be at least 15 characters and contain at least one uppercase letter, one lowercase letter, one digit, and one special character",
+          "minLength": 15,
+          "allOf": [
+            {
+              "pattern": ".*[a-z].*",
+              "description": "Must contain at least one lowercase letter"
+            },
+            {
+              "pattern": ".*[A-Z].*",
+              "description": "Must contain at least one uppercase letter"
+            },
+            {
+              "pattern": ".*[0-9].*",
+              "description": "Must contain at least one digit"
+            },
+            {
+              "pattern": ".*[@$!%*?&#^()_+\\-=\\[\\]{};':\"\\\\|,.<>/`~].*",
+              "description": "Must contain at least one special character"
+            }
+          ]
+        }
+      },
+      "required": ["password"]
+    }
+  },
+  "required": ["storage"]
+}

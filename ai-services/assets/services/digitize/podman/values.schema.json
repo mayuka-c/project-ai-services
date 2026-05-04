@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "digitize": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "string",
+          "description": "Host port for the DIGITIZE API. If unspecified, a random available port is assigned. Specify a port number to use a custom value.",
+          "pattern": "^([0-9]{1,5})?$"
+        }
+      }
+    },
+    "digitizeUi": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "string",
+          "description": "Host port for the DIGITIZE UI. If unspecified, a random available port is assigned. Specify a port number to use a custom value.",
+          "pattern": "^([0-9]{1,5})?$"
+        }
+      }
+    },
+    "opensearch": {
+      "type": "object",
+      "properties": {
+        "auth": {
+          "type": "object",
+          "properties": {
+            "username": {
+              "type": "string",
+              "default": "admin"
+            },
+            "password": {
+              "type": "string",
+              "description": "Password for OpenSearch authentication. Must be at least 15 characters and contain at least one uppercase letter, one lowercase letter, one digit, and one special character. Avoid common words, predictable patterns, or dictionary terms.",
+              "minLength": 15,
+              "allOf": [
+                {
+                  "pattern": ".*[a-z].*",
+                  "description": "Must contain at least one lowercase letter"
+                },
+                {
+                  "pattern": ".*[A-Z].*",
+                  "description": "Must contain at least one uppercase letter"
+                },
+                {
+                  "pattern": ".*[0-9].*",
+                  "description": "Must contain at least one digit"
+                },
+                {
+                  "pattern": ".*[@$!%*?&#^()_+\\-=\\[\\]{};':\"\\\\|,.<>/`~].*",
+                  "description": "Must contain at least one special character"
+                }
+              ]
+            }
+          },
+          "required": ["password"]
+        }
+      }
+    }
+  }
+}

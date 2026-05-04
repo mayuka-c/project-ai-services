@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "instruct": {
+      "type": "object",
+      "properties": {
+        "apiSecretKey": {
+          "type": "string",
+          "title": "API Secret Key",
+          "description": "Secret key for API authentication",
+          "minLength": 16
+        }
+      }
+    }
+  }
+}
