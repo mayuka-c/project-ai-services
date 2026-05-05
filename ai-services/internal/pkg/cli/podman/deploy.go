@@ -64,7 +64,12 @@ func DeployPodAndReadinessCheck(rt runtime.Runtime, podSpec *models.PodSpec,
 func doContainersCreationCheck(rt runtime.Runtime, podSpec *models.PodSpec, podTemplateName, podName, podID string) error {
 	logger.Infof("'%s', '%s': Performing Containers Creation check for pod...\n", podTemplateName, podName)
 
-	expectedContainerCount := len(specs.FetchContainerNames(*podSpec))
+	containerNames := specs.FetchContainerNames(*podSpec)
+	expectedContainerCount := len(containerNames)
+
+	logger.Infof("'%s', '%s': PodSpec has %d containers, %d initContainers\n", podTemplateName, podName, len(podSpec.Spec.Containers), len(podSpec.Spec.InitContainers))
+	logger.Infof("'%s', '%s': Container names from spec: %v\n", podTemplateName, podName, containerNames)
+	logger.Infof("'%s', '%s': Expected container count: %d\n", podTemplateName, podName, expectedContainerCount)
 
 	logger.Infof("'%s', '%s': Waiting for Containers Creation... Timeout set: %s\n", podTemplateName, podName, containerCreationTimeout)
 	// wait for all containers for a given pod are created

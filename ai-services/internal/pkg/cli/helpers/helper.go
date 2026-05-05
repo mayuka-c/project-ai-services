@@ -54,22 +54,44 @@ func WaitForContainerReadiness(runtime runtime.Runtime, containerNameOrId string
 // WaitForContainersCreation waits until all the containers in the provided podID are created within the specified timeout.
 func WaitForContainersCreation(runtime runtime.Runtime, podID string, expectedContainerCount int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	iterationCount := 0
+
+	logger.Infof("WaitForContainersCreation: Starting wait for podID=%s, expectedCount=%d (+1 infra), timeout=%s\n", podID, expectedContainerCount, timeout)
 
 	for {
+		iterationCount++
 		// fetch the pod info
 		pInfo, err := runtime.InspectPod(podID)
 		if err != nil {
 			return fmt.Errorf("failed to do pod inspect for podID: %s with error: %w", podID, err)
 		}
 
+		currentCount := len(pInfo.Containers)
+		expectedTotal := expectedContainerCount + 1
+
+		logger.Infof("WaitForContainersCreation: Iteration %d - Current containers: %d, Expected: %d, Remaining time: %s\n",
+			iterationCount, currentCount, expectedTotal, time.Until(deadline).Round(time.Second))
+
+		// Log container details for debugging
+		if currentCount > 0 {
+			containerNames := make([]string, 0, len(pInfo.Containers))
+			for _, c := range pInfo.Containers {
+				containerNames = append(containerNames, c.Name)
+			}
+			logger.Infof("WaitForContainersCreation: Current containers: %v\n", containerNames)
+		}
+
 		// if the expected count is reached, then all the containers are created
 		// Note: Adding +1 to the expectedContainerCount as there is an additional 'infra' container added to all pods by podman
-		if len(pInfo.Containers) == expectedContainerCount+1 {
+		if currentCount == expectedTotal {
+			logger.Infof("WaitForContainersCreation: Success! All %d containers created after %d iterations\n", currentCount, iterationCount)
 			return nil
 		}
 
 		// if deadline exceeds, stop the container creation check
 		if time.Now().After(deadline) {
+			logger.Errorf("WaitForContainersCreation: Timeout after %d iterations. Current: %d containers, Expected: %d containers\n",
+				iterationCount, currentCount, expectedTotal)
 			return fmt.Errorf("operation timed out waiting for container creation")
 		}
 

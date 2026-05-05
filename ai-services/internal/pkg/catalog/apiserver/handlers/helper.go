@@ -19,6 +19,7 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/models"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime"
 	"gopkg.in/yaml.v3"
+	k8syaml "sigs.k8s.io/yaml"
 )
 
 // ComponentInfo holds the information derived from a deployed component
@@ -30,14 +31,17 @@ type ComponentInfo struct {
 }
 
 // deployApplication deploys services and components based on the request
-func (h *ApplicationHandler) deployApplication(ctx context.Context, req *createApplicationReq) error {
-	logger.Infof("Deploying application '%s' with template '%s'\n", req.Name, req.Template)
+func (h *ApplicationHandler) deployApplication(ctx context.Context, req *createApplicationReq) (string, error) {
+	// Use a static UUID for appName instead of req.Name
+	appName := "550e8400-e29b-41d4-a716-446655440000"
+
+	logger.Infof("Deploying application '%s' with template '%s'\n", appName, req.Template)
 
 	// Create runtime client
 	runtimeFactory := runtime.NewRuntimeFactory(h.runtimeType)
-	runtimeClient, err := runtimeFactory.Create(req.Name)
+	runtimeClient, err := runtimeFactory.Create(appName)
 	if err != nil {
-		return fmt.Errorf("failed to create runtime client: %w", err)
+		return "", fmt.Errorf("failed to create runtime client: %w", err)
 	}
 
 	// Template provider for loading component/service templates
@@ -49,17 +53,23 @@ func (h *ApplicationHandler) deployApplication(ctx context.Context, req *createA
 	// Determine if template is an architecture or a service
 	isArchitecture, err := h.isArchitectureTemplate(req.Template)
 	if err != nil {
-		return fmt.Errorf("failed to determine template type: %w", err)
+		return "", fmt.Errorf("failed to determine template type: %w", err)
 	}
 
 	if isArchitecture {
 		logger.Infof("Template '%s' is an architecture, resolving service dependencies\n", req.Template)
 		// For architecture: resolve services and their component dependencies
-		return h.deployArchitecture(ctx, runtimeClient, tp, req, globalParams)
+		if err := h.deployArchitecture(ctx, runtimeClient, tp, req, globalParams, appName); err != nil {
+			return "", err
+		}
+		return appName, nil
 	} else {
 		logger.Infof("Template '%s' is a service, resolving component dependencies\n", req.Template)
 		// For service: resolve component dependencies only
-		return h.deployServiceTemplate(ctx, runtimeClient, tp, req, globalParams)
+		if err := h.deployServiceTemplate(ctx, runtimeClient, tp, req, globalParams, appName); err != nil {
+			return "", err
+		}
+		return appName, nil
 	}
 }
 
@@ -93,7 +103,7 @@ func (h *ApplicationHandler) isArchitectureTemplate(templateName string) (bool, 
 }
 
 // deployArchitecture deploys an architecture with all its services and components
-func (h *ApplicationHandler) deployArchitecture(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, req *createApplicationReq, globalParams map[string]map[string]interface{}) error {
+func (h *ApplicationHandler) deployArchitecture(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, req *createApplicationReq, globalParams map[string]map[string]interface{}, appName string) error {
 	logger.Infof("Deploying architecture: %s\n", req.Template)
 
 	// Load architecture metadata to get service dependencies
@@ -106,6 +116,7 @@ func (h *ApplicationHandler) deployArchitecture(ctx context.Context, runtimeClie
 	var archMetadata struct {
 		ID       string `yaml:"id"`
 		Name     string `yaml:"name"`
+		Version  string `yaml:"version"`
 		Services []struct {
 			ID       string `yaml:"id"`
 			Version  string `yaml:"version"`
@@ -130,7 +141,7 @@ func (h *ApplicationHandler) deployArchitecture(ctx context.Context, runtimeClie
 	fmt.Println("Service Components: ", serviceComponents)
 
 	// Calculate and allocate Spyre cards
-	pool, err := h.calculateAndAllocateSpyreCards(ctx, runtimeClient, tp, req.Name, globalComponents, serviceComponents)
+	pool, err := h.calculateAndAllocateSpyreCards(ctx, runtimeClient, tp, appName, globalComponents, serviceComponents)
 	if err != nil {
 		return fmt.Errorf("failed to allocate Spyre cards: %w", err)
 	}
@@ -139,7 +150,7 @@ func (h *ApplicationHandler) deployArchitecture(ctx context.Context, runtimeClie
 	globalComponentInfos := make(map[string]*ComponentInfo)
 	for key, component := range globalComponents {
 		logger.Infof("Deploying global component: %s/%s\n", component.ComponentType, component.ProviderID)
-		info, err := h.deployComponent(ctx, runtimeClient, tp, req.Name, "global", component, nil, pool)
+		info, err := h.deployComponent(ctx, runtimeClient, tp, appName, "global", component, nil, pool, archMetadata.Name, archMetadata.Version)
 		if err != nil {
 			return fmt.Errorf("failed to deploy global component %s: %w", key, err)
 		}
@@ -158,7 +169,7 @@ func (h *ApplicationHandler) deployArchitecture(ctx context.Context, runtimeClie
 		// Get service-specific components for this service
 		serviceSpecificComponents := serviceComponents[service.ServiceID]
 
-		if err := h.deployServiceWithResolvedComponents(ctx, runtimeClient, tp, req.Name, &service, serviceSpecificComponents, globalComponentInfos, pool); err != nil {
+		if err := h.deployServiceWithResolvedComponents(ctx, runtimeClient, tp, appName, &service, serviceSpecificComponents, globalComponentInfos, pool, archMetadata.Name, archMetadata.Version); err != nil {
 			return fmt.Errorf("failed to deploy service %s: %w", service.ServiceID, err)
 		}
 	}
@@ -502,6 +513,8 @@ func (h *ApplicationHandler) deployServiceWithResolvedComponents(
 	serviceSpecificComponents []*ComponentParam,
 	globalComponentInfos map[string]*ComponentInfo,
 	pool *SpyreCardPool,
+	appTemplateName string,
+	version string,
 ) error {
 	logger.Infof("Deploying service '%s' with %d service-specific components and %d global components\n",
 		service.ServiceID, len(serviceSpecificComponents), len(globalComponentInfos))
@@ -515,7 +528,7 @@ func (h *ApplicationHandler) deployServiceWithResolvedComponents(
 
 	// Deploy service-specific components and add their info
 	for _, component := range serviceSpecificComponents {
-		info, err := h.deployComponent(ctx, runtimeClient, tp, appName, service.ServiceID, component, service.Params, pool)
+		info, err := h.deployComponent(ctx, runtimeClient, tp, appName, service.ServiceID, component, service.Params, pool, appTemplateName, version)
 		if err != nil {
 			return fmt.Errorf("failed to deploy service-specific component %s: %w", component.ComponentType, err)
 		}
@@ -535,8 +548,24 @@ func (h *ApplicationHandler) deployServiceWithResolvedComponents(
 
 	return nil
 }
-func (h *ApplicationHandler) deployServiceTemplate(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, req *createApplicationReq, globalParams map[string]map[string]interface{}) error {
+func (h *ApplicationHandler) deployServiceTemplate(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, req *createApplicationReq, globalParams map[string]map[string]interface{}, appName string) error {
 	logger.Infof("Deploying service template: %s\n", req.Template)
+
+	// Load service metadata to get name and version
+	servicePath := filepath.Join("services", req.Template, "metadata.yaml")
+	serviceData, err := assets.CatalogFS.ReadFile(servicePath)
+	if err != nil {
+		return fmt.Errorf("failed to read service metadata: %w", err)
+	}
+
+	var serviceMetadata struct {
+		ID      string `yaml:"id"`
+		Name    string `yaml:"name"`
+		Version string `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(serviceData, &serviceMetadata); err != nil {
+		return fmt.Errorf("failed to parse service metadata: %w", err)
+	}
 
 	// For service template, there should be exactly one service in the request
 	if len(req.Services) != 1 {
@@ -551,7 +580,7 @@ func (h *ApplicationHandler) deployServiceTemplate(ctx context.Context, runtimeC
 	// Merge global params with service-specific component params
 	mergedService := h.mergeServiceParams(&service, globalParams)
 
-	if err := h.deployServiceWithComponents(ctx, runtimeClient, tp, req.Name, mergedService); err != nil {
+	if err := h.deployServiceWithComponents(ctx, runtimeClient, tp, appName, mergedService, serviceMetadata.Name, serviceMetadata.Version); err != nil {
 		return fmt.Errorf("failed to deploy service %s: %w", service.ServiceID, err)
 	}
 
@@ -591,7 +620,7 @@ func (h *ApplicationHandler) mergeServiceParams(service *ServiceParam, globalPar
 }
 
 // deployServiceWithComponents deploys a service and all its components
-func (h *ApplicationHandler) deployServiceWithComponents(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, appName string, service *ServiceParam) error {
+func (h *ApplicationHandler) deployServiceWithComponents(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, appName string, service *ServiceParam, appTemplateName, version string) error {
 	logger.Infof("Deploying service '%s' with %d components\n", service.ServiceID, len(service.Components))
 
 	// Map to store component information
@@ -599,7 +628,7 @@ func (h *ApplicationHandler) deployServiceWithComponents(ctx context.Context, ru
 
 	// Deploy components first and collect their information
 	for _, component := range service.Components {
-		info, err := h.deployComponent(ctx, runtimeClient, tp, appName, service.ServiceID, &component, service.Params, nil)
+		info, err := h.deployComponent(ctx, runtimeClient, tp, appName, service.ServiceID, &component, service.Params, nil, appTemplateName, version)
 		if err != nil {
 			return fmt.Errorf("failed to deploy component %s for service %s: %w", component.ComponentType, service.ServiceID, err)
 		}
@@ -621,7 +650,7 @@ func (h *ApplicationHandler) deployServiceWithComponents(ctx context.Context, ru
 }
 
 // deployComponent deploys a single component (either new or reuses existing) and returns its information
-func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, appName, serviceID string, component *ComponentParam, serviceParams map[string]interface{}, pool *SpyreCardPool) (*ComponentInfo, error) {
+func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient runtime.Runtime, tp templates.Template, appName, serviceID string, component *ComponentParam, serviceParams map[string]interface{}, pool *SpyreCardPool, appTemplateName, version string) (*ComponentInfo, error) {
 	// If reusing existing instance, get its information
 	if component.InstanceID != "" {
 		logger.Infof("Reusing existing component instance: %s\n", component.InstanceID)
@@ -653,6 +682,30 @@ func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient 
 		return nil, fmt.Errorf("failed to parse component metadata: %w", err)
 	}
 
+	// Load component default values
+	valuesPath := filepath.Join(componentPath, "values.yaml")
+	valuesData, err := assets.CatalogFS.ReadFile(valuesPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read component values.yaml: %w", err)
+	}
+
+	// Parse default values
+	defaultValues := make(map[string]interface{})
+	if err := yaml.Unmarshal(valuesData, &defaultValues); err != nil {
+		return nil, fmt.Errorf("failed to parse component values.yaml: %w", err)
+	}
+
+	// Merge component params with default values (params override defaults)
+	mergedValues := make(map[string]interface{})
+	for k, v := range defaultValues {
+		mergedValues[k] = v
+	}
+	if component.Params != nil {
+		for k, v := range component.Params {
+			mergedValues[k] = v
+		}
+	}
+
 	// Load template files
 	templateFiles, err := assets.CatalogFS.ReadDir(filepath.Join(componentPath, "templates"))
 	if err != nil {
@@ -681,12 +734,14 @@ func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient 
 
 		// First, render template with minimal params to get pod spec for Spyre card calculation
 		initialParams := map[string]interface{}{
-			"AppName":       appName,
-			"ServiceID":     serviceID,
-			"Values":        component.Params,
-			"ComponentType": component.ComponentType,
-			"ProviderID":    component.ProviderID,
-			"env":           map[string]map[string]string{}, // Empty env for initial render
+			"AppName":         appName,
+			"ServiceID":       serviceID,
+			"Values":          mergedValues,
+			"ComponentType":   component.ComponentType,
+			"ProviderID":      component.ProviderID,
+			"AppTemplateName": appTemplateName,
+			"Version":         version,
+			"env":             map[string]map[string]string{}, // Empty env for initial render
 		}
 
 		var initialRendered bytes.Buffer
@@ -696,7 +751,7 @@ func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient 
 
 		// Parse rendered YAML to get pod spec
 		var podSpec models.PodSpec
-		if err := yaml.Unmarshal(initialRendered.Bytes(), &podSpec); err != nil {
+		if err := k8syaml.Unmarshal(initialRendered.Bytes(), &podSpec); err != nil {
 			return nil, fmt.Errorf("failed to parse rendered pod spec: %w", err)
 		}
 
@@ -708,12 +763,14 @@ func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient 
 
 		// Prepare final template parameters with env
 		params := map[string]interface{}{
-			"AppName":       appName,
-			"ServiceID":     serviceID,
-			"Values":        component.Params,
-			"ComponentType": component.ComponentType,
-			"ProviderID":    component.ProviderID,
-			"env":           env,
+			"AppName":         appName,
+			"ServiceID":       serviceID,
+			"Values":          mergedValues,
+			"ComponentType":   component.ComponentType,
+			"ProviderID":      component.ProviderID,
+			"AppTemplateName": appTemplateName,
+			"Version":         version,
+			"env":             env,
 		}
 
 		fmt.Printf("Component: %s with params: %+v\n", component.ProviderID, params)
@@ -724,15 +781,16 @@ func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient 
 			return nil, fmt.Errorf("failed to render template %s: %w", file.Name(), err)
 		}
 
-		// Parse final rendered YAML
-		if err := yaml.Unmarshal(rendered.Bytes(), &podSpec); err != nil {
+		// Parse final rendered YAML to get the complete pod spec with all fields
+		var finalPodSpec models.PodSpec
+		if err := k8syaml.Unmarshal(rendered.Bytes(), &finalPodSpec); err != nil {
 			return nil, fmt.Errorf("failed to parse rendered pod spec: %w", err)
 		}
 
-		// Deploy the pod
+		// Deploy the pod using the final pod spec
 		reader := bytes.NewReader(rendered.Bytes())
-		if err := podman.DeployPodAndReadinessCheck(runtimeClient, &podSpec, file.Name(), reader, podman.ConstructPodDeployOptions(podSpec.Annotations)); err != nil {
-			return nil, fmt.Errorf("failed to deploy pod %s: %w", podSpec.Name, err)
+		if err := podman.DeployPodAndReadinessCheck(runtimeClient, &finalPodSpec, file.Name(), reader, podman.ConstructPodDeployOptions(finalPodSpec.Annotations)); err != nil {
+			return nil, fmt.Errorf("failed to deploy pod %s: %w", finalPodSpec.Name, err)
 		}
 
 		// Extract information from the deployed pod
@@ -740,13 +798,13 @@ func (h *ApplicationHandler) deployComponent(ctx context.Context, runtimeClient 
 		componentInfo = &ComponentInfo{}
 
 		// 1. Extract domain (hostname) from pod name
-		// Example: podSpec.Name = "myapp--instruct" → Domain = "myapp--instruct"
-		componentInfo.Domain = podSpec.Name
+		// Example: finalPodSpec.Name = "myapp--instruct" → Domain = "myapp--instruct"
+		componentInfo.Domain = finalPodSpec.Name
 
 		// 2. Extract port from the pod spec's first container
 		// Example: Ports[0].ContainerPort = 8000 → Port = "8000"
-		if len(podSpec.Spec.Containers) > 0 && len(podSpec.Spec.Containers[0].Ports) > 0 {
-			componentInfo.Port = fmt.Sprintf("%d", podSpec.Spec.Containers[0].Ports[0].ContainerPort)
+		if len(finalPodSpec.Spec.Containers) > 0 && len(finalPodSpec.Spec.Containers[0].Ports) > 0 {
+			componentInfo.Port = fmt.Sprintf("%d", finalPodSpec.Spec.Containers[0].Ports[0].ContainerPort)
 		}
 
 		// 3. Compute endpoint URL using domain and port

@@ -12,34 +12,34 @@ backend:
   # @hidden
   log_level: "INFO"
 
-opensearch:
-  # @hidden
-  endpoint: ""
-  # @hidden
-  host: ""
-  # @hidden
-  port: "9200"
-  auth:
-    username: "admin"
-    # @description Password for OpenSearch authentication. Must be at least 15 characters and contain at least one uppercase letter, one lowercase letter, one digit, and one special character. Avoid common words, predictable patterns, or dictionary terms. Use this to override the default admin password.
-    password: "AiServices@12345"
+# opensearch:
+#   # @hidden
+#   endpoint: ""
+#   # @hidden
+#   host: ""
+#   # @hidden
+#   port: "9200"
+#   auth:
+#     username: "admin"
+#     # @description Password for OpenSearch authentication. Must be at least 15 characters and contain at least one uppercase letter, one lowercase letter, one digit, and one special character. Avoid common words, predictable patterns, or dictionary terms. Use this to override the default admin password.
+#     password: "AiServices@12345"
 
-llm:
-  # @hidden
-  endpoint: ""
-  # @hidden
-  model: ""
+# llm:
+#   # @hidden
+#   endpoint: ""
+#   # @hidden
+#   model: ""
 
-embedding:
-  # @hidden
-  endpoint: ""
-  # @hidden
-  model: ""
+# embedding:
+#   # @hidden
+#   endpoint: ""
+#   # @hidden
+#   model: ""
 
-reranker:
-  # @hidden
-  endpoint: ""
-  # @hidden
-  model: ""
+# reranker:
+#   # @hidden
+#   endpoint: ""
+#   # @hidden
+#   model: ""
 
 # Made with Bob

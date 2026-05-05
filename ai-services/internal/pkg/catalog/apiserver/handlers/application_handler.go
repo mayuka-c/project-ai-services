@@ -92,14 +92,15 @@ func (h *ApplicationHandler) CreateApplication(c *gin.Context) {
 	}
 
 	// Deploy the application using custom deployment logic
-	if err := h.deployApplication(ctx, &req); err != nil {
+	appName, err := h.deployApplication(ctx, &req)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to deploy application", "details": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message":  "application created successfully",
-		"name":     req.Name,
+		"name":     appName,
 		"template": req.Template,
 		"services": len(req.Services),
 	})
