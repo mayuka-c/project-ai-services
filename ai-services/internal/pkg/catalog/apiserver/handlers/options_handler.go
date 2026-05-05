@@ -25,13 +25,16 @@ func NewOptionsHandler(assetsFS embed.FS) *OptionsHandler {
 
 // Provider metadata structures
 type ProviderMetadata struct {
-	Type            string   `yaml:"type"`
-	ID              string   `yaml:"id"`
-	Label           string   `yaml:"label"`
-	Description     string   `yaml:"description"`
-	ComponentType   string   `yaml:"component_type"`
+	Type           string                 `yaml:"type"`
+	ID             string                 `yaml:"id"`
+	Label          string                 `yaml:"label"`
+	Description    string                 `yaml:"description"`
+	ComponentType  string                 `yaml:"component_type"`
+	Specifications ProviderSpecifications `yaml:"specifications"`
+}
+
+type ProviderSpecifications struct {
 	SupportedModels []string `yaml:"supported_models"`
-	Architectures   []string `yaml:"architectures"`
 }
 
 // ServiceMetadata structures
@@ -45,18 +48,25 @@ type ServiceMetadata struct {
 }
 
 type ComponentDependency struct {
-	Type     string `yaml:"type"`
-	Required bool   `yaml:"required"`
+	Type   string `yaml:"type"`
+	Label  string `yaml:"label"`
+	Hidden bool   `yaml:"hidden"`
 }
 
 // ArchitectureMetadata structures
 type ArchitectureMetadata struct {
-	ID          string       `yaml:"id"`
-	Name        string       `yaml:"name"`
-	Description string       `yaml:"description"`
-	Version     string       `yaml:"version"`
-	Type        string       `yaml:"type"`
-	Services    []ServiceRef `yaml:"services"`
+	ID               string            `yaml:"id"`
+	Name             string            `yaml:"name"`
+	Description      string            `yaml:"description"`
+	Version          string            `yaml:"version"`
+	Type             string            `yaml:"type"`
+	Services         []ServiceRef      `yaml:"services"`
+	GlobalComponents []GlobalComponent `yaml:"global_components"`
+}
+
+type GlobalComponent struct {
+	Type  string `yaml:"type"`
+	Label string `yaml:"label"`
 }
 
 type ServiceRef struct {
@@ -67,16 +77,20 @@ type ServiceRef struct {
 
 // Response structures
 type ProviderResponse struct {
-	ID              string   `json:"id"`
-	Label           string   `json:"label"`
-	Description     string   `json:"description,omitempty"`
+	ID             string                         `json:"id"`
+	Label          string                         `json:"label"`
+	Description    string                         `json:"description,omitempty"`
+	Specifications ProviderSpecificationsResponse `json:"specifications,omitempty"`
+}
+
+type ProviderSpecificationsResponse struct {
 	SupportedModels []string `json:"supported_models,omitempty"`
 }
 
 type ComponentResponse struct {
 	Type      string             `json:"type"`
 	Label     string             `json:"label"`
-	Required  bool               `json:"required"`
+	Hidden    bool               `json:"hidden"`
 	Providers []ProviderResponse `json:"providers"`
 }
 
@@ -90,13 +104,14 @@ type ServiceOptionsResponse struct {
 type ArchitectureOptionsResponse struct {
 	ArchitectureID   string                   `json:"architecture_id"`
 	ArchitectureName string                   `json:"architecture_name"`
+	GlobalComponents []ComponentResponse      `json:"global_components,omitempty"`
 	Services         []ServiceOptionsResponse `json:"services"`
 }
 
 // GetArchitectureOptions godoc
 //
 //	@Summary		Get architecture options
-//	@Description	Get available providers and dependency rules for all services in an architecture
+//	@Description	Get available providers and dependency rules for all services in an architecture, including global components
 //	@Tags			Options
 //	@Produce		json
 //	@Security		BearerAuth
@@ -125,7 +140,22 @@ func (h *OptionsHandler) GetArchitectureOptions(c *gin.Context) {
 	response := ArchitectureOptionsResponse{
 		ArchitectureID:   archMeta.ID,
 		ArchitectureName: archMeta.Name,
+		GlobalComponents: []ComponentResponse{},
 		Services:         []ServiceOptionsResponse{},
+	}
+
+	// Process global components if they exist
+	for _, globalComp := range archMeta.GlobalComponents {
+		providers, err := h.getProvidersForComponentType(globalComp.Type, architectureID)
+		if err != nil {
+			continue // Skip if no providers found
+		}
+
+		response.GlobalComponents = append(response.GlobalComponents, ComponentResponse{
+			Type:      globalComp.Type,
+			Label:     globalComp.Label,
+			Providers: providers,
+		})
 	}
 
 	// Process each service in the architecture
@@ -186,14 +216,6 @@ func (h *OptionsHandler) getServiceOptions(serviceID, architectureID string) (Se
 		Components:  []ComponentResponse{},
 	}
 
-	// Component type to label mapping
-	componentLabels := map[string]string{
-		"vector_db": "Vector store",
-		"llm":       "LLM Model",
-		"embedding": "Embedding Model",
-		"reranker":  "Reranker Model",
-	}
-
 	// Dynamically build components from service metadata dependencies
 	for _, dep := range svcMeta.Dependencies {
 		providers, err := h.getProvidersForComponentType(dep.Type, architectureID)
@@ -201,15 +223,16 @@ func (h *OptionsHandler) getServiceOptions(serviceID, architectureID string) (Se
 			continue // Skip if no providers found
 		}
 
-		label := componentLabels[dep.Type]
+		// Use label from service metadata dependency
+		label := dep.Label
 		if label == "" {
-			label = dep.Type // Fallback to type if label not found
+			label = dep.Type // Fallback to type if label not provided
 		}
 
 		response.Components = append(response.Components, ComponentResponse{
 			Type:      dep.Type,
 			Label:     label,
-			Required:  dep.Required,
+			Hidden:    dep.Hidden,
 			Providers: providers,
 		})
 	}
@@ -244,25 +267,13 @@ func (h *OptionsHandler) getProvidersForComponentType(componentType, architectur
 			continue
 		}
 
-		// Filter by architecture if specified
-		if architectureID != "" {
-			found := false
-			for _, arch := range providerMeta.Architectures {
-				if arch == architectureID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
-		}
-
 		providers = append(providers, ProviderResponse{
-			ID:              providerMeta.ID,
-			Label:           providerMeta.Label,
-			Description:     providerMeta.Description,
-			SupportedModels: providerMeta.SupportedModels,
+			ID:          providerMeta.ID,
+			Label:       providerMeta.Label,
+			Description: providerMeta.Description,
+			Specifications: ProviderSpecificationsResponse{
+				SupportedModels: providerMeta.Specifications.SupportedModels,
+			},
 		})
 	}
 
