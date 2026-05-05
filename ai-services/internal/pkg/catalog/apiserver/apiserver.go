@@ -33,6 +33,7 @@ import (
 
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/repository"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/auth"
+	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
 )
 
 // APIServerOptions defines the configuration options for the API server such as the port to listen
@@ -42,6 +43,7 @@ type APIServerOptions struct {
 	AuthService  auth.Service
 	TokenManager *auth.TokenManager
 	Blacklist    repository.TokenBlacklist
+	RuntimeType  types.RuntimeType
 }
 
 // APIserver represents the API server instance, holding the configuration and authentication provider.
@@ -50,6 +52,7 @@ type APIserver struct {
 	authService  auth.Service
 	tokenManager *auth.TokenManager
 	blacklist    repository.TokenBlacklist
+	runtimeType  types.RuntimeType
 }
 
 // NewAPIserver creates a new instance of the API server with the provided options, setting default values where necessary.
@@ -59,18 +62,24 @@ func NewAPIserver(options APIServerOptions) *APIserver {
 		options.Port = 8080
 	}
 
+	// Set default runtime type if not provided
+	if options.RuntimeType == "" {
+		options.RuntimeType = types.RuntimeTypePodman
+	}
+
 	return &APIserver{
 		port:         options.Port,
 		authService:  options.AuthService,
 		tokenManager: options.TokenManager,
 		blacklist:    options.Blacklist,
+		runtimeType:  options.RuntimeType,
 	}
 }
 
 // Start initializes the API server and begins listening for incoming requests on the configured port.
 // It sets up the router with authentication middleware and routes.
 func (a *APIserver) Start() error {
-	r := CreateRouter(a.authService, a.tokenManager, a.blacklist)
+	r := CreateRouter(a.authService, a.tokenManager, a.blacklist, a.runtimeType)
 
 	return r.Run(fmt.Sprintf(":%d", a.port))
 }

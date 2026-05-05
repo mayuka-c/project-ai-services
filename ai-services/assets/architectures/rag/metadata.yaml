@@ -19,6 +19,12 @@ global_components:
   - type: embedding
     label: "Embedding Model"
 
+  - type: llm
+    label: "LLM Model"
+
+  - type: reranker
+    label: "Reranker Model"
+
 # Service composition (version is optional, uses latest if not specified)
 services:
   - id: chat

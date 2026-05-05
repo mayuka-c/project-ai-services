@@ -10,12 +10,13 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/middleware"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/repository"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/auth"
+	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
 // CreateRouter sets up the Gin router with the necessary routes and authentication middleware for the API server.
-func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist repository.TokenBlacklist) *gin.Engine {
+func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist repository.TokenBlacklist, runtimeType types.RuntimeType) *gin.Engine {
 	router := gin.Default()
 
 	// Health check endpoint
@@ -28,6 +29,7 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 
 	authHandler := handlers.NewAuthHandler(authSvc)
 	optionsHandler := handlers.NewOptionsHandler(assets.CatalogFS)
+	applicationHandler := handlers.NewApplicationHandler(runtimeType)
 
 	v1 := router.Group("/api/v1")
 	{
@@ -50,10 +52,9 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 	applications := v1.Group("applications")
 	applications.Use(middleware.AuthMiddleware(tokenMgr, blacklist))
 
-	// Draft endpoints and more discussion needed to finalize the API design. For now, these are placeholders.
-	// TODO: Define the API design for application management, including request/response formats and error handling.
+	// Application management endpoints
 	applications.GET("/templates", getTemplates)
-	applications.POST("/", createApplication)
+	applications.POST("/", applicationHandler.CreateApplication)
 	applications.GET("/:name", getApplication)
 	applications.DELETE("/:name", deleteApplication)
 	applications.GET("/:name/ps", getApplicationStatus)
@@ -74,20 +75,6 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 //	@Success		200	{object}	map[string]interface{}	"List of templates"
 //	@Router			/applications/templates [get]
 func getTemplates(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"message": "This is a placeholder endpoint for " + c.FullPath()})
-}
-
-// CreateApplication godoc
-//
-//	@Summary		Create new application
-//	@Description	Create a new application instance from a template
-//	@Tags			Applications
-//	@Accept			json
-//	@Produce		json
-//	@Security		BearerAuth
-//	@Success		200	{object}	map[string]interface{}	"Application created"
-//	@Router			/applications [post]
-func createApplication(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "This is a placeholder endpoint for " + c.FullPath()})
 }
 
