@@ -1,2 +1,4 @@
 name: instruct
 version: "1.0.0"
+podTemplateExecutions:
+  - [instruct-server.yaml.tmpl]

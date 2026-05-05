@@ -10,6 +10,15 @@ certified_by: "IBM"
 runtimes:
   - podman
 
+# Global components shared across all services
+# These components are deployed once and reused by all services
+global_components:
+  - type: vector_db
+    label: "Vector store"
+  
+  - type: embedding
+    label: "Embedding Model"
+
 # Service composition (version is optional, uses latest if not specified)
 services:
   - id: chat

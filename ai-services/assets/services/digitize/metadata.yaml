@@ -14,10 +14,13 @@ architectures:
 # Component dependencies
 dependencies:
   - type: vector_db
-    required: true
+    label: "Vector store"
+    hidden: true
   - type: llm
-    required: true
+    label: "LLM Model"
+    hidden: false
   - type: embedding
-    required: true
+    label: "Embedding Model"
+    hidden: true
 
 # Made with Bob

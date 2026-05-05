@@ -27,7 +27,7 @@ This document describes the dynamic API design for component selection when depl
   - They specify the provider technology, service type, and supported models
   - When a user selects a provider, they fill in configuration to create a new instance
 - **Provider**: The underlying technology/service (e.g., "vllm", "watsonx", "opensearch", "milvus")
-- **Service**: The specific AI service being deployed (e.g., "instruct-vllm", "embedding-watsonx")
+- **Service**: The specific AI service being deployed (e.g., "digitize", "summarize")
 
 ### Key Principles
 
@@ -42,45 +42,6 @@ This document describes the dynamic API design for component selection when depl
 
 ---
 
-## Component Dependencies
-
-### Dependency Hierarchy
-
-```
-vector_db (independent)
-    ↓
-llm (independent)
-    ↓
-embedding (independent)
-    ↓
-reranker (independent)
-```
-
-### Rules
-
-1. **vector_db**: Independent, can be selected anytime
-2. **llm**: Independent, can be selected anytime
-   - Instances include `accelerator` metadata (e.g., "spyre", "cpu")
-   - Instances include `capabilities` array (e.g., ["fp16", "int8"])
-3. **embedding**: Independent, can be selected anytime
-   - Instances include `accelerator` and `capabilities` metadata
-4. **reranker**: Independent, optional component
-   - Instances include `accelerator` and `capabilities` metadata
-
-### Accelerator-Based Instance Filtering
-
-Component instances (llm, embedding, reranker) include accelerator and capability metadata:
-
-1. **Accelerator**: Hardware type the instance runs on (e.g., "spyre", "cpu")
-2. **Capabilities**: Supported features (e.g., ["fp16", "int8"])
-
-**Example:**
-- LLM instance: "Granite 3.3 8B on Spyre" has accelerator="spyre", capabilities=["fp16", "int8"]
-- Embedding instance: "BGE Base on CPU" has accelerator="cpu", capabilities=["fp16", "fp32"]
-
-Users can filter instances based on their accelerator requirements.
-
----
 
 ## API Endpoints
 
@@ -227,6 +188,48 @@ Get providers and dependency rules (no instances).
 {
   "architecture_id": "rag",
   "architecture_name": "Digital Assistant",
+  "global_components": [
+    {
+      "type": "vector_db",
+      "label": "Vector store",
+      "providers": [
+        {
+          "id": "opensearch",
+          "label": "OpenSearch",
+          "description": "Distributed search and analytics engine"
+        },
+        {
+          "id": "milvus",
+          "label": "Milvus",
+          "description": "Cloud-native vector database"
+        }
+      ]
+    },
+    {
+      "type": "embedding",
+      "label": "Embedding Model",
+      "providers": [
+        {
+          "id": "vllm",
+          "label": "vLLM Embeddings",
+          "specifications": {
+            "supported_models": [
+              "BAAI/bge-base-en-v1.5"
+            ]
+          }
+        },
+        {
+          "id": "watsonx",
+          "label": "IBM watsonx.ai Embeddings",
+          "specifications": {
+            "supported_models": [
+              "ibm/slate-125m-english-rtrvr"
+            ]
+          }
+        }
+      ]
+    }
+  ],
   "services": [
     {
       "type": "service",
@@ -236,7 +239,7 @@ Get providers and dependency rules (no instances).
         {
           "type": "vector_db",
           "label": "Vector store",
-          "required": true,
+          "hidden": true,
           "providers": [
             {
               "id": "opensearch",
@@ -253,67 +256,79 @@ Get providers and dependency rules (no instances).
         {
           "type": "llm",
           "label": "LLM Model",
-          "required": true,
+          "hidden": false,
           "providers": [
             {
               "id": "vllm",
               "label": "vLLM Instruct",
               "description": "Deploy new instruct model on vLLM",
-              "supported_models": [
-                "ibm-granite/granite-3.3-8b-instruct",
-                "meta-llama/Llama-3.1-8B-Instruct"
-              ]
+              "specifications": {
+                "supported_models": [
+                  "ibm-granite/granite-3.3-8b-instruct",
+                  "meta-llama/Llama-3.1-8B-Instruct"
+                ]
+              }
             },
             {
               "id": "watsonx",
               "label": "IBM watsonx.ai Instruct",
               "description": "Configure watsonx.ai for instruct models",
-              "supported_models": [
-                "ibm/granite-13b-chat-v2",
-                "meta-llama/llama-3-70b-instruct"
-              ]
+              "specifications": {
+                "supported_models": [
+                  "ibm/granite-13b-chat-v2",
+                  "meta-llama/llama-3-70b-instruct"
+                ]
+              }
             }
           ]
         },
         {
           "type": "embedding",
           "label": "Embedding Model",
-          "required": true,
+          "hidden": true,
           "providers": [
             {
               "id": "vllm",
               "label": "vLLM Embeddings",
-              "supported_models": [
-                "BAAI/bge-base-en-v1.5"
-              ]
+              "specifications": {
+                "supported_models": [
+                  "BAAI/bge-base-en-v1.5"
+                ]
+              }
             },
             {
               "id": "watsonx",
               "label": "IBM watsonx.ai Embeddings",
-              "supported_models": [
-                "ibm/slate-125m-english-rtrvr"
-              ]
+              "specifications": {
+                "supported_models": [
+                  "ibm/slate-125m-english-rtrvr"
+                ]
+              }
             }
           ]
         },
         {
           "type": "reranker",
           "label": "Reranker Model",
-          "required": false,
+          "hidden": false,
           "providers": [
             {
               "id": "vllm",
               "label": "vLLM Reranker",
-              "supported_models": [
-                "BAAI/bge-reranker-v2-m3"
-              ]
+              "specifications": {
+                "supported_models": [
+                  "BAAI/bge-reranker-v2-m3"
+                ]
+              }
             },
             {
               "id": "watsonx",
               "label": "IBM watsonx.ai Reranker",
-              "supported_models": [
-                "ibm/slate-125m-english-reranker"
-              ]
+              "specifications": {
+                "supported_models": [
+                  "ibm/slate-125m-english-reranker"
+                ]
+              }
             }
           ]
         }
@@ -327,7 +342,7 @@ Get providers and dependency rules (no instances).
         {
           "type": "vector_db",
           "label": "Vector store",
-          "required": true,
+          "hidden": true,
           "providers": [
             {
               "provider_id": "opensearch",
@@ -346,7 +361,7 @@ Get providers and dependency rules (no instances).
         {
           "type": "llm",
           "label": "LLM Model",
-          "required": true,
+          "hidden": false,
           "providers": [
             {
               "provider_id": "vllm",
@@ -380,7 +395,7 @@ Get providers and dependency rules (no instances).
         {
           "type": "embedding",
           "label": "Embedding Model",
-          "required": true,
+          "hidden": true,
           "providers": [
             {
               "provider_id": "vllm",
@@ -414,7 +429,7 @@ Get providers and dependency rules (no instances).
         {
           "type": "reranker",
           "label": "Reranker Model",
-          "required": false,
+          "hidden": false,
           "providers": [
             {
               "provider_id": "vllm",
@@ -467,7 +482,7 @@ Get components and providers for the digitize service (no instances).
     {
       "type": "vector_db",
       "label": "Vector store",
-      "required": true,
+      "hidden": true,
       "providers": [
         {
           "id": "opensearch",
@@ -484,7 +499,7 @@ Get components and providers for the digitize service (no instances).
     {
       "type": "llm",
       "label": "LLM Model",
-      "required": true,
+      "hidden": false,
       "providers": [
         {
           "id": "vllm",
@@ -509,7 +524,7 @@ Get components and providers for the digitize service (no instances).
     {
       "type": "embedding",
       "label": "Embedding Model",
-      "required": true,
+      "hidden": true,
       "providers": [
         {
           "id": "vllm",
@@ -530,7 +545,7 @@ Get components and providers for the digitize service (no instances).
     {
       "type": "reranker",
       "label": "Reranker Model",
-      "required": false,
+      "hidden": false,
       "providers": [
         {
           "id": "vllm",
@@ -552,7 +567,7 @@ Get components and providers for the digitize service (no instances).
 }
 ```
 
-### 3. GET `/api/v1/architectures/{architecture_id}/params`
+### 3. GET `/api/v1/architectures/{architecture_id}/params` (NOT REQUIRED)
 
 Get configuration schemas (JSON Schema) for all component types used in the architecture.
 

@@ -6,4 +6,10 @@ summarize:
   # @hidden
   log_level: "INFO"
 
+llm:
+  # @hidden
+  endpoint: ""
+  # @hidden
+  model: ""
+
 # Made with Bob

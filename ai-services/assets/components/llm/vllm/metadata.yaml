@@ -5,19 +5,13 @@ label: "vLLM Instruct"
 description: "Deploy instruct models on vLLM inference engine"
 
 # Component type this provider belongs to
-component_type: instruct
+component_type: llm
 
-# Certification and support
-certified_by: "IBM"
-
-# Supported models
-supported_models:
-  - "ibm-granite/granite-3.3-8b-instruct"
-  - "meta-llama/Llama-3.1-8B-Instruct"
-  - "mistralai/Mistral-7B-Instruct-v0.3"
-
-# Architectures this provider supports
-architectures:
-  - rag
+# Provider specifications
+specifications:
+  supported_models:
+    - "ibm-granite/granite-3.3-8b-instruct"
+    - "meta-llama/Llama-3.1-8B-Instruct"
+    - "mistralai/Mistral-7B-Instruct-v0.3"
 
 # Made with Bob

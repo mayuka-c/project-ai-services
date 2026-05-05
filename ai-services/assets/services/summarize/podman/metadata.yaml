@@ -1,2 +1,4 @@
 name: summarize
 version: "1.0.0"
+podTemplateExecutions:
+  - [summarize-api.yaml.tmpl]

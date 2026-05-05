@@ -7,17 +7,11 @@ description: "Deploy LLM models on IBM watsonx.ai platform"
 # Component type this provider belongs to
 component_type: llm
 
-# Certification and support
-certified_by: "IBM"
-
-# Supported models
-supported_models:
-  - "ibm/granite-13b-chat-v2"
-  - "meta-llama/llama-3-70b-instruct"
-  - "ibm/granite-20b-multilingual"
-
-# Architectures this provider supports
-architectures:
-  - rag
+# Provider specifications
+specifications:
+  supported_models:
+    - "ibm/granite-13b-chat-v2"
+    - "meta-llama/llama-3-70b-instruct"
+    - "ibm/granite-20b-multilingual"
 
 # Made with Bob

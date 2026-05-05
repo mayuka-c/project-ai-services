@@ -67,19 +67,19 @@ spec:
           memory: "50Gi"
       env:
         - name: EMB_ENDPOINT
-          value: "http://{{ .AppName }}--embedding:8001"
+          value: "{{ .Values.embedding.endpoint }}"
         - name: EMB_MODEL
-          value: "ibm-granite/granite-embedding-278m-multilingual"
+          value: "{{ .Values.embedding.model }}"
         - name: EMB_MAX_TOKENS
           value: "512"
         - name: LLM_ENDPOINT
-          value: "http://{{ .AppName }}--instruct:8000"
+          value: "{{ .Values.llm.endpoint }}"
         - name: LLM_MODEL
-          value: "ibm-granite/granite-3.3-8b-instruct"
+          value: "{{ .Values.llm.model }}"
         - name: OPENSEARCH_HOST
-          value: "{{ .AppName }}--opensearch"
+          value: "{{ .Values.opensearch.host }}"
         - name: OPENSEARCH_PORT
-          value: "9200"
+          value: "{{ .Values.opensearch.port }}"
         - name: OPENSEARCH_DB_PREFIX
           value: "RAG_DB"
         - name: OPENSEARCH_INDEX_NAME

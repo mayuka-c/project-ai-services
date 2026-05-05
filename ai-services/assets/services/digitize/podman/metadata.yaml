@@ -1,2 +1,4 @@
 name: digitize
 version: "1.0.0"
+podTemplateExecutions:
+  - [digitize.yaml.tmpl]

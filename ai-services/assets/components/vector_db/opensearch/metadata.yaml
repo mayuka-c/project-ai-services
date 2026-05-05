@@ -7,11 +7,4 @@ description: "Distributed search and analytics engine for vector storage"
 # Component type this provider belongs to
 component_type: vector_store
 
-# Certification and support
-certified_by: "IBM"
-
-# Architectures this provider supports
-architectures:
-  - rag
-
 # Made with Bob

@@ -1,2 +1,4 @@
 name: embedding
 version: "1.0.0"
+podTemplateExecutions:
+  - [embedding-server.yaml.tmpl]
