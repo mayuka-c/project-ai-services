@@ -38,7 +38,7 @@
 11. [Key Design Decisions](#11-key-design-decisions)
 12. [Security Considerations](#12-security-considerations)
 13. [Disaster Recovery](#13-disaster-recovery)
-14. [Future Considerations](#14-future-considerations)
+14. [Remote Deployment Considerations](#14-remote-deployment-considerations)
 
 ---
 
@@ -88,46 +88,117 @@ There is no central store, no audit trail, no per-service access control, and no
 ---
 
 ## 3. Architecture Overview
-
 ```mermaid
 flowchart TD
-    subgraph Host["Host VM"]
+    %% ── catalog configure — one-time setup ──────────────────────
+    subgraph CC["catalog configure  (one-time)"]
+        direction TB
+        DEPLOY["1. Deploy Vault pod
+(podman kube play vault.yaml)"]
+        INIT["2. vault operator init
+Emits: Unseal Key + Root Token"]
+        PS_UK(["Podman Secret
+vault-unseal-key"])
+        BP["3. Deploy vault-bootstrap pod
+vault operator unseal"]
+        CFG["4. Configure Vault  ·  Root Token in-memory
+Enable KV v2  ·  Enable AppRole
+Create catalog-admin policy + AppRole
+vault kv put component credentials"]
+        PS_CAT(["Podman Secret
+catalog-vault-credentials
+role_id  ·  secret_id"])
+        ASSETS["5. Deploy Catalog Assets
+(UI  ·  backend API  ·  database)"]
 
-        subgraph VaultPod["vault pod (always running)"]
-            V["HashiCorp Vault :8200\nvault.hcl — Raft/file backend"]
-        end
-
-        subgraph BootstrapPod["vault-bootstrap pod (OnFailure)"]
-            B["vault operator unseal\nReads /run/secrets/vault-unseal-key"]
-        end
-
-        subgraph ServicePod["tenant-service-pod"]
-            VA["vault-agent sidecar\nAppRole auto_auth\nWrites /vault/token"]
-            SVC["application container\nReads /vault/token"]
-        end
-
-        PS["Podman Secret\nvault-unseal-key"]
-        PS2["Podman Secret\ntenant-vault-credentials\n(role_id + secret_id)"]
-
-        V -->|"AppRole login"| VA
-        B -->|"reads"| PS
-        B -->|"unseals"| V
-        VA -->|"reads"| PS2
-        VA -->|"writes token"| SVC
+        DEPLOY --> INIT
+        INIT   -->|"store unseal key"| PS_UK
+        PS_UK  -->|mount| BP
+        INIT   -->|"root token (in-memory)"| CFG
+        CFG    -->|"store AppRole creds"| PS_CAT
+        PS_CAT --> ASSETS
     end
+
+    %% ── HashiCorp Vault — central store ─────────────────────────
+    V["HashiCorp Vault
+─────────────────────────────────
+KV v2  |  AppRole  |  Audit log
+listener: 0.0.0.0:8200"]
+
+    DEPLOY -->|"deploy"| V
+    BP     -->|"unseal"| V
+    CFG    -->|"vault policy write / kv put"| V
+
+    %% ── Application creation flow ────────────────────────────────
+    API["Catalog API Server
+─────────────────────────────
+Application creation flow
+catalog-admin AppRole token"]
+    PROV["Create service policy + AppRole
+vault policy write
+vault write auth/approle/role"]
+    PS_SVC(["Podman Secret
+service-vault-credentials
+role_id  ·  secret_id"])
+    PS_CMP(["Podman Secret
+component-vault-credentials
+role_id  ·  secret_id"])
+
+    PS_CAT -->|"login"| API
+    API    -->|"on application create"| PROV
+    PROV   -->|"write policy + AppRole"| V
+    PROV   -->|"store service creds"| PS_SVC
+    PROV   -->|"store component creds"| PS_CMP
+
+    %% ── Runtime pods — side by side ──────────────────────────────
+    subgraph PODS["Runtime Pods"]
+        direction LR
+
+        subgraph COMP_POD["Component Pod  (PostgreSQL · OpenSearch)"]
+            direction TB
+            CVA["vault-agent sidecar
+AppRole auto-auth
+Template rendering"]
+            COMP["Component container
+/vault/rendered/db-password"]
+            CVA -->|"renders credential file"| COMP
+        end
+
+        subgraph SVC_POD["Service Pod  (chat · digitize · similarity)"]
+            direction TB
+            SVA["vault-agent sidecar
+AppRole auto-auth
+Writes /vault/token"]
+            SVC["Application container
+X-Vault-Token header
+GET secret/data/…"]
+            SVA -->|"writes token"| SVC
+        end
+    end
+
+    PS_CMP -->|"mount"| CVA
+    PS_SVC -->|"mount"| SVA
+    CVA    -->|"AppRole login"| V
+    SVA    -->|"AppRole login"| V
+    SVC    -->|"read secret via token"| V
 ```
 
 **Component responsibilities:**
 
 | Component | What it does |
 |---|---|
-| `vault` pod | Stores and serves all secrets; enforces policies; logs every access |
-| `vault-bootstrap` pod | Runs at boot (`OnFailure`) to unseal Vault; exits immediately after |
-| `vault-agent` sidecar | Per-service sidecar; authenticates to Vault via AppRole; writes a short-lived token to a shared memory volume |
-| `catalog-admin` AppRole | Identity used by Catalog during installation to create per-service policies and AppRoles |
-| Per-service AppRole | Unique identity for each deployed service; scoped to that service's KV path only |
+| `vault` pod | Stores and serves all secrets (KV v2); enforces policies; logs every access |
+| `vault-bootstrap` pod | Runs at boot (`OnFailure`); unseals Vault automatically using the Podman secret; exits immediately |
+| `catalog configure` | Generates and writes all component credentials (DB password, admin password) into Vault KV at setup time |
+| `vault-agent` sidecar (component) | Authenticates via AppRole; uses template rendering to write credential files into a shared volume for the component container |
+| `vault-agent` sidecar (service) | Authenticates via AppRole; writes a short-lived Vault token to a shared named volume for the application container |
+| Application container | Reads the Vault token and calls the Vault HTTP API directly to retrieve the secrets it needs |
+| `catalog-admin` AppRole | Identity used by Catalog API server during provisioning to create per-service/component policies and AppRoles |
+| Per-service AppRole | Unique identity per deployed service; scoped to its own KV path + read on component paths it consumes |
+| Per-component AppRole | Unique identity per deployed component; scoped to its own KV path only |
 | Podman secret `vault-unseal-key` | Holds the single unseal key; mounted read-only inside the bootstrap pod |
-| Podman secret `<service>-vault-credentials` | Holds `role_id` and `secret_id` for a service; mounted read-only inside that service's pod |
+| Podman secret `<service>-vault-credentials` | Holds `role_id` + `secret_id` for a service; mounted into the service pod's vault-agent sidecar |
+| Podman secret `<component>-vault-credentials` | Holds `role_id` + `secret_id` for a component; mounted into the component pod's vault-agent sidecar |
 
 ---
 
@@ -173,7 +244,7 @@ When Catalog deploys a new service/component (e.g., `chat`):
 catalog AppRole login  →  Vault token
     ↓
 Create policy  chat-policy:
-    - read access  → secret/data/application/<app-id>/chat/*  (service's own secrets)
+    - read + write + list  → secret/data/application/<app-id>/chat/*  (service's own secrets)
     - read access  → secret/data/component/<comp-id>/*        (shared component secrets,
                      e.g. OpenSearch password, PostgreSQL password,
                      only for components this service consumes)
@@ -189,7 +260,7 @@ podman secret create chat-vault-credentials  (role_id + secret_id)
 Deploy service pod (vault-agent sidecar + chat container)
 ```
 
-The policy grants each service read access to its own secret path **and** read access to the paths of the shared components it depends on. Component secrets (passwords, connection strings) are written into Vault once when the component is deployed and are never duplicated across service manifests.
+The policy grants each service **read, write, and list** access to its own secret path, and **read** access to the paths of the shared components it depends on. Component secrets (passwords, connection strings) are written into Vault once when the component is deployed and are never duplicated across service manifests.
 
 Each service authenticates independently. The Catalog API server holds the `catalog-admin` token in memory (refreshed automatically); it never persists the token to disk.
 
@@ -244,7 +315,7 @@ spec:
 **Key points:**
 
 - `restartPolicy: Always` — Podman restarts the pod after a crash or reboot.
-- `hostPort: 8200` — Vault is accessible from the host at `http://127.0.0.1:8200`. No external exposure is needed.
+- `hostPort: 8200` — Vault is accessible from the host at `http://127.0.0.1:8200`. No external exposure is needed for single-VM deployments. For remote/multi-VM deployments where services on other hosts need to reach Vault, the port must be proxied through **Caddy** — Vault should not be exposed directly on a public or routable interface without TLS termination. See [Section 14](#14-remote-deployment-considerations) for details.
 - Data and config are on host-path volumes so the Vault data survives container replacement.
 
 After the configure phase completes, the manifest is updated to mount the Podman secret and redeployed:
@@ -1101,11 +1172,15 @@ echo "$UNSEAL_KEY" | podman secret create vault-unseal-key -
 
 ---
 
-## 14. Future Considerations
+## 14. Remote Deployment Considerations
+
+This section applies when the Catalog platform is deployed across **multiple VMs** — for example, when Vault runs on one host and services or components run on separate nodes. The default single-VM configuration does not require any of these changes.
 
 ### TLS on the Vault Listener
 
-The current configuration disables TLS because all traffic is intra-host. If Vault is ever exposed across a network boundary (e.g., a multi-host Catalog cluster), TLS must be enabled. Vault has first-class PKI support via its own PKI secrets engine:
+TLS is disabled in the default single-VM configuration because all traffic is intra-host. TLS is only required when a service running on a **different node** needs to connect to Vault — i.e., when Vault traffic crosses a network boundary.
+
+If that is the case, enable TLS in `vault.hcl`:
 
 ```hcl
 listener "tcp" {
@@ -1115,36 +1190,46 @@ listener "tcp" {
 }
 ```
 
-The PKI engine can issue and auto-rotate certificates for both the Vault server and client agents.
+Vault's built-in PKI secrets engine can issue and auto-rotate the certificates for both the server and all Vault Agent clients, eliminating manual certificate management. Without a cross-node connection requirement, this change is not needed.
 
-### Vault Agent Template Rendering
+### Caddy as the Vault Proxy
 
-Instead of passing a raw token to the service container, Vault Agent can render config files from templates:
+For remote deployments, Vault's `hostPort: 8200` must not be exposed directly on a public or routable interface. Instead, **Caddy** (already part of the Catalog stack) acts as the TLS-terminating reverse proxy in front of Vault:
 
-```hcl
-template {
-  source      = "/etc/vault/templates/config.tmpl"
-  destination = "/etc/app/config.json"
+```
+Remote service pod
+    └── vault-agent (VAULT_ADDR = https://vault.catalog.example.com)
+          └── Caddy (TLS termination, :443)
+                └── Vault pod (:8200, loopback only)
+```
+
+Caddy configuration addition:
+
+```
+vault.{$DOMAIN_SUFFIX} {
+    reverse_proxy localhost:8200
 }
 ```
 
-This allows secrets to be injected as file contents rather than as a token, so the application code requires no Vault SDK at all.
+All remote Vault Agent configs must point `address` at the Caddy-fronted HTTPS URL instead of `http://vault:8200`.
 
-### Dynamic Secrets
+### Vault Agent `VAULT_ADDR` for Remote Nodes
 
-Vault's database secrets engine can issue short-lived, per-connection database credentials instead of long-lived passwords. Enabling this for the Catalog PostgreSQL instance would eliminate static `db_password` values entirely:
+On remote VMs, the `vault-agent.hcl` `address` field must be updated from the pod-local DNS name to the routable Caddy endpoint:
 
-```bash
-vault secrets enable database
-vault write database/config/catalog \
-    plugin_name=postgresql-database-plugin \
-    connection_url="postgresql://{{username}}:{{password}}@localhost:5432/catalog" \
-    allowed_roles="catalog-db-role"
+```hcl
+vault {
+  address = "https://vault.{$DOMAIN_SUFFIX}"
+}
 ```
+
+### Podman Secret Synchronisation
+
+Podman secrets (`<service>-vault-credentials`, `<component>-vault-credentials`) are local to each host. For remote deployments, the `role_id` and `secret_id` for services running on remote nodes must be provisioned onto those hosts using the same `podman secret create` command during `catalog configure`. Vault itself remains the single source of truth — the Podman secrets are merely the delivery mechanism for the AppRole credentials to the agent sidecar.
 
 ### High Availability (HA) Vault
 
-For production-grade deployments, Vault can be run in an HA configuration using the integrated Raft storage backend across three nodes. The `vault.hcl` would switch to:
+For deployments where Vault availability is critical, Vault can be run in an HA configuration using the integrated Raft storage backend across three nodes:
 
 ```hcl
 storage "raft" {
@@ -1153,13 +1238,7 @@ storage "raft" {
 }
 
 cluster_addr = "http://node1:8201"
-api_addr     = "http://node1:8200"
+api_addr     = "https://vault.catalog.example.com"
 ```
 
-### Web UI
-
-The UI is disabled in the proposed configuration (`ui = false`). It can be enabled for debugging or administrative purposes by setting `ui = true` and accessing `http://127.0.0.1:8200/ui`. This should be disabled in production.
-
-### Secret Versioning and Rollback
-
-KV v2 already stores every version of a secret. The Catalog API server can expose a `catalog secret rollback` command that wraps `vault kv rollback` to restore a previous secret version without requiring a full redeployment.
+Each node runs its own `vault.yaml` pod. The bootstrap pod pattern is unchanged — each node unseals independently using its own copy of the `vault-unseal-key` Podman secret.
