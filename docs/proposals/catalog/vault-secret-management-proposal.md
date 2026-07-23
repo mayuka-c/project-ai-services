@@ -90,18 +90,24 @@ There is no central store, no audit trail, no per-service access control, and no
 ## 3. Architecture Overview
 ```mermaid
 flowchart TD
+    %% ── HashiCorp Vault — layout anchor ─────────────────────────
+    V["HashiCorp Vault
+─────────────────────────────────
+KV v2  |  AppRole  |  Audit log
+listener: 0.0.0.0:8200"]
+
     %% ── catalog configure — one-time setup ──────────────────────
     subgraph CC["catalog configure  (one-time)"]
         direction TB
         DEPLOY["1. Deploy Vault pod
-(podman kube play vault.yaml)"]
+podman kube play vault.yaml"]
         INIT["2. vault operator init
 Emits: Unseal Key + Root Token"]
         PS_UK(["Podman Secret
 vault-unseal-key"])
         BP["3. Deploy vault-bootstrap pod
 vault operator unseal"]
-        CFG["4. Configure Vault  ·  Root Token in-memory
+        CFG["4. Configure Vault  —  Root Token in-memory
 Enable KV v2  ·  Enable AppRole
 Create catalog-admin policy + AppRole
 vault kv put component credentials"]
@@ -109,23 +115,17 @@ vault kv put component credentials"]
 catalog-vault-credentials
 role_id  ·  secret_id"])
         ASSETS["5. Deploy Catalog Assets
-(UI  ·  backend API  ·  database)"]
+UI  ·  backend API  ·  database"]
 
         DEPLOY --> INIT
-        INIT   -->|"store unseal key"| PS_UK
-        PS_UK  -->|mount| BP
-        INIT   -->|"root token (in-memory)"| CFG
-        CFG    -->|"store AppRole creds"| PS_CAT
+        INIT   --> PS_UK
+        PS_UK  --> BP
+        BP     --> CFG
+        CFG    --> PS_CAT
         PS_CAT --> ASSETS
     end
 
-    %% ── HashiCorp Vault — central store ─────────────────────────
-    V["HashiCorp Vault
-─────────────────────────────────
-KV v2  |  AppRole  |  Audit log
-listener: 0.0.0.0:8200"]
-
-    DEPLOY -->|"deploy"| V
+    DEPLOY -->|"deploys"| V
     BP     -->|"unseal"| V
     CFG    -->|"vault policy write / kv put"| V
 
@@ -154,7 +154,7 @@ role_id  ·  secret_id"])
     subgraph PODS["Runtime Pods"]
         direction LR
 
-        subgraph COMP_POD["Component Pod  (PostgreSQL · OpenSearch)"]
+        subgraph COMP_POD["Component Pod  (OpenSearch)"]
             direction TB
             CVA["vault-agent sidecar
 AppRole auto-auth
