@@ -14,22 +14,25 @@ type BundleServiceInterface interface {
 	// No DB row is written and no reload is triggered.
 	ValidateBundle(ctx context.Context, file io.Reader) (*ValidationResult, error)
 
-	// ProcessBundle handles a POST upload.
-	// id, type, and version are all read from metadata.yaml inside the archive.
-	// Returns a *BundleResponse on success.
+	// ProcessBundle handles a synchronous POST upload.
+	// Peeks metadata.yaml, conflict-checks, extracts, validates, inserts + activates
+	// the DB row in a single UPDATE, reloads the catalog, and returns status=active (201).
 	ProcessBundle(ctx context.Context, file io.Reader, userID string) (*BundleResponse, error)
 
-	// ReplaceBundle handles a real (non-dry-run) PUT update.
-	// existing is the current active bundle record; CatalogID and CatalogType are read from it
-	// and validated as immutable against the archive metadata. Version is read from the archive.
-	// Returns a *BundleResponse with status "processing" immediately.
+	// ReplaceBundle handles a PUT update.
+	// Sync: validates archive and immutable fields, returns 202 immediately with the existing ID.
+	// Async goroutine: extracts to <catalogID>-<version>/, validates, UPDATEs the existing row
+	// in-place (version/name/size_bytes/status). Directory behaviour:
+	//   - Same version: extracts into the existing directory (overwrites files in place); no dir deleted.
+	//   - New version:  extracts into a new <catalogID>-<new_version>/ directory;
+	//                   old <catalogID>-<old_version>/ directory is deleted after activation.
 	ReplaceBundle(ctx context.Context, existing *BundleRecord, file io.Reader, userID string) (*BundleResponse, error)
 
 	// GetByBundleID returns the bundle record for the given internal bundle ID, or nil.
 	GetByBundleID(ctx context.Context, bundleID string) (*BundleRecord, error)
 
 	// GetBundleByID returns the BundleResponse for the given internal bundle ID, or nil.
-	// Used by the GET /api/v1/catalog/bundles/:id polling endpoint.
+	// Poll this after PUT (202) until status is "active".
 	GetBundleByID(ctx context.Context, bundleID string) (*BundleResponse, error)
 
 	// DeleteBundle removes the bundle's on-disk directory, deletes the DB record, and

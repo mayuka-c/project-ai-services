@@ -197,7 +197,7 @@ func (h *BundleHandler) DeleteBundle(c *gin.Context) {
 //
 //	@Summary     Get a catalog bundle by ID
 //	@Description Returns the current status and metadata for a specific bundle.
-//	             Poll this endpoint after POST/PUT returns 202 until status is "active" or "failed".
+//	             Poll this endpoint after PUT (202) until status is "active".
 //	@Tags        Catalog
 //	@Produce     json
 //	@Security    BearerAuth
