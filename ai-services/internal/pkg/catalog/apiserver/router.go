@@ -90,6 +90,7 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 	{
 		bundles.GET("", bundleHandler.ListBundles)
 		bundles.POST("", bundleHandler.UploadBundle)
+		bundles.POST("/validate", bundleHandler.ValidateBundle)
 		bundles.GET("/:bundle_id", bundleHandler.GetBundle)
 		bundles.PUT("/:bundle_id", bundleHandler.UpdateBundle)
 		bundles.DELETE("/:bundle_id", bundleHandler.DeleteBundle)

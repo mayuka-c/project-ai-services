@@ -102,9 +102,8 @@ func (s *bundleService) ListBundles(ctx context.Context) (*BundleListResponse, e
 	return resp, nil
 }
 
-// ValidateBundle is the dry-run path shared by POST and PUT.
-// It reads all fields from metadata.yaml inside the archive, extracts to a temp directory,
-// validates structure, then cleans up. No DB row is written and no reload is triggered.
+// ValidateBundle extracts the archive to a temp directory, validates structure, then
+// cleans up. No DB row is written and no reload is triggered.
 func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (*ValidationResult, error) {
 	archiveBytes, err := io.ReadAll(file)
 	if err != nil {
@@ -116,7 +115,7 @@ func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (*Vali
 		return nil, &ValidationError{Code: http.StatusUnprocessableEntity, Message: err.Error()}
 	}
 
-	tmpDir, err := os.MkdirTemp("", "bundle-dryrun-*")
+	tmpDir, err := os.MkdirTemp("", "bundle-validate-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -144,11 +143,11 @@ func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (*Vali
 	}, nil
 }
 
-// ProcessBundle handles a real (non-dry-run) POST upload — fully synchronous.
+// ProcessBundle handles a POST upload — fully synchronous.
 //
-// Steps (single pass over the archive bytes):
-//  1. Read archive bytes from the reader.
-//  2. Peek metadata.yaml → catalog_id, catalog_type, version.
+// Steps:
+//  1. Read archive bytes.
+//  2. Peek metadata.yaml → id, type, version.
 //  3. Conflict check: reject 409 if an active bundle with catalog_id already exists.
 //  4. Extract to the permanent bundle directory and measure uncompressed size.
 //  5. Validate bundle structure.
@@ -377,9 +376,10 @@ func generateBundleID() string {
 	return fmt.Sprintf("%s%x", idPrefix, time.Now().UnixNano())
 }
 
-// peekMetadata reads catalog_id, catalog_type, and version from the top-level
-// metadata.yaml inside the archive without extracting anything to disk.
-// Required fields: catalog_id (or inferred from top-level dir), catalog_type, version.
+// peekMetadata reads id (catalog_id), type (catalog_type), and version from
+// <topDir>/metadata.yaml inside the archive without extracting to disk.
+// topDir is inferred from the first entry so archives without explicit directory
+// entries (some tar implementations) are handled correctly.
 func peekMetadata(archiveBytes []byte) (*BundleMetadata, error) {
 	gzr, err := gzip.NewReader(bytes.NewReader(archiveBytes))
 	if err != nil {
@@ -400,21 +400,20 @@ func peekMetadata(archiveBytes []byte) (*BundleMetadata, error) {
 			return nil, fmt.Errorf("corrupt archive: %w", err)
 		}
 
+		// Normalise: strip leading "./" so all paths are "dir/file" shaped.
+		name := strings.TrimPrefix(hdr.Name, "./")
+
 		// Path-traversal guard.
-		if filepath.IsAbs(hdr.Name) || strings.Contains(hdr.Name, "..") {
+		if filepath.IsAbs(name) || strings.Contains(name, "..") {
 			return nil, fmt.Errorf("unsafe path in archive: %q", hdr.Name)
 		}
 
-		if topDir == "" && hdr.Typeflag == tar.TypeDir {
-			topDir = strings.TrimSuffix(strings.SplitN(hdr.Name, "/", 2)[0], "/")
-		}
-
+		// Infer topDir from the first entry (works with or without explicit dir entries).
 		if topDir == "" {
-			continue
+			topDir = strings.SplitN(name, "/", 2)[0]
 		}
 
-		metaPath := topDir + "/metadata.yaml"
-		if hdr.Typeflag == tar.TypeReg && (hdr.Name == metaPath || hdr.Name == "./"+metaPath) {
+		if hdr.Typeflag == tar.TypeReg && name == topDir+"/metadata.yaml" {
 			data, err := io.ReadAll(tr)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read metadata.yaml: %w", err)
@@ -427,7 +426,7 @@ func peekMetadata(archiveBytes []byte) (*BundleMetadata, error) {
 	return nil, fmt.Errorf("metadata.yaml not found in archive (expected at <catalog_id>/metadata.yaml)")
 }
 
-// parseMetadataYAML extracts catalog_id, catalog_type, and version from a YAML byte slice.
+// parseMetadataYAML extracts id, type, and version from a metadata.yaml byte slice.
 // Uses a lightweight line scan — the three fields are always simple scalar values.
 func parseMetadataYAML(data []byte, topDir string) (*BundleMetadata, error) {
 	meta := &BundleMetadata{}
@@ -435,9 +434,9 @@ func parseMetadataYAML(data []byte, topDir string) (*BundleMetadata, error) {
 	for _, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 
-		if val, ok := scalarField(line, "catalog_id"); ok {
+		if val, ok := scalarField(line, "id"); ok {
 			meta.CatalogID = val
-		} else if val, ok := scalarField(line, "catalog_type"); ok {
+		} else if val, ok := scalarField(line, "type"); ok {
 			meta.CatalogType = val
 		} else if val, ok := scalarField(line, "version"); ok {
 			meta.Version = val
@@ -454,7 +453,7 @@ func parseMetadataYAML(data []byte, topDir string) (*BundleMetadata, error) {
 	}
 
 	if meta.CatalogType == "" {
-		return nil, fmt.Errorf("catalog_type is missing from metadata.yaml")
+		return nil, fmt.Errorf("type is missing from metadata.yaml")
 	}
 
 	if !IsValidCatalogType(meta.CatalogType) {

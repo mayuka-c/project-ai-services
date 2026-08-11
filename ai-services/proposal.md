@@ -438,11 +438,11 @@ Five additional catalog-read endpoints are added under the authenticated `v1` ca
 
 #### 7.2.1 Upload bundle — `POST /api/v1/catalog/bundles`
 
-The request uses `multipart/form-data` with only two fields: `file` (required) and `dry_run` (optional). **`catalog_id`, `catalog_type`, and `version` are not form fields** — they are all read from `metadata.yaml` inside the archive. This removes the possibility of a mismatch between declared metadata and archive contents.
+The request uses `multipart/form-data` with a single field: `file` (required). **`id`, `type`, and `version` are not form fields** — they are all read from `metadata.yaml` inside the archive. This removes the possibility of a mismatch between declared metadata and archive contents.
 
 The upload is **fully synchronous**: the handler reads the archive, peeks `metadata.yaml`, checks for a conflict, extracts to the permanent directory, validates structure, inserts a DB row as `active`, and reloads `CatalogProvider` — all before returning. On success the response is `201 Created` (not `202 Accepted`); no polling is needed.
 
-When `dry_run=true` the archive is extracted to a temporary directory, validated, then immediately cleaned up. No DB record is written, `CatalogProvider` is not reloaded, and the conflict check is skipped. The response is `200 OK` (valid) or `422` (invalid), returned inline without polling.
+To validate a bundle before uploading use `POST /api/v1/catalog/bundles/validate` (see §7.2.5).
 
 ```
 POST /api/v1/catalog/bundles
@@ -450,12 +450,9 @@ Content-Type: multipart/form-data
 Authorization: Bearer <admin-jwt>
 
 Form fields:
-  file     (required)  — .tar.gz archive containing the catalog item assets;
-                         max 50 MB compressed.
-                         catalog_id, catalog_type, and version are read from
-                         metadata.yaml inside the archive.
-  dry_run  (optional)  — "true" runs a synchronous validate-only pass;
-                         no DB record is written and nothing is activated
+  file  (required)  — .tar.gz archive containing the catalog item assets;
+                      max 50 MB compressed.
+                      id, type, and version are read from metadata.yaml inside the archive.
 ```
 
 **Example (curl):**
@@ -469,13 +466,12 @@ curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
 
 | Status | Meaning |
 |---|---|
-| `200 OK` | **`dry_run=true` only.** Validation passed; archive is safe to upload for real. No record was written. |
 | `201 Created` | Bundle validated, extracted, inserted into the DB as `active`, and catalog reloaded — all synchronously. A `Location` header points to the new record. |
 | `400 Bad Request` | Missing or unreadable `file` field; wrong content-type; archive exceeds size limit; or `metadata.yaml` is missing/malformed. |
 | `401 Unauthorized` | Missing or invalid JWT. |
 | `403 Forbidden` | Token does not carry admin role. |
-| `409 Conflict` | A bundle with the same `catalog_id` (from the archive's `metadata.yaml`) is already registered. Use `PUT /api/v1/catalog/bundles/:bundle_id` to update it. |
-| `422 Unprocessable Entity` | Validation failed (bad metadata structure, reserved `catalog_id`, etc.). |
+| `409 Conflict` | A bundle with the same `id` (from the archive's `metadata.yaml`) is already registered. Use `PUT /api/v1/catalog/bundles/:bundle_id` to update it. |
+| `422 Unprocessable Entity` | Validation failed (bad metadata structure, reserved `id`, etc.). |
 
 The `201` response includes a `Location` header and a body matching the `BundleResponse` shape:
 
@@ -501,13 +497,11 @@ Location: /api/v1/catalog/bundles/bnd_01JW4X9K2M8VQRP3T5YZ
 
 #### 7.2.2 Update bundle — `PUT /api/v1/catalog/bundles/:bundle_id`
 
-Use `PUT` to replace an existing bundle identified by its internal record ID (`bundle_id`). The server looks up the record by `bundle_id` and derives `catalog_id` and `catalog_type` from it — neither is a form field. The only form fields are `file` and optionally `dry_run`.
+Use `PUT` to replace an existing bundle identified by its internal record ID (`bundle_id`). The server looks up the record by `bundle_id` and derives `id` and `type` from it — neither is a form field. The only form field is `file`.
 
-**Version is not a form field.** The version of the replacement bundle is read from the `metadata.yaml` inside the archive after extraction. If the metadata carries a new version the on-disk directory is named accordingly (`<catalog_id>-<new_version>/`). The `catalog_id` and `catalog_type` values inside the archive metadata must match the existing DB record — attempts to change them are rejected with `422`.
+**Version is not a form field.** The version of the replacement bundle is read from `metadata.yaml` inside the archive. If the metadata carries a new version the on-disk directory is named accordingly (`<id>-<new_version>/`). The `id` and `type` values inside the archive metadata must match the existing DB record — attempts to change them are rejected with `422`.
 
 Returns `404` if no bundle with that `bundle_id` exists.
-
-When `dry_run=true` the request is handled **synchronously**: the archive is extracted to a temporary directory and validated, then immediately cleaned up. The `404` check **still runs** — a dry-run with an unknown `bundle_id` returns `404` just as a real PUT would. No DB record is updated, the old bundle directory is untouched, and `CatalogProvider` is not reloaded. The response is `200 OK` (valid) or `422` (invalid), returned inline without polling.
 
 ```
 PUT /api/v1/catalog/bundles/:bundle_id
@@ -515,16 +509,14 @@ Content-Type: multipart/form-data
 Authorization: Bearer <admin-jwt>
 
 Path parameter:
-  :bundle_id   (required)  — internal record ID of the bundle to replace,
-                             e.g. bnd_01JW4X9K2M8VQRP3T5YZ
+  :bundle_id  (required)  — internal record ID of the bundle to replace,
+                            e.g. bnd_01JW4X9K2M8VQRP3T5YZ
 
 Form fields:
-  file         (required)  — .tar.gz archive containing the replacement assets
-  dry_run      (optional)  — "true" runs a synchronous validate-only pass;
-                             existing bundle is untouched, nothing is activated
+  file        (required)  — .tar.gz archive containing the replacement assets
 ```
 
-> `catalog_id`, `catalog_type`, and `version` are **not** form fields for `PUT`. `catalog_id` and `catalog_type` are resolved from the DB record and validated against the archive metadata — mismatches are rejected with `422`. `version` is read from the archive's `metadata.yaml` and used to derive the on-disk bundle name (`<catalog_id>-<version>/`).
+> `id`, `type`, and `version` are **not** form fields for `PUT`. `id` and `type` are resolved from the DB record and validated against the archive metadata — mismatches are rejected with `422`. `version` is read from the archive's `metadata.yaml` and used to derive the on-disk bundle name (`<id>-<version>/`).
 
 **Example (curl):**
 ```bash
@@ -537,13 +529,12 @@ curl -X PUT https://catalog-api.<domain>/api/v1/catalog/bundles/bnd_01JW4X9K2M8V
 
 | Status | Meaning |
 |---|---|
-| `200 OK` | **`dry_run=true` only.** Validation passed; replacement archive is safe to apply for real. Existing bundle unchanged. |
 | `202 Accepted` | Replacement bundle accepted; processing asynchronously. Poll `Location` header to get status. `version` and `name` in the response body are populated once the archive is extracted. |
-| `400 Bad Request` | Missing `file` field; archive top-level directory does not match the resolved `catalog_id`; wrong content-type; or archive exceeds size limit. |
+| `400 Bad Request` | Missing `file` field; archive top-level directory does not match the resolved `id`; wrong content-type; or archive exceeds size limit. |
 | `401 Unauthorized` | Missing or invalid JWT. |
 | `403 Forbidden` | Token does not carry admin role. |
-| `404 Not Found` | No bundle with the given `bundle_id` exists. Use `POST` to create a new bundle first. (Returned for both normal and `dry_run=true` requests.) |
-| `422 Unprocessable Entity` | Validation failed, or the archive's `catalog_id`/`catalog_type` metadata differs from the existing record. Returned synchronously for `dry_run=true`, or via poll for normal updates. The existing bundle remains active in both cases. |
+| `404 Not Found` | No bundle with the given `bundle_id` exists. Use `POST` to create a new bundle first. |
+| `422 Unprocessable Entity` | Validation failed, or the archive's `id`/`type` metadata differs from the existing record. The existing bundle remains active. |
 
 The `202` body has the same shape as `POST` but `version` and `name` are initially empty strings (populated on the polled response once extraction completes). The old bundle directory (`<type>/<catalog_id>-<old_version>/`) is deleted from the volume only after the replacement is marked `active` in the DB — the existing bundle continues to serve templates throughout the async processing window.
 
@@ -1747,17 +1738,15 @@ curl -s https://catalog-api.<domain>/api/v1/services \
 # "my-service"   ← custom
 ```
 
-### 10.5 Dry-run validation before applying
+### 10.5 Validate a bundle before uploading
 
-`dry_run=true` is **synchronous** for both POST and PUT — the server extracts the archive to a temporary directory, validates it, cleans up, and replies inline. No polling is involved; you get a direct `200 OK` or `422`.
+`POST /api/v1/catalog/bundles/validate` is a dedicated validate-only endpoint — the server extracts the archive to a temporary directory, validates structure, cleans up, and replies inline. No DB record is written and `CatalogProvider` is not reloaded.
 
 ```bash
-# --- Validate a new bundle (POST dry-run) ---
-# The conflict check is skipped, so this works even if my-service is already registered.
-curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
+# --- Validate a bundle ---
+curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles/validate \
   -H "Authorization: Bearer $(cat token.txt)" \
-  -F "file=@my-bundle.tar.gz" \
-  -F "dry_run=true"
+  -F "file=@my-bundle.tar.gz"
 # 200 OK
 # {
 #   "valid":        true,
@@ -1766,25 +1755,10 @@ curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
 #   "version":      "1.0.0"
 # }
 
-# --- Validate a replacement bundle before applying (PUT dry-run) ---
-# The 404 check still runs — bundle must be registered, otherwise 404.
-curl -X PUT https://catalog-api.<domain>/api/v1/catalog/bundles/bnd_01JW4X9K2M8VQRP3T5YZ \
-  -H "Authorization: Bearer $(cat token.txt)" \
-  -F "file=@my-bundle-v2.tar.gz" \
-  -F "dry_run=true"
-# 200 OK — existing bundle is completely untouched
-# {
-#   "valid":        true,
-#   "catalog_id":   "my-service",
-#   "catalog_type": "service",
-#   "version":      "2.0.0"
-# }
-
 # --- Validation failure example ---
-curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
+curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles/validate \
   -H "Authorization: Bearer $(cat token.txt)" \
-  -F "file=@broken-bundle.tar.gz" \
-  -F "dry_run=true"
+  -F "file=@broken-bundle.tar.gz"
 # 422 Unprocessable Entity — nothing was written to disk or DB
 ```
 

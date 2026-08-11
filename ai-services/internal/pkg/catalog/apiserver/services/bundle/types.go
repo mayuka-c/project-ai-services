@@ -9,18 +9,14 @@ import (
 
 // BundleServiceInterface defines the contract for bundle business logic.
 type BundleServiceInterface interface {
-	// ValidateBundle is the shared dry-run implementation used by both POST and PUT.
-	// It reads catalog_id, catalog_type, and version from metadata.yaml inside the archive,
+	// ValidateBundle performs a validate-only pass on the archive: reads metadata.yaml,
 	// extracts to a temp directory, validates structure, then cleans up.
-	// Returns a *ValidationResult on success or a *ValidationError on failure.
 	// No DB row is written and no reload is triggered.
 	ValidateBundle(ctx context.Context, file io.Reader) (*ValidationResult, error)
 
-	// ProcessBundle handles a real (non-dry-run) POST upload.
-	// catalog_id, catalog_type, and version are all read from metadata.yaml inside the archive.
-	// The caller must perform the conflict check before calling this.
-	// Returns a *BundleResponse with status "processing" immediately;
-	// extraction and validation continue in a goroutine.
+	// ProcessBundle handles a POST upload.
+	// id, type, and version are all read from metadata.yaml inside the archive.
+	// Returns a *BundleResponse on success.
 	ProcessBundle(ctx context.Context, file io.Reader, userID string) (*BundleResponse, error)
 
 	// ReplaceBundle handles a real (non-dry-run) PUT update.
@@ -83,13 +79,12 @@ type BundleListResponse struct {
 	Bundles []BundleResponse `json:"bundles"`
 }
 
-// ValidationResult is the 200 OK body returned by a successful dry-run.
+// ValidationResult is the response body for POST /catalog/bundles/validate.
 type ValidationResult struct {
-	Valid       bool     `json:"valid"`
-	CatalogID   string   `json:"catalog_id"`
-	CatalogType string   `json:"catalog_type"`
-	Version     string   `json:"version"`
-	Warnings    []string `json:"warnings,omitempty"`
+	Valid       bool   `json:"valid"`
+	CatalogID   string `json:"catalog_id"`
+	CatalogType string `json:"catalog_type"`
+	Version     string `json:"version"`
 }
 
 // ValidationError represents a validation or request error with an HTTP status code.

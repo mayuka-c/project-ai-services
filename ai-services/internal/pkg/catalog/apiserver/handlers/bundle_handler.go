@@ -27,23 +27,21 @@ func NewBundleHandler(svc bundlesvc.BundleServiceInterface) *BundleHandler {
 // UploadBundle godoc
 //
 //	@Summary     Upload a new custom catalog bundle
-//	@Description Accepts a .tar.gz archive for a single catalog item. catalog_id, catalog_type,
-//	             and version are all read from metadata.yaml inside the archive — no extra form
-//	             fields are required. Returns 409 if a bundle with the same catalog_id is already
-//	             registered (use PUT to update). The archive is validated and, if valid,
-//	             hot-reloaded into CatalogProvider.
+//	@Description Accepts a .tar.gz archive for a single catalog item. id, type, and version
+//	             are all read from metadata.yaml inside the archive — no extra form fields
+//	             are required. Returns 409 if a bundle with the same id is already registered
+//	             (use PUT to update). The archive is validated and, if valid, hot-reloaded
+//	             into CatalogProvider.
 //	@Tags        Catalog
 //	@Accept      multipart/form-data
 //	@Produce     json
 //	@Security    BearerAuth
-//	@Param       file     formData  file    true   ".tar.gz bundle archive (max 50 MB)"
-//	@Param       dry_run  formData  string  false  "Validate only, do not apply (default: false)"
-//	@Success     201  {object}  bundlesvc.BundleResponse      "Bundle created and active"
-//	@Success     200  {object}  bundlesvc.ValidationResult    "dry_run=true: validation passed"
-//	@Failure     400  {object}  ErrorResponse                 "Missing or unreadable file field, wrong content-type, archive too large"
-//	@Failure     401  {object}  ErrorResponse                 "Unauthorized"
-//	@Failure     409  {object}  ErrorResponse                 "catalog_id already registered; use PUT"
-//	@Failure     422  {object}  ErrorResponse                 "Validation failed (bad metadata, missing files, etc.)"
+//	@Param       file  formData  file  true  ".tar.gz bundle archive (max 50 MB)"
+//	@Success     201  {object}  bundlesvc.BundleResponse  "Bundle created and active"
+//	@Failure     400  {object}  ErrorResponse             "Missing or unreadable file field, wrong content-type, archive too large"
+//	@Failure     401  {object}  ErrorResponse             "Unauthorized"
+//	@Failure     409  {object}  ErrorResponse             "id already registered; use PUT"
+//	@Failure     422  {object}  ErrorResponse             "Validation failed (bad metadata, missing files, etc.)"
 //	@Router      /catalog/bundles [post]
 func (h *BundleHandler) UploadBundle(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBundleSizeBytes)
@@ -64,28 +62,6 @@ func (h *BundleHandler) UploadBundle(c *gin.Context) {
 
 	userID := c.GetString(middleware.CtxUserIDKey)
 
-	// Dry-run: validate-only — reads metadata + validates structure, no DB write.
-	if c.PostForm("dry_run") == "true" {
-		result, err := h.bundleService.ValidateBundle(c.Request.Context(), file)
-		if err != nil {
-			if valErr, ok := err.(*bundlesvc.ValidationError); ok {
-				c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
-				return
-			}
-
-			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "dry-run failed unexpectedly"})
-
-			return
-		}
-
-		c.JSON(http.StatusOK, result)
-
-		return
-	}
-
-	// Real upload: ProcessBundle reads metadata, checks conflict, extracts, validates,
-	// inserts the DB row as active, and reloads the catalog — all in one synchronous call.
 	resp, err := h.bundleService.ProcessBundle(c.Request.Context(), file, userID)
 	if err != nil {
 		if valErr, ok := err.(*bundlesvc.ValidationError); ok {
@@ -106,32 +82,28 @@ func (h *BundleHandler) UploadBundle(c *gin.Context) {
 // UpdateBundle godoc
 //
 //	@Summary     Replace an existing catalog bundle
-//	@Description Replaces the bundle identified by bundle_id. catalog_id and catalog_type are
-//	             resolved from the DB record and validated as immutable against the archive's
-//	             metadata.yaml — no form fields are needed beyond the file. Version is read
-//	             from the archive. Returns 404 if no bundle with that bundle_id exists. The
-//	             existing bundle remains active until the replacement is validated and activated.
+//	@Description Replaces the bundle identified by bundle_id. id and type are resolved from
+//	             the DB record and validated as immutable against the archive's metadata.yaml —
+//	             no form fields are needed beyond the file. Version is read from the archive.
+//	             Returns 404 if no bundle with that bundle_id exists. The existing bundle
+//	             remains active until the replacement is validated and activated.
 //	@Tags        Catalog
 //	@Accept      multipart/form-data
 //	@Produce     json
 //	@Security    BearerAuth
-//	@Param       bundle_id  path      string  true   "Internal record ID of the bundle to replace"
-//	@Param       file       formData  file    true   ".tar.gz replacement archive (max 50 MB)"
-//	@Param       dry_run    formData  string  false  "Validate only, do not apply (default: false)"
-//	@Success     202  {object}  bundlesvc.BundleResponse   "Replacement bundle accepted and processing"
-//	@Success     200  {object}  bundlesvc.ValidationResult "dry_run=true: validation passed"
-//	@Failure     400  {object}  ErrorResponse              "Missing file field or archive too large"
-//	@Failure     401  {object}  ErrorResponse              "Unauthorized"
-//	@Failure     404  {object}  ErrorResponse              "No bundle with this bundle_id"
-//	@Failure     422  {object}  ErrorResponse              "Validation failed or immutable fields differ"
+//	@Param       bundle_id  path      string  true  "Internal record ID of the bundle to replace"
+//	@Param       file       formData  file    true  ".tar.gz replacement archive (max 50 MB)"
+//	@Success     202  {object}  bundlesvc.BundleResponse  "Replacement bundle accepted and processing"
+//	@Failure     400  {object}  ErrorResponse             "Missing file field or archive too large"
+//	@Failure     401  {object}  ErrorResponse             "Unauthorized"
+//	@Failure     404  {object}  ErrorResponse             "No bundle with this bundle_id"
+//	@Failure     422  {object}  ErrorResponse             "Validation failed or immutable fields differ"
 //	@Router      /catalog/bundles/{bundle_id} [put]
 func (h *BundleHandler) UpdateBundle(c *gin.Context) {
-	// 1. Enforce compressed size limit.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBundleSizeBytes)
 
 	bundleID := c.Param("bundle_id")
 
-	// 2. Resolve existing record — 404 if not found.
 	existing, err := h.bundleService.GetByBundleID(c.Request.Context(), bundleID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to look up bundle"})
@@ -161,28 +133,7 @@ func (h *BundleHandler) UpdateBundle(c *gin.Context) {
 		return
 	}
 
-	dryRun := c.PostForm("dry_run") == "true"
 	userID := c.GetString(middleware.CtxUserIDKey)
-
-	// 3. Dry-run: synchronous validate-only — existing bundle is completely untouched.
-	if dryRun {
-		result, err := h.bundleService.ValidateBundle(c.Request.Context(), file)
-		if err != nil {
-			if valErr, ok := err.(*bundlesvc.ValidationError); ok {
-				c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
-				return
-			}
-
-			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "dry-run validation failed unexpectedly"})
-
-			return
-		}
-
-		c.JSON(http.StatusOK, result)
-
-		return
-	}
 
 	resp, err := h.bundleService.ReplaceBundle(c.Request.Context(), existing, file, userID)
 	if err != nil {
@@ -274,6 +225,55 @@ func (h *BundleHandler) GetBundle(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// ValidateBundle godoc
+//
+//	@Summary     Validate a catalog bundle archive
+//	@Description Accepts a .tar.gz archive and validates it — reads metadata.yaml, extracts to
+//	             a temp directory, checks structure — then cleans up. No DB record is written
+//	             and CatalogProvider is not reloaded. Use this to check a bundle before uploading.
+//	@Tags        Catalog
+//	@Accept      multipart/form-data
+//	@Produce     json
+//	@Security    BearerAuth
+//	@Param       file  formData  file  true  ".tar.gz bundle archive (max 50 MB)"
+//	@Success     200  {object}  bundlesvc.ValidationResult  "Validation passed"
+//	@Failure     400  {object}  ErrorResponse               "Missing or unreadable file field, archive too large"
+//	@Failure     401  {object}  ErrorResponse               "Unauthorized"
+//	@Failure     422  {object}  ErrorResponse               "Validation failed (bad metadata, missing files, etc.)"
+//	@Router      /catalog/bundles/validate [post]
+func (h *BundleHandler) ValidateBundle(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBundleSizeBytes)
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "missing or unreadable file field"})
+
+		return
+	}
+	defer file.Close()
+
+	if !strings.HasSuffix(header.Filename, ".tar.gz") {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "file must be a .tar.gz archive"})
+
+		return
+	}
+
+	result, err := h.bundleService.ValidateBundle(c.Request.Context(), file)
+	if err != nil {
+		if valErr, ok := err.(*bundlesvc.ValidationError); ok {
+			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
+
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "validation failed unexpectedly"})
+
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ListBundles godoc
