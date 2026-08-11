@@ -34,8 +34,10 @@ package apiserver
 import (
 	"fmt"
 
+	catalogpkg "github.com/project-ai-services/ai-services/internal/pkg/catalog"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/repository"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/auth"
+	bundlesvc "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/bundle"
 )
 
 // APIServerOptions defines the configuration options for the API server such as the port to listen
@@ -46,6 +48,8 @@ type APIServerOptions struct {
 	TokenManager       *auth.TokenManager
 	Blacklist          repository.TokenBlacklist
 	ApplicationService repository.ApplicationServiceInterface
+	BundleService      bundlesvc.BundleServiceInterface
+	CatalogProvider    *catalogpkg.CatalogProvider
 }
 
 // APIserver represents the API server instance, holding the configuration and authentication provider.
@@ -55,6 +59,8 @@ type APIserver struct {
 	tokenManager       *auth.TokenManager
 	blacklist          repository.TokenBlacklist
 	applicationService repository.ApplicationServiceInterface
+	bundleService      bundlesvc.BundleServiceInterface
+	catalogProvider    *catalogpkg.CatalogProvider
 }
 
 // NewAPIserver creates a new instance of the API server with the provided options, setting default values where necessary.
@@ -70,13 +76,15 @@ func NewAPIserver(options APIServerOptions) *APIserver {
 		tokenManager:       options.TokenManager,
 		blacklist:          options.Blacklist,
 		applicationService: options.ApplicationService,
+		bundleService:      options.BundleService,
+		catalogProvider:    options.CatalogProvider,
 	}
 }
 
 // Start initializes the API server and begins listening for incoming requests on the configured port.
 // It sets up the router with authentication middleware and routes.
 func (a *APIserver) Start() error {
-	r := CreateRouter(a.authService, a.tokenManager, a.blacklist, a.applicationService)
+	r := CreateRouter(a.authService, a.tokenManager, a.blacklist, a.applicationService, a.bundleService, a.catalogProvider)
 
 	return r.Run(fmt.Sprintf(":%d", a.port))
 }

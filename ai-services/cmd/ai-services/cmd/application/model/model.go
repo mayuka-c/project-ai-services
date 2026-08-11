@@ -1,15 +1,15 @@
 package model
 
 import (
-	"context"
 	"fmt"
 	"slices"
 
+	"github.com/spf13/cobra"
+
 	"github.com/project-ai-services/ai-services/assets"
-	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
+	catalogClient "github.com/project-ai-services/ai-services/internal/pkg/catalog/client"
 	"github.com/project-ai-services/ai-services/internal/pkg/cli/helpers"
 	"github.com/project-ai-services/ai-services/internal/pkg/cli/templates"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -34,6 +34,7 @@ func init() {
 	ModelCmd.PersistentFlags().BoolVar(&legacyModel, "legacy", false, "Use legacy application model implementation")
 }
 
+// models is the legacy path — still reads embedded ApplicationFS templates directly.
 func models(template string) ([]string, error) {
 	tp := templates.NewEmbedTemplateProvider(&assets.ApplicationFS)
 	apps, err := tp.ListApplications(hiddenTemplates)
@@ -48,18 +49,51 @@ func models(template string) ([]string, error) {
 	return helpers.ListModels(template, "")
 }
 
-// getCatalogModels is a helper that creates a catalog provider and collects models.
-// excludeComponentProviders is a variadic parameter that allows excluding specific component provider by ID.
+// getCatalogModels fetches model identifiers for a template (service or architecture)
+// from the server API. The server resolves the template type and extracts model names
+// from component schemas — no local file access required.
 func getCatalogModels(templateID string, excludeComponentProviders ...string) ([]string, error) {
-	provider, err := catalog.NewCatalogProvider()
+	client, err := catalogClient.NewApplicationClient()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create catalog provider: %w", err)
+		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
 
-	models, err := provider.GetCatalogModels(context.Background(), templateID, excludeComponentProviders...)
-	if err != nil {
-		return nil, err
+	// Try as architecture first, then service.
+	models, err := client.GetArchitectureModels(templateID)
+	if err == nil {
+		return filterModels(models, excludeComponentProviders), nil
 	}
 
-	return models, nil
+	models, err = client.GetServiceModels(templateID)
+	if err != nil {
+		return nil, fmt.Errorf("template '%s' not found as service or architecture: %w", templateID, err)
+	}
+
+	return filterModels(models, excludeComponentProviders), nil
+}
+
+// filterModels removes model entries that match any excludeComponentProviders prefix.
+// The server returns all models; the caller may want to exclude specific providers.
+func filterModels(models []string, exclude []string) []string {
+	if len(exclude) == 0 {
+		return models
+	}
+
+	out := models[:0:0]
+	for _, m := range models {
+		keep := true
+		for _, ex := range exclude {
+			if m == ex {
+				keep = false
+
+				break
+			}
+		}
+
+		if keep {
+			out = append(out, m)
+		}
+	}
+
+	return out
 }

@@ -1,12 +1,11 @@
 package image
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
-	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
+	catalogClient "github.com/project-ai-services/ai-services/internal/pkg/catalog/client"
 )
 
 var (
@@ -24,16 +23,25 @@ var ImageCmd = &cobra.Command{
 	},
 }
 
-// getCatalogImages is a helper that creates a catalog provider and collects images.
+// getCatalogImages fetches container images for a template (service or architecture)
+// from the server API. The server resolves whether the ID is a service or architecture
+// and returns all required images including component dependencies.
 func getCatalogImages(templateID string) ([]string, error) {
-	provider, err := catalog.NewCatalogProvider()
+	client, err := catalogClient.NewApplicationClient()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create catalog provider: %w", err)
+		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
 
-	images, err := provider.GetCatalogImages(context.Background(), templateID)
+	// Try as architecture first, then service — mirrors the server-side logic in
+	// GetCatalogImages which tries LoadArchitecture before LoadService.
+	images, err := client.GetArchitectureImages(templateID)
+	if err == nil {
+		return images, nil
+	}
+
+	images, err = client.GetServiceImages(templateID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("template '%s' not found as service or architecture: %w", templateID, err)
 	}
 
 	return images, nil

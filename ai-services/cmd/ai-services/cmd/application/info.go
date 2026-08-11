@@ -10,12 +10,11 @@ import (
 
 	"github.com/project-ai-services/ai-services/internal/pkg/application"
 	appTypes "github.com/project-ai-services/ai-services/internal/pkg/application/types"
-	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
 	catalogClient "github.com/project-ai-services/ai-services/internal/pkg/catalog/client"
 	catalogTypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 	cliUtils "github.com/project-ai-services/ai-services/internal/pkg/cli/utils"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
-	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
+	runtimetypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/vars"
 )
 
@@ -49,7 +48,7 @@ Arguments:
 
 		// When legacyInfo is true and runtime is podman, use the older/stable code path
 		// For openshift runtime, always use the older/stable code path regardless of legacy flag
-		if legacyInfo && rt == types.RuntimeTypePodman {
+		if legacyInfo && rt == runtimetypes.RuntimeTypePodman {
 			// Create application instance using factory
 			factory := application.NewFactory(rt)
 			app, err := factory.Create(applicationName)
@@ -66,7 +65,7 @@ Arguments:
 
 		// Default: use new implementation using catalog
 		// For openshift runtime, always use the older/stable code path
-		if rt == types.RuntimeTypePodman {
+		if rt == runtimetypes.RuntimeTypePodman {
 			return renderApplicationInfo(applicationName)
 		}
 
@@ -124,9 +123,11 @@ func renderApplicationInfo(appName string) error {
 }
 
 func printServicesInfo(services []catalogTypes.ApplicationService, appPS *catalogTypes.ApplicationPSResponse) error {
-	catalogProvider, err := catalog.NewCatalogProvider()
+	// Fetch markdown templates from the server API — the server has access to the
+	// full itemFS for both embedded and bundle-based catalog items.
+	appClient, err := catalogClient.NewApplicationClient()
 	if err != nil {
-		return fmt.Errorf("failed to create catalog provider: %w", err)
+		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 
 	logger.Infoln("Info:")
@@ -149,9 +150,14 @@ func printServicesInfo(services []catalogTypes.ApplicationService, appPS *catalo
 			}
 		}
 
-		tmpls, err := catalogProvider.LoadServicesMD(service.CatalogID)
+		mdSources, err := appClient.GetServiceMD(service.CatalogID)
 		if err != nil {
 			return fmt.Errorf("failed to load service md files: %w", err)
+		}
+
+		tmpls, err := parseTemplatesFromStrings(mdSources)
+		if err != nil {
+			return fmt.Errorf("failed to parse service md templates: %w", err)
 		}
 
 		err = printInfo(tmpls, params, service.CatalogID)
@@ -161,6 +167,23 @@ func printServicesInfo(services []catalogTypes.ApplicationService, appPS *catalo
 	}
 
 	return nil
+}
+
+// parseTemplatesFromStrings parses a map of filename → template-source-string
+// into executable text/template instances.
+func parseTemplatesFromStrings(sources map[string]string) (map[string]*template.Template, error) {
+	out := make(map[string]*template.Template, len(sources))
+
+	for name, src := range sources {
+		tmpl, err := template.New(name).Parse(src)
+		if err != nil {
+			return nil, fmt.Errorf("parse template %q: %w", name, err)
+		}
+
+		out[name] = tmpl
+	}
+
+	return out, nil
 }
 
 func getContainerStatus(services []catalogTypes.Pod, catalogID string) (string, string) {

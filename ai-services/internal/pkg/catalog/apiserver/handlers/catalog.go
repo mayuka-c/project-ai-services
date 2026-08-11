@@ -6,26 +6,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
+	catalogpkg "github.com/project-ai-services/ai-services/internal/pkg/catalog"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/vars"
 )
 
 // CatalogHandler handles catalog-related HTTP requests.
 type CatalogHandler struct {
-	provider *catalog.CatalogProvider
+	provider *catalogpkg.CatalogProvider
 }
 
-// NewCatalogHandler creates a new catalog handler.
-func NewCatalogHandler() *CatalogHandler {
-	provider, err := catalog.NewCatalogProvider()
-	if err != nil {
-		// Log error but don't fail - let individual requests handle it
-		panic(fmt.Sprintf("Failed to initialize catalog provider: %v", err))
-	}
-
-	return &CatalogHandler{
-		provider: provider,
-	}
+// NewCatalogHandler creates a new catalog handler with the given provider.
+func NewCatalogHandler(provider *catalogpkg.CatalogProvider) *CatalogHandler {
+	return &CatalogHandler{provider: provider}
 }
 
 // ListArchitectures godoc
@@ -113,7 +106,7 @@ func (h *CatalogHandler) ListServices(c *gin.Context) {
 	// Convert to summaries (exclude endpoints and pod_templates)
 	summaries := make([]types.ServiceSummary, len(servicesList))
 	for i, svc := range servicesList {
-		summaries[i] = catalog.ToServiceSummary(&svc)
+		summaries[i] = catalogpkg.ToServiceSummary(&svc)
 	}
 
 	c.JSON(http.StatusOK, summaries)
@@ -261,6 +254,148 @@ func (h *CatalogHandler) GetServiceParams(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, schema)
+}
+
+// GetServiceImages godoc
+//
+//	@Summary		Get container images for a service
+//	@Description	Returns all container images required to run a specific service template and its component dependencies. Includes the catalog infrastructure image.
+//	@Tags			Catalog
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id	path		string		true	"Service ID"
+//	@Success		200	{object}	map[string][]string	"images: list of fully-qualified image references"
+//	@Failure		401	{object}	ErrorResponse
+//	@Failure		404	{object}	ErrorResponse
+//	@Router			/services/{id}/images [get]
+func (h *CatalogHandler) GetServiceImages(c *gin.Context) {
+	serviceID := c.Param("id")
+
+	images, err := h.provider.GetCatalogImages(c.Request.Context(), serviceID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error: fmt.Sprintf("Failed to get images for service '%s': %v", serviceID, err),
+		})
+
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"images": images})
+}
+
+// GetArchitectureImages godoc
+//
+//	@Summary		Get container images for an architecture
+//	@Description	Returns all container images required to run all services in an architecture template, including component dependencies and catalog infrastructure.
+//	@Tags			Catalog
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id	path		string		true	"Architecture ID"
+//	@Success		200	{object}	map[string][]string	"images: list of fully-qualified image references"
+//	@Failure		401	{object}	ErrorResponse
+//	@Failure		404	{object}	ErrorResponse
+//	@Router			/architectures/{id}/images [get]
+func (h *CatalogHandler) GetArchitectureImages(c *gin.Context) {
+	archID := c.Param("id")
+
+	images, err := h.provider.GetCatalogImages(c.Request.Context(), archID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error: fmt.Sprintf("Failed to get images for architecture '%s': %v", archID, err),
+		})
+
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"images": images})
+}
+
+// GetServiceModels godoc
+//
+//	@Summary		Get AI models for a service
+//	@Description	Returns all model identifiers extracted from component schemas for a service template.
+//	@Tags			Catalog
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id	path		string		true	"Service ID"
+//	@Success		200	{object}	map[string][]string	"models: list of model identifiers"
+//	@Failure		401	{object}	ErrorResponse
+//	@Failure		404	{object}	ErrorResponse
+//	@Router			/services/{id}/models [get]
+func (h *CatalogHandler) GetServiceModels(c *gin.Context) {
+	serviceID := c.Param("id")
+
+	models, err := h.provider.GetCatalogModels(c.Request.Context(), serviceID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error: fmt.Sprintf("Failed to get models for service '%s': %v", serviceID, err),
+		})
+
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+// GetArchitectureModels godoc
+//
+//	@Summary		Get AI models for an architecture
+//	@Description	Returns all model identifiers extracted from component schemas for all services in an architecture template.
+//	@Tags			Catalog
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id	path		string		true	"Architecture ID"
+//	@Success		200	{object}	map[string][]string	"models: list of model identifiers"
+//	@Failure		401	{object}	ErrorResponse
+//	@Failure		404	{object}	ErrorResponse
+//	@Router			/architectures/{id}/models [get]
+func (h *CatalogHandler) GetArchitectureModels(c *gin.Context) {
+	archID := c.Param("id")
+
+	models, err := h.provider.GetCatalogModels(c.Request.Context(), archID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error: fmt.Sprintf("Failed to get models for architecture '%s': %v", archID, err),
+		})
+
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+// GetServiceMD godoc
+//
+//	@Summary		Get markdown template content for a service
+//	@Description	Returns the raw markdown template strings (info.md, next.md, etc.) for a service. These are Go text/template sources that the CLI renders locally with runtime parameters.
+//	@Tags			Catalog
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id	path		string					true	"Service ID"
+//	@Success		200	{object}	map[string]string		"map of filename → raw template string"
+//	@Failure		401	{object}	ErrorResponse
+//	@Failure		404	{object}	ErrorResponse
+//	@Router			/services/{id}/md [get]
+func (h *CatalogHandler) GetServiceMD(c *gin.Context) {
+	serviceID := c.Param("id")
+
+	tmpls, err := h.provider.LoadServicesMD(serviceID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error: fmt.Sprintf("Failed to load markdown templates for service '%s': %v", serviceID, err),
+		})
+
+		return
+	}
+
+	// Serialize the parsed templates back to their source strings so the
+	// CLI can re-parse them locally for execution.
+	out := make(map[string]string, len(tmpls))
+	for name, tmpl := range tmpls {
+		out[name] = tmpl.Root.String()
+	}
+
+	c.JSON(http.StatusOK, out)
 }
 
 // ErrorResponse represents an error response.

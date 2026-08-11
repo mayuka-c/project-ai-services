@@ -12,6 +12,7 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver"
 	apirepository "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/repository"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/auth"
+	bundlesvc "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/bundle"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/sync"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/constants"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/db"
@@ -95,13 +96,23 @@ func runAPIServer(port int, accessTTL, refreshTTL time.Duration, adminUser, admi
 	componentRepo := repository.NewComponentRepository(pool)
 	serviceDependencyRepo := repository.NewServiceDependencyRepository(pool)
 
-	// Initialize sync service for background DB-Pod synchronization
+	// Bundle repository and CatalogProvider are created first so all downstream
+	// services share the same instance and see active bundles from the start.
+	bundleRepo := repository.NewBundleRepository(pool)
+
+	catalogProvider, err := catalog.NewCatalogProvider(bundleRepo)
+	if err != nil {
+		return fmt.Errorf("failed to initialize catalog provider: %w", err)
+	}
+
+	// Initialize sync service for background DB-Pod synchronization.
 	syncService, err := sync.NewSyncService(
 		applicationRepo,
 		serviceRepo,
 		componentRepo,
 		serviceDependencyRepo,
 		sync.DefaultSyncInterval,
+		catalogProvider,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize sync service: %w", err)
@@ -109,13 +120,11 @@ func runAPIServer(port int, accessTTL, refreshTTL time.Duration, adminUser, admi
 	syncService.Start(ctx)
 	defer syncService.Stop(ctx)
 
-	catalogProvider, err := catalog.NewCatalogProvider()
-	if err != nil {
-		return fmt.Errorf("failed to initialize catalog provider: %w", err)
-	}
-
-	// Initialize application service with all required repositories
+	// Initialize application service with all required repositories.
 	applicationService := apirepository.NewApplicationService(applicationRepo, serviceRepo, componentRepo, serviceDependencyRepo, catalogProvider, vars.RuntimeFactory.GetRuntimeType())
+
+	// Bundle service uses the catalog provider as its reload hook.
+	bundleService := bundlesvc.NewBundleService(bundleRepo, catalogProvider)
 
 	tokenMgr := auth.NewTokenManager(secretKey, accessTTL, refreshTTL)
 	authSvc := auth.NewAuthService(userRepo, tokenMgr, blacklist)
@@ -126,6 +135,8 @@ func runAPIServer(port int, accessTTL, refreshTTL time.Duration, adminUser, admi
 		TokenManager:       tokenMgr,
 		Blacklist:          blacklist,
 		ApplicationService: applicationService,
+		BundleService:      bundleService,
+		CatalogProvider:    catalogProvider,
 	}).Start()
 }
 

@@ -16,7 +16,6 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/application"
 	appTypes "github.com/project-ai-services/ai-services/internal/pkg/application/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/bootstrap"
-	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
 	apiModels "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/models"
 	catalogClient "github.com/project-ai-services/ai-services/internal/pkg/catalog/client"
 	catalogTypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
@@ -483,27 +482,27 @@ func checkApplicationExists(appClient *catalogClient.ApplicationClient, appName 
 }
 
 // buildCatalogPayload builds the catalog API payload for the given template.
+// It asks the server whether the template is an architecture or a service — no
+// local catalog provider or embedded file access required.
 func buildCatalogPayload(appName string) (*apiModels.CreateApplicationRequest, error) {
-	// Initialize catalog provider
-	provider, err := catalog.NewCatalogProvider()
+	appClient, err := catalogClient.NewApplicationClient()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create catalog provider: %w", err)
+		return nil, fmt.Errorf("failed to create application client: %w", err)
 	}
 
-	// Determine if template is architecture or service
-	isArchitecture := provider.ArchitectureExists(templateName)
-	isService := provider.ServiceExists(templateName)
-
-	if !isArchitecture && !isService {
-		return nil, fmt.Errorf("template '%s' not found as architecture or service", templateName)
+	// Try architecture first.
+	deployOpts, err := appClient.GetArchitectureDeployOptions(templateName)
+	if err == nil {
+		return buildArchitecturePayload(appClient, templateName, appName, deployOpts)
 	}
 
-	// Build the payload
-	if isArchitecture {
-		return buildArchitecturePayload(provider, templateName, appName)
+	// Try service.
+	_, err = appClient.GetServiceDeployOptions(templateName)
+	if err == nil {
+		return buildServicePayload(templateName, appName)
 	}
 
-	return buildServicePayload(templateName, appName)
+	return nil, fmt.Errorf("template '%s' not found as architecture or service", templateName)
 }
 
 // pollApplicationStatus polls the application status until it's ready or fails.
@@ -586,11 +585,6 @@ func printNextSteps(app *catalogTypes.Application) error {
 		return fmt.Errorf("failed to get application: %w", err)
 	}
 
-	catalogProvider, err := catalog.NewCatalogProvider()
-	if err != nil {
-		return fmt.Errorf("failed to create catalog provider: %w", err)
-	}
-
 	logger.Infoln("\nNext Steps:")
 	logger.Infoln("-------")
 
@@ -607,9 +601,18 @@ func printNextSteps(app *catalogTypes.Application) error {
 			}
 		}
 
-		tmpls, err := catalogProvider.LoadServicesMD(service.CatalogID)
+		// Fetch markdown templates from the server API so both embedded and
+		// bundle-based catalog items are fully supported.
+		mdSources, err := appClient.GetServiceMD(service.CatalogID)
 		if err != nil {
 			logger.Warningf("Failed to load next steps for service '%s': %v\n", service.CatalogID, err)
+
+			continue
+		}
+
+		tmpls, err := parseTemplatesFromStrings(mdSources)
+		if err != nil {
+			logger.Warningf("Failed to parse next steps for service '%s': %v\n", service.CatalogID, err)
 
 			continue
 		}
@@ -650,46 +653,18 @@ func printNextStepsMD(tmpls map[string]*template.Template, params map[string]str
 }
 
 // buildArchitecturePayload builds the payload for an architecture deployment.
-func buildArchitecturePayload(provider *catalog.CatalogProvider, archID, appName string) (*apiModels.CreateApplicationRequest, error) {
-	// Load architecture metadata
-	arch, err := provider.LoadArchitecture(archID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load architecture: %w", err)
-	}
+// deployOptions is already fetched by the caller — no extra API call needed.
+func buildArchitecturePayload(appClient *catalogClient.ApplicationClient, archID, appName string, deployOptions *catalogTypes.DeployOptionsArchitecture) (*apiModels.CreateApplicationRequest, error) {
+	services := make([]apiModels.Service, 0, len(deployOptions.Services))
 
-	// Create application client for API calls
-	appClient, err := catalogClient.NewApplicationClient()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create application client: %w", err)
-	}
+	for i := range deployOptions.Services {
+		svcDeployOpts := &deployOptions.Services[i]
 
-	// Get deploy options for the architecture
-	deployOptions, err := appClient.GetArchitectureDeployOptions(archID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get deploy options: %w", err)
-	}
-
-	// Build services list using deploy options
-	services := make([]apiModels.Service, 0, len(arch.Services))
-	for _, svcRef := range arch.Services {
-		// Find the corresponding deploy options service
-		var svcDeployOpts *catalogTypes.DeployOptionsService
-		for i := range deployOptions.Services {
-			if deployOptions.Services[i].ID == svcRef.ID {
-				svcDeployOpts = &deployOptions.Services[i]
-
-				break
-			}
-		}
-
-		if svcDeployOpts == nil {
-			return nil, fmt.Errorf("deploy options not found for service '%s'", svcRef.ID)
-		}
-
-		svc, err := buildServiceEntryWithDeployOptions(appClient, svcRef.ID, svcDeployOpts)
+		svc, err := buildServiceEntryWithDeployOptions(appClient, svcDeployOpts.ID, svcDeployOpts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build service '%s': %w", svcRef.ID, err)
+			return nil, fmt.Errorf("failed to build service '%s': %w", svcDeployOpts.ID, err)
 		}
+
 		services = append(services, svc)
 	}
 
@@ -697,7 +672,7 @@ func buildArchitecturePayload(provider *catalog.CatalogProvider, archID, appName
 		CatalogID: archID,
 		Name:      appName,
 		Services:  services,
-		Version:   arch.Version,
+		Version:   deployOptions.Version,
 	}, nil
 }
 

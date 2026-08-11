@@ -7,7 +7,7 @@ import (
 	"strconv"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/models"
-	"github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
+	catalogTypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/utils"
 )
 
@@ -19,6 +19,13 @@ const (
 	svcDeployOptionsRoute   = "/api/v1/services/%s/deploy-options"
 	archDeployOptionsRoute  = "/api/v1/architectures/%s/deploy-options"
 	compProviderParamsRoute = "/api/v1/components/%s/providers/%s/params"
+	svcParamsRoute          = "/api/v1/services/%s/params"
+	archParamsRoute         = "/api/v1/architectures/%s/params"
+	svcImagesRoute          = "/api/v1/services/%s/images"
+	archImagesRoute         = "/api/v1/architectures/%s/images"
+	svcModelsRoute          = "/api/v1/services/%s/models"
+	archModelsRoute         = "/api/v1/architectures/%s/models"
+	svcMDRoute              = "/api/v1/services/%s/md"
 )
 
 // HTTPError represents an HTTP error with status code.
@@ -60,8 +67,8 @@ func NewApplicationClient() (*ApplicationClient, error) {
 //	    DeploymentType: "services",
 //	    CatalogID: "rag",
 //	})
-func (c *ApplicationClient) ListApplications(params *ListApplicationsParams) (*types.ApplicationListResponse, error) {
-	var result types.ApplicationListResponse
+func (c *ApplicationClient) ListApplications(params *ListApplicationsParams) (*catalogTypes.ApplicationListResponse, error) {
+	var result catalogTypes.ApplicationListResponse
 	req := c.client.HTTPClient().R().
 		SetResult(&result)
 
@@ -97,8 +104,8 @@ func (c *ApplicationClient) ListApplications(params *ListApplicationsParams) (*t
 
 // GetApplicationPS retrieves the process status and runtime information for an application.
 // It returns details about pods, containers, and their health status.
-func (c *ApplicationClient) GetApplicationPS(id string) (*types.ApplicationPSResponse, error) {
-	var result types.ApplicationPSResponse
+func (c *ApplicationClient) GetApplicationPS(id string) (*catalogTypes.ApplicationPSResponse, error) {
+	var result catalogTypes.ApplicationPSResponse
 	resp, err := c.client.HTTPClient().R().
 		SetResult(&result).
 		Get(fmt.Sprintf(getApplicationPSRoute, id))
@@ -151,8 +158,8 @@ func (c *ApplicationClient) DeleteApplication(id string, params *DeleteApplicati
 }
 
 // GetApplication retrieves full details for a specific application by ID.
-func (c *ApplicationClient) GetApplication(id string) (*types.Application, error) {
-	var result types.Application
+func (c *ApplicationClient) GetApplication(id string) (*catalogTypes.Application, error) {
+	var result catalogTypes.Application
 	resp, err := c.client.HTTPClient().R().
 		SetResult(&result).
 		Get(fmt.Sprintf(getApplicationRoute, id))
@@ -172,7 +179,7 @@ func (c *ApplicationClient) GetApplication(id string) (*types.Application, error
 
 // GetApplicationWithRefresh retrieves full details for a specific application by ID.
 // If the server returns 401 Unauthorized, it refreshes the access token once and retries.
-func (c *ApplicationClient) GetApplicationWithRefresh(id string) (*types.Application, error) {
+func (c *ApplicationClient) GetApplicationWithRefresh(id string) (*catalogTypes.Application, error) {
 	result, err := c.GetApplication(id)
 	if err != nil {
 		var httpErr *HTTPError
@@ -213,8 +220,8 @@ func (c *ApplicationClient) CreateApplication(req *models.CreateApplicationReque
 
 // GetServiceDeployOptions retrieves deploy options for a specific service.
 // It returns available providers and dependency rules for the service and its components.
-func (c *ApplicationClient) GetServiceDeployOptions(serviceID string) (*types.DeployOptionsService, error) {
-	var result types.DeployOptionsService
+func (c *ApplicationClient) GetServiceDeployOptions(serviceID string) (*catalogTypes.DeployOptionsService, error) {
+	var result catalogTypes.DeployOptionsService
 	resp, err := c.client.HTTPClient().R().
 		SetResult(&result).
 		Get(fmt.Sprintf(svcDeployOptionsRoute, serviceID))
@@ -231,8 +238,8 @@ func (c *ApplicationClient) GetServiceDeployOptions(serviceID string) (*types.De
 
 // GetArchitectureDeployOptions retrieves deploy options for an architecture.
 // It returns available providers and dependency rules for all services in the architecture.
-func (c *ApplicationClient) GetArchitectureDeployOptions(architectureID string) (*types.DeployOptionsArchitecture, error) {
-	var result types.DeployOptionsArchitecture
+func (c *ApplicationClient) GetArchitectureDeployOptions(architectureID string) (*catalogTypes.DeployOptionsArchitecture, error) {
+	var result catalogTypes.DeployOptionsArchitecture
 	resp, err := c.client.HTTPClient().R().
 		SetResult(&result).
 		Get(fmt.Sprintf(archDeployOptionsRoute, architectureID))
@@ -259,6 +266,154 @@ func (c *ApplicationClient) GetComponentProviderParams(componentType, providerID
 
 	if resp.IsError() {
 		return nil, fmt.Errorf("get component provider params: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result, nil
+}
+
+// ListArchitectures retrieves a summary list of all available architecture templates.
+func (c *ApplicationClient) ListArchitectures() ([]catalogTypes.ArchitectureSummary, error) {
+	var result []catalogTypes.ArchitectureSummary
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get("/api/v1/architectures")
+	if err != nil {
+		return nil, fmt.Errorf("list architectures: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("list architectures: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result, nil
+}
+
+// ListServices retrieves a summary list of all available service templates.
+func (c *ApplicationClient) ListServices() ([]catalogTypes.ServiceSummary, error) {
+	var result []catalogTypes.ServiceSummary
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get("/api/v1/services")
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("list services: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result, nil
+}
+
+// GetServiceParams retrieves the JSON schema for a service's configurable parameters.
+func (c *ApplicationClient) GetServiceParams(serviceID string) (map[string]any, error) {
+	var result map[string]any
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get(fmt.Sprintf(svcParamsRoute, serviceID))
+	if err != nil {
+		return nil, fmt.Errorf("get service params: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("get service params: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result, nil
+}
+
+// imagesResponse is the JSON envelope returned by the /images endpoints.
+type imagesResponse struct {
+	Images []string `json:"images"`
+}
+
+// modelsResponse is the JSON envelope returned by the /models endpoints.
+type modelsResponse struct {
+	Models []string `json:"models"`
+}
+
+// GetServiceImages returns the container images needed to run a service template.
+func (c *ApplicationClient) GetServiceImages(serviceID string) ([]string, error) {
+	var result imagesResponse
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get(fmt.Sprintf(svcImagesRoute, serviceID))
+	if err != nil {
+		return nil, fmt.Errorf("get service images: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("get service images: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result.Images, nil
+}
+
+// GetArchitectureImages returns the container images needed to run an architecture template.
+func (c *ApplicationClient) GetArchitectureImages(archID string) ([]string, error) {
+	var result imagesResponse
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get(fmt.Sprintf(archImagesRoute, archID))
+	if err != nil {
+		return nil, fmt.Errorf("get architecture images: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("get architecture images: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result.Images, nil
+}
+
+// GetServiceModels returns the AI model identifiers for a service template's components.
+func (c *ApplicationClient) GetServiceModels(serviceID string) ([]string, error) {
+	var result modelsResponse
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get(fmt.Sprintf(svcModelsRoute, serviceID))
+	if err != nil {
+		return nil, fmt.Errorf("get service models: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("get service models: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result.Models, nil
+}
+
+// GetArchitectureModels returns the AI model identifiers for an architecture template's components.
+func (c *ApplicationClient) GetArchitectureModels(archID string) ([]string, error) {
+	var result modelsResponse
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get(fmt.Sprintf(archModelsRoute, archID))
+	if err != nil {
+		return nil, fmt.Errorf("get architecture models: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("get architecture models: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
+	}
+
+	return result.Models, nil
+}
+
+// GetServiceMD returns the raw Go text/template source strings for a service's
+// markdown files (e.g. "info.md", "next.md"), keyed by filename.
+// The CLI re-parses and executes these locally with runtime parameters.
+func (c *ApplicationClient) GetServiceMD(serviceID string) (map[string]string, error) {
+	var result map[string]string
+	resp, err := c.client.HTTPClient().R().
+		SetResult(&result).
+		Get(fmt.Sprintf(svcMDRoute, serviceID))
+	if err != nil {
+		return nil, fmt.Errorf("get service md: %w", err)
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("get service md: server returned HTTP %d: %s", resp.StatusCode(), utils.ParseErrorResponse(resp))
 	}
 
 	return result, nil

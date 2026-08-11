@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 
-	"github.com/project-ai-services/ai-services/assets"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
 	"github.com/project-ai-services/ai-services/internal/pkg/vars"
@@ -287,26 +287,18 @@ func hasNonEmptyProperties(schema map[string]any) bool {
 // GetComponentProviderParams returns the JSON schema for a specific provider's configuration.
 // If the schema file is not present, returns an empty schema instead of failing.
 func (p *CatalogProvider) GetComponentProviderParams(ctx context.Context, componentType, providerID string) (map[string]any, error) {
-	// Verify component exists and get its path
-	_, err := p.LoadComponent(componentType, providerID)
-	if err != nil {
-		return nil, fmt.Errorf("component provider not found: %w", err)
-	}
-
-	// Get the component's catalog path
 	componentKey := fmt.Sprintf("%s/%s", componentType, providerID)
-	componentPath, err := p.GetCatalogItemPath(componentKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get component path: %w", err)
+
+	item, err := p.getItemWithFS(componentKey)
+	if err != nil || item.Component == nil {
+		return nil, fmt.Errorf("component provider not found: %s/%s", componentType, providerID)
 	}
 
-	// Get runtime from global factory
 	runtime := vars.RuntimeFactory.GetRuntimeType()
-	runtimeStr := string(runtime)
-	schemaPath := filepath.Join(componentPath, runtimeStr, "values.schema.json")
-	schemaData, err := assets.CatalogFS.ReadFile(schemaPath)
+	schemaPath := filepath.Join(item.Path, string(runtime), "values.schema.json")
+
+	schemaData, err := fs.ReadFile(item.itemFS, schemaPath)
 	if err != nil {
-		// If schema file doesn't exist, return empty schema instead of failing
 		logger.WarningfCtx(ctx, "schema file not found at '%s': %v", schemaPath, err)
 
 		return map[string]any{}, nil
@@ -323,25 +315,16 @@ func (p *CatalogProvider) GetComponentProviderParams(ctx context.Context, compon
 // GetServiceParams returns the JSON schema for a specific service's configuration.
 // If the schema file is not present, returns an empty schema instead of failing.
 func (p *CatalogProvider) GetServiceParams(ctx context.Context, serviceID string) (map[string]any, error) {
-	// Verify service exists and get its path
-	_, err := p.LoadService(serviceID)
-	if err != nil {
-		return nil, fmt.Errorf("service not found: %w", err)
+	item, err := p.getItemWithFS(serviceID)
+	if err != nil || item.Service == nil {
+		return nil, fmt.Errorf("service not found: %s", serviceID)
 	}
 
-	// Get the service's catalog path
-	servicePath, err := p.GetCatalogItemPath(serviceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get service path: %w", err)
-	}
-
-	// Get runtime from global factory
 	runtime := vars.RuntimeFactory.GetRuntimeType()
-	runtimeStr := string(runtime)
-	schemaPath := filepath.Join(servicePath, runtimeStr, "values.schema.json")
-	schemaData, err := assets.CatalogFS.ReadFile(schemaPath)
+	schemaPath := filepath.Join(item.Path, string(runtime), "values.schema.json")
+
+	schemaData, err := fs.ReadFile(item.itemFS, schemaPath)
 	if err != nil {
-		// If schema file doesn't exist, return empty schema instead of failing
 		logger.WarningfCtx(ctx, "schema file not found at '%s': %v", schemaPath, err)
 
 		return map[string]any{}, nil

@@ -1,0 +1,267 @@
+package repository
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/project-ai-services/ai-services/internal/pkg/catalog/db/models"
+)
+
+// BundleRepository defines the interface for catalog_bundles data operations.
+type BundleRepository interface {
+	// Insert creates a new bundle record with status 'processing'.
+	Insert(ctx context.Context, bundle *models.Bundle) error
+
+	// GetByID returns the bundle with the given internal ID, or nil if not found.
+	GetByID(ctx context.Context, id string) (*models.Bundle, error)
+
+	// GetActiveByCatalogID returns the active bundle for the given catalog_id, or nil.
+	GetActiveByCatalogID(ctx context.Context, catalogID string) (*models.Bundle, error)
+
+	// ActiveCatalogIDExists returns true if any active bundle row with the given catalog_id exists.
+	ActiveCatalogIDExists(ctx context.Context, catalogID string) (bool, error)
+
+	// ListAll returns all bundle records ordered by uploaded_at descending.
+	ListAll(ctx context.Context) ([]models.Bundle, error)
+
+	// MarkActive sets the bundle to status='active' and records its uncompressed size.
+	MarkActive(ctx context.Context, id string, sizeBytes int64) error
+
+	// MarkFailed sets the bundle to status='failed' and records the error message.
+	MarkFailed(ctx context.Context, id string, errMsg string) error
+
+	// UpdateVersionAndName updates the version and name columns for a bundle.
+	// Used by PUT after the new version is read from metadata.yaml.
+	UpdateVersionAndName(ctx context.Context, id, version, name string) error
+
+	// Delete removes the bundle record by internal ID.
+	Delete(ctx context.Context, id string) error
+}
+
+// bundleRepo implements BundleRepository using pgx.
+type bundleRepo struct {
+	pool *pgxpool.Pool
+}
+
+// NewBundleRepository creates a new BundleRepository backed by the given connection pool.
+func NewBundleRepository(pool *pgxpool.Pool) BundleRepository {
+	return &bundleRepo{pool: pool}
+}
+
+// Insert creates a new catalog_bundles row with status 'processing'.
+func (r *bundleRepo) Insert(ctx context.Context, bundle *models.Bundle) error {
+	query := `
+		INSERT INTO catalog_bundles
+			(id, name, status, catalog_type, catalog_id, version, uploaded_by)
+		VALUES
+			($1, $2, 'processing', $3, $4, $5, $6)
+		RETURNING uploaded_at
+	`
+
+	err := r.pool.QueryRow(ctx, query,
+		bundle.ID,
+		bundle.Name,
+		bundle.CatalogType,
+		bundle.CatalogID,
+		bundle.Version,
+		bundle.UploadedBy,
+	).Scan(&bundle.UploadedAt)
+	if err != nil {
+		return fmt.Errorf("failed to insert catalog bundle: %w", err)
+	}
+
+	bundle.Status = models.BundleStatusProcessing
+
+	return nil
+}
+
+// GetByID returns the bundle record with the given ID, or nil if not found.
+func (r *bundleRepo) GetByID(ctx context.Context, id string) (*models.Bundle, error) {
+	query := `
+		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
+		FROM catalog_bundles
+		WHERE id = $1
+	`
+
+	bundle := &models.Bundle{}
+
+	err := r.pool.QueryRow(ctx, query, id).Scan(
+		&bundle.ID,
+		&bundle.Name,
+		&bundle.Status,
+		&bundle.SizeBytes,
+		&bundle.CatalogType,
+		&bundle.CatalogID,
+		&bundle.Version,
+		&bundle.Error,
+		&bundle.UploadedBy,
+		&bundle.UploadedAt,
+	)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("failed to get catalog bundle by id: %w", err)
+	}
+
+	return bundle, nil
+}
+
+// GetActiveByCatalogID returns the active bundle for the given catalog_id, or nil if not found.
+func (r *bundleRepo) GetActiveByCatalogID(ctx context.Context, catalogID string) (*models.Bundle, error) {
+	query := `
+		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
+		FROM catalog_bundles
+		WHERE catalog_id = $1 AND status = 'active'
+	`
+
+	bundle := &models.Bundle{}
+
+	err := r.pool.QueryRow(ctx, query, catalogID).Scan(
+		&bundle.ID,
+		&bundle.Name,
+		&bundle.Status,
+		&bundle.SizeBytes,
+		&bundle.CatalogType,
+		&bundle.CatalogID,
+		&bundle.Version,
+		&bundle.Error,
+		&bundle.UploadedBy,
+		&bundle.UploadedAt,
+	)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("failed to get active catalog bundle: %w", err)
+	}
+
+	return bundle, nil
+}
+
+// ActiveCatalogIDExists returns true if an active bundle with the given catalog_id already exists.
+func (r *bundleRepo) ActiveCatalogIDExists(ctx context.Context, catalogID string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM catalog_bundles WHERE catalog_id = $1 AND status = 'active')`
+
+	var exists bool
+
+	if err := r.pool.QueryRow(ctx, query, catalogID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("failed to check catalog_id existence: %w", err)
+	}
+
+	return exists, nil
+}
+
+// ListAll returns all bundle records ordered by uploaded_at descending.
+func (r *bundleRepo) ListAll(ctx context.Context) ([]models.Bundle, error) {
+	query := `
+		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
+		FROM catalog_bundles
+		ORDER BY uploaded_at DESC
+	`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list catalog bundles: %w", err)
+	}
+	defer rows.Close()
+
+	var bundles []models.Bundle
+
+	for rows.Next() {
+		var b models.Bundle
+		if err := rows.Scan(
+			&b.ID,
+			&b.Name,
+			&b.Status,
+			&b.SizeBytes,
+			&b.CatalogType,
+			&b.CatalogID,
+			&b.Version,
+			&b.Error,
+			&b.UploadedBy,
+			&b.UploadedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan catalog bundle: %w", err)
+		}
+
+		bundles = append(bundles, b)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating catalog bundles: %w", err)
+	}
+
+	return bundles, nil
+}
+
+// MarkActive sets a bundle to status='active' and records its uncompressed size.
+func (r *bundleRepo) MarkActive(ctx context.Context, id string, sizeBytes int64) error {
+	query := `
+		UPDATE catalog_bundles
+		SET status = 'active', size_bytes = $1
+		WHERE id = $2
+	`
+
+	_, err := r.pool.Exec(ctx, query, sizeBytes, id)
+	if err != nil {
+		return fmt.Errorf("failed to mark bundle active: %w", err)
+	}
+
+	return nil
+}
+
+// MarkFailed sets a bundle to status='failed' and records the error message.
+func (r *bundleRepo) MarkFailed(ctx context.Context, id string, errMsg string) error {
+	query := `
+		UPDATE catalog_bundles
+		SET status = 'failed', error = $1
+		WHERE id = $2
+	`
+
+	_, err := r.pool.Exec(ctx, query,
+		sql.NullString{String: errMsg, Valid: errMsg != ""},
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mark bundle failed: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateVersionAndName updates the version and name columns for a bundle.
+func (r *bundleRepo) UpdateVersionAndName(ctx context.Context, id, version, name string) error {
+	query := `
+		UPDATE catalog_bundles
+		SET version = $1, name = $2
+		WHERE id = $3
+	`
+
+	_, err := r.pool.Exec(ctx, query, version, name, id)
+	if err != nil {
+		return fmt.Errorf("failed to update bundle version/name: %w", err)
+	}
+
+	return nil
+}
+
+// Delete removes the bundle record by internal ID.
+func (r *bundleRepo) Delete(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM catalog_bundles WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete catalog bundle: %w", err)
+	}
+
+	return nil
+}
+
+// isNoRows reports whether the error represents a "no rows" condition.
+func isNoRows(err error) bool {
+	return err == pgx.ErrNoRows
+}

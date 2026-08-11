@@ -1,16 +1,14 @@
 package templates
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
-	catalogTypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
+	catalogClient "github.com/project-ai-services/ai-services/internal/pkg/catalog/client"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
-	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
+	runtimetypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/vars"
 )
 
@@ -33,7 +31,7 @@ func NewParametersCmd() *cobra.Command {
 			cmd.SilenceUsage = true
 
 			// Check runtime - only supported for Podman
-			if vars.RuntimeFactory.GetRuntimeType() != types.RuntimeTypePodman {
+			if vars.RuntimeFactory.GetRuntimeType() != runtimetypes.RuntimeTypePodman {
 				return fmt.Errorf("templates parameters subcommand is only supported for Podman runtime")
 			}
 
@@ -41,22 +39,63 @@ func NewParametersCmd() *cobra.Command {
 				return fmt.Errorf("--template flag is required")
 			}
 
-			// Create catalog provider
-			provider, err := catalog.NewCatalogProvider()
+			client, err := catalogClient.NewApplicationClient()
 			if err != nil {
-				return fmt.Errorf("failed to create catalog provider: %w", err)
+				return fmt.Errorf("failed to connect to server: %w", err)
 			}
 
-			// Try to load as architecture first
-			arch, err := provider.LoadArchitecture(templateID)
+			// Try to load as architecture first via API.
+			arch, err := client.GetArchitectureDeployOptions(templateID)
 			if err == nil {
-				return displayArchitectureParameters(provider, templateID, arch.Services)
+				logger.Infof("Supported Parameters for '%s':", templateID)
+				displayedComponents := make(map[string]bool)
+
+				for _, svc := range arch.Services {
+					// Service-level params
+					if schema, sErr := client.GetServiceParams(svc.ID); sErr == nil && len(schema) > 0 {
+						displaySchemaParameters(schema, svc.ID)
+					}
+
+					// Component params for each service
+					for _, comp := range svc.Components {
+						for _, provider := range comp.Providers {
+							key := fmt.Sprintf("%s.%s", comp.Type, provider.ID)
+							if displayedComponents[key] {
+								continue
+							}
+
+							displayedComponents[key] = true
+
+							if schema, cErr := client.GetComponentProviderParams(comp.Type, provider.ID); cErr == nil && len(schema) > 0 {
+								displaySchemaParameters(schema, key)
+							}
+						}
+					}
+				}
+
+				return nil
 			}
 
-			// Try to load as service
-			service, err := provider.LoadService(templateID)
+			// Try as service.
+			svc, err := client.GetServiceDeployOptions(templateID)
 			if err == nil {
-				return displayServiceParameters(provider, templateID, service.Dependencies)
+				logger.Infof("Supported Parameters for '%s':", templateID)
+
+				if schema, sErr := client.GetServiceParams(templateID); sErr == nil && len(schema) > 0 {
+					displaySchemaParameters(schema, templateID)
+				}
+
+				for _, comp := range svc.Components {
+					for _, provider := range comp.Providers {
+						key := fmt.Sprintf("%s.%s", comp.Type, provider.ID)
+
+						if schema, cErr := client.GetComponentProviderParams(comp.Type, provider.ID); cErr == nil && len(schema) > 0 {
+							displaySchemaParameters(schema, key)
+						}
+					}
+				}
+
+				return nil
 			}
 
 			return fmt.Errorf("template '%s' not found as service or architecture", templateID)
@@ -68,94 +107,6 @@ func NewParametersCmd() *cobra.Command {
 
 	return cmd
 }
-
-// displayServiceParameters displays all parameters for a specific service.
-func displayServiceParameters(provider *catalog.CatalogProvider, serviceID string, dependencies []catalogTypes.DependencyReference) error {
-	logger.Infof("Supported Parameters for '%s':", serviceID)
-
-	// Display service's own parameters
-	schema, err := provider.GetServiceParams(context.Background(), serviceID)
-	if err == nil && schema != nil {
-		displaySchemaParameters(schema, serviceID)
-	}
-
-	// Display component parameters
-	return displayComponentsParameters(provider, dependencies, nil)
-}
-
-// displayArchitectureParameters displays all parameters for all services in an architecture.
-func displayArchitectureParameters(provider *catalog.CatalogProvider, archID string, services []catalogTypes.ServiceReference) error {
-	logger.Infof("Supported Parameters for '%s':", archID)
-
-	// Track displayed components to avoid duplicates
-	displayedComponents := make(map[string]bool)
-
-	// Display parameters for each service in the architecture
-	for _, svcRef := range services {
-		if err := displayServiceInArchitecture(provider, svcRef.ID, displayedComponents); err != nil {
-			continue
-		}
-	}
-
-	return nil
-}
-
-// displayServiceInArchitecture displays parameters for a single service within an architecture.
-func displayServiceInArchitecture(provider *catalog.CatalogProvider, serviceID string, displayedComponents map[string]bool) error {
-	// Load the service to get its dependencies
-	service, err := provider.LoadService(serviceID)
-	if err != nil {
-		return err
-	}
-
-	// Display service parameters
-	schema, err := provider.GetServiceParams(context.Background(), serviceID)
-	if err == nil && schema != nil {
-		displaySchemaParameters(schema, serviceID)
-	}
-
-	// Display component parameters for this service
-	return displayComponentsParameters(provider, service.Dependencies, displayedComponents)
-}
-
-// displayComponentsParameters displays parameters for components based on dependencies.
-// If displayedComponents map is provided, it will track and skip duplicates.
-func displayComponentsParameters(provider *catalog.CatalogProvider, dependencies []catalogTypes.DependencyReference, displayedComponents map[string]bool) error {
-	if len(dependencies) == 0 {
-		return nil
-	}
-
-	components, err := provider.ListComponents()
-	if err != nil {
-		return fmt.Errorf("failed to list components: %w", err)
-	}
-
-	for _, dep := range dependencies {
-		// Find all components of this type
-		for _, comp := range components {
-			if comp.ComponentType == dep.ID {
-				componentKey := fmt.Sprintf("%s.%s", comp.ComponentType, comp.ID)
-
-				// Skip if already displayed (only when tracking duplicates)
-				if displayedComponents != nil {
-					if displayedComponents[componentKey] {
-						continue
-					}
-					displayedComponents[componentKey] = true
-				}
-
-				schema, err := provider.GetComponentProviderParams(context.Background(), comp.ComponentType, comp.ID)
-				if err == nil && schema != nil {
-					displaySchemaParameters(schema, componentKey)
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// Made with Bob
 
 // displaySchemaParameters displays parameters from a schema with the given prefix.
 func displaySchemaParameters(schema map[string]any, prefix string) {
