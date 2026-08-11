@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	catalogpkg "github.com/project-ai-services/ai-services/internal/pkg/catalog"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime"
 	runtimeTypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
@@ -14,6 +15,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func newTestProvider(t *testing.T) *catalogpkg.CatalogProvider {
+	t.Helper()
+
+	provider, err := catalogpkg.NewCatalogProvider(nil)
+	require.NoError(t, err)
+
+	return provider
+}
 
 func setupTestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -29,7 +39,7 @@ func setupTestRouter() *gin.Engine {
 
 func TestListArchitectures(t *testing.T) {
 	router := setupTestRouter()
-	handler := NewCatalogHandler()
+	handler := NewCatalogHandler(newTestProvider(t))
 	router.GET("/api/v1/architectures", handler.ListArchitectures)
 
 	tests := []struct {
@@ -77,7 +87,7 @@ func TestListArchitectures(t *testing.T) {
 
 func TestGetArchitecture(t *testing.T) {
 	router := setupTestRouter()
-	handler := NewCatalogHandler()
+	handler := NewCatalogHandler(newTestProvider(t))
 	router.GET("/api/v1/architectures/:id", handler.GetArchitectureDetails)
 
 	tests := []struct {
@@ -146,7 +156,7 @@ func validateArchitectureNotFound(t *testing.T, body []byte) {
 
 func TestListServices(t *testing.T) {
 	router := setupTestRouter()
-	handler := NewCatalogHandler()
+	handler := NewCatalogHandler(newTestProvider(t))
 	router.GET("/api/v1/services", handler.ListServices)
 
 	tests := []struct {
@@ -206,7 +216,7 @@ func TestListServices(t *testing.T) {
 
 func TestGetService(t *testing.T) {
 	router := setupTestRouter()
-	handler := NewCatalogHandler()
+	handler := NewCatalogHandler(newTestProvider(t))
 	router.GET("/api/v1/services/:id", handler.GetServiceDetails)
 
 	tests := []struct {
