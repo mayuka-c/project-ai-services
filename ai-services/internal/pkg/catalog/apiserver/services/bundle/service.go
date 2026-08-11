@@ -122,7 +122,7 @@ func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (*Vali
 
 	defer os.RemoveAll(tmpDir)
 
-	if err := extractTarGz(bytes.NewReader(archiveBytes), tmpDir, meta.CatalogID); err != nil {
+	if _, err := extractAndMeasure(bytes.NewReader(archiveBytes), tmpDir, meta.CatalogID); err != nil {
 		var valErr *ValidationError
 		if errors.As(err, &valErr) {
 			return nil, valErr
@@ -237,8 +237,8 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 	return toResponse(bundle), nil
 }
 
-// ReplaceBundle handles a real (non-dry-run) PUT update — runs asynchronously so the
-// existing bundle continues serving while the replacement is extracted and validated.
+// ReplaceBundle handles a PUT update — runs asynchronously so the existing bundle
+// continues serving while the replacement is extracted and validated.
 //
 // Steps:
 //  1. Read archive bytes and peek metadata.yaml.
@@ -408,8 +408,10 @@ func peekMetadata(archiveBytes []byte) (*BundleMetadata, error) {
 			return nil, fmt.Errorf("unsafe path in archive: %q", hdr.Name)
 		}
 
-		// Infer topDir from the first entry (works with or without explicit dir entries).
-		if topDir == "" {
+		// Infer topDir from the first entry that is actually inside a directory
+		// (contains a "/"). Root-level loose files — OS artifacts or otherwise —
+		// are ignored for this purpose.
+		if topDir == "" && strings.Contains(name, "/") {
 			topDir = strings.SplitN(name, "/", 2)[0]
 		}
 
@@ -484,85 +486,8 @@ func scalarField(line, key string) (string, bool) {
 	return val, true
 }
 
-// extractTarGz extracts a .tar.gz stream to destDir.
+// extractAndMeasure extracts the archive to destDir and returns the total uncompressed size in bytes.
 // Enforces path-traversal guards and verifies the top-level directory matches catalogID.
-func extractTarGz(r io.Reader, destDir, catalogID string) error {
-	gzr, err := gzip.NewReader(r)
-	if err != nil {
-		return &ValidationError{Code: http.StatusBadRequest, Message: "invalid gzip archive"}
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-
-	topLevelVerified := false
-	var totalUncompressed int64
-
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return &ValidationError{Code: http.StatusBadRequest, Message: fmt.Sprintf("corrupt archive: %v", err)}
-		}
-
-		if filepath.IsAbs(hdr.Name) || strings.Contains(hdr.Name, "..") {
-			return &ValidationError{Code: http.StatusBadRequest, Message: fmt.Sprintf("unsafe path in archive: %q", hdr.Name)}
-		}
-
-		if !topLevelVerified && hdr.Typeflag == tar.TypeDir {
-			topDir := strings.TrimSuffix(strings.SplitN(hdr.Name, "/", 2)[0], "/")
-			if topDir != catalogID {
-				return &ValidationError{
-					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("archive top-level directory %q does not match catalog_id %q", topDir, catalogID),
-				}
-			}
-
-			topLevelVerified = true
-		}
-
-		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
-
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil {
-				return fmt.Errorf("mkdir %q: %w", target, err)
-			}
-		case tar.TypeReg:
-			totalUncompressed += hdr.Size
-			if totalUncompressed > maxUncompressedBytes {
-				return &ValidationError{
-					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("archive exceeds maximum uncompressed size of %d MB", maxUncompressedBytes/1024/1024),
-				}
-			}
-
-			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-				return fmt.Errorf("mkdir for file %q: %w", target, err)
-			}
-
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
-			if err != nil {
-				return fmt.Errorf("create file %q: %w", target, err)
-			}
-
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-
-				return fmt.Errorf("write file %q: %w", target, err)
-			}
-
-			f.Close()
-		}
-	}
-
-	return nil
-}
-
-// extractAndMeasure extracts the archive and returns the total uncompressed size in bytes.
 func extractAndMeasure(r io.Reader, destDir, catalogID string) (int64, error) {
 	gzr, err := gzip.NewReader(r)
 	if err != nil {

@@ -9,9 +9,8 @@ import (
 
 // API route constants for catalog bundle endpoints.
 const (
-	catalogBundlesRoute        = "/api/v1/catalog/bundles"
-	catalogBundleByIDRoute     = "/api/v1/catalog/bundles/%s"
-	catalogBundleDownloadRoute = "/api/v1/catalog/bundles/%s/download"
+	catalogBundlesRoute    = "/api/v1/catalog/bundles"
+	catalogBundleByIDRoute = "/api/v1/catalog/bundles/%s"
 )
 
 // ListBundles retrieves all catalog bundles registered on the server.
@@ -54,22 +53,3 @@ func (c *ApplicationClient) GetBundle(id string) (*bundlesvc.BundleResponse, err
 	return &result, nil
 }
 
-// DownloadBundle fetches the re-created .tar.gz archive for a single bundle from
-// the server and returns the raw bytes. The server walks the extracted directory
-// and streams a fresh archive — no file is stored on the server for this.
-func (c *ApplicationClient) DownloadBundle(bundleID string) ([]byte, error) {
-	resp, err := c.client.HTTPClient().R().
-		Get(fmt.Sprintf(catalogBundleDownloadRoute, bundleID))
-	if err != nil {
-		return nil, fmt.Errorf("download bundle: %w", err)
-	}
-
-	if resp.IsError() {
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode(),
-			Message:    utils.ParseErrorResponse(resp),
-		}
-	}
-
-	return resp.Body(), nil
-}
