@@ -179,7 +179,9 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 	}
 
 	// Step 4: extract to the permanent directory and measure size.
-	destDir := filepath.Join(bundleStorageRoot, meta.CatalogType, fmt.Sprintf("%s-%s", meta.CatalogID, meta.Version))
+	// Compute name first — it is both the DB Name field and the on-disk directory name.
+	name := fmt.Sprintf("%s-%s", meta.CatalogID, meta.Version)
+	destDir := bundleDirPath(meta.CatalogType, name)
 
 	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create bundle directory: %w", err)
@@ -206,7 +208,6 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 
 	// Step 6: insert DB row as active immediately.
 	bundleID := generateBundleID()
-	name := fmt.Sprintf("%s-%s", meta.CatalogID, meta.Version)
 
 	bundle := &models.Bundle{
 		ID:          bundleID,
@@ -234,7 +235,14 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 	// Step 7: reload catalog so the new service is immediately available.
 	_ = s.reloader.Reload(ctx)
 
-	return toResponse(bundle), nil
+	// Re-fetch from DB so the response reflects the final persisted state
+	// (status=active, size_bytes, uploaded_at) rather than the stale local struct.
+	persisted, err := s.repo.GetByID(ctx, bundleID)
+	if err != nil || persisted == nil {
+		return toResponse(bundle), nil
+	}
+
+	return toResponse(persisted), nil
 }
 
 // ReplaceBundle handles a PUT update — runs asynchronously so the existing bundle
@@ -298,7 +306,7 @@ func (s *bundleService) runReplaceAsync(bundleID string, existing *BundleRecord,
 	ctx := context.Background()
 
 	newName := fmt.Sprintf("%s-%s", meta.CatalogID, meta.Version)
-	destDir := filepath.Join(bundleStorageRoot, existing.CatalogType, newName)
+	destDir := bundleDirPath(existing.CatalogType, newName)
 
 	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to create bundle directory: %v", err))
@@ -343,8 +351,7 @@ func (s *bundleService) runReplaceAsync(bundleID string, existing *BundleRecord,
 
 	// Remove the old on-disk directory only after the new bundle is active.
 	if existing.Name != "" {
-		oldDir := filepath.Join(bundleStorageRoot, existing.CatalogType, existing.Name)
-		os.RemoveAll(oldDir)
+		os.RemoveAll(bundleDirPath(existing.CatalogType, existing.Name))
 	}
 
 	_ = s.reloader.Reload(context.Background())
@@ -352,7 +359,7 @@ func (s *bundleService) runReplaceAsync(bundleID string, existing *BundleRecord,
 
 // DeleteBundle removes the on-disk directory, deletes the DB record, and triggers a reload.
 func (s *bundleService) DeleteBundle(ctx context.Context, existing *BundleRecord) error {
-	bundleDir := filepath.Join(bundleStorageRoot, existing.CatalogType, existing.Name)
+	bundleDir := bundleDirPath(existing.CatalogType, existing.Name)
 
 	if err := os.RemoveAll(bundleDir); err != nil {
 		return fmt.Errorf("failed to remove bundle directory: %w", err)
@@ -370,6 +377,17 @@ func (s *bundleService) DeleteBundle(ctx context.Context, existing *BundleRecord
 }
 
 // ---- Archive helpers --------------------------------------------------------
+
+// bundleDirPath returns the on-disk directory for a bundle.
+// Layout: <bundleStorageRoot>/<catalogType>/<name>
+// e.g.   /data/catalog-bundles/service/mayuka-service-1.0.0
+//
+// catalogType is the singular DB value ("service", "component") and is used
+// verbatim as the subdirectory name.
+// name is always the DB Name field (<catalogID>-<version>).
+func bundleDirPath(catalogType, name string) string {
+	return filepath.Join(bundleStorageRoot, catalogType, name)
+}
 
 // generateBundleID creates a time-sortable unique ID for a bundle.
 func generateBundleID() string {
@@ -526,7 +544,16 @@ func extractAndMeasure(r io.Reader, destDir, catalogID string) (int64, error) {
 			topLevelVerified = true
 		}
 
-		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
+		// Strip the top-level directory from the entry path so files land
+		// directly in destDir rather than destDir/<catalogID>/...
+		// e.g. "mayuka-service/podman/values.yaml" → "podman/values.yaml"
+		strippedName := strings.SplitN(filepath.ToSlash(hdr.Name), "/", 2)[1]
+		if strippedName == "" {
+			// The entry is the top-level directory itself — nothing to write.
+			continue
+		}
+
+		target := filepath.Join(destDir, filepath.Clean(strippedName))
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -566,11 +593,11 @@ func extractAndMeasure(r io.Reader, destDir, catalogID string) (int64, error) {
 }
 
 // validateBundleStructure checks that the extracted bundle directory contains the
-// minimum required file: metadata.yaml at <catalogID>/metadata.yaml.
-func validateBundleStructure(destDir, catalogID, _ string) error {
-	metaPath := filepath.Join(destDir, catalogID, "metadata.yaml")
+// minimum required file: metadata.yaml directly at <destDir>/metadata.yaml.
+func validateBundleStructure(destDir, _, _ string) error {
+	metaPath := filepath.Join(destDir, "metadata.yaml")
 	if _, err := os.Stat(metaPath); err != nil {
-		return fmt.Errorf("missing required file metadata.yaml at %s/metadata.yaml", catalogID)
+		return fmt.Errorf("missing required file metadata.yaml in bundle root")
 	}
 
 	return nil

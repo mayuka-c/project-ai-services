@@ -1479,7 +1479,12 @@ curl -X POST https://catalog-api.<domain>/api/v1/auth/login \
 
 # Package the custom service directory.
 # The archive must contain a top-level dir whose name matches catalog_id in metadata.yaml.
-tar -czf my-bundle.tar.gz my-service/
+#
+# macOS — suppress Apple Double (._*) resource-fork entries:
+COPYFILE_DISABLE=1 tar -czf my-bundle.tar.gz my-service/
+#
+# Linux / Windows (WSL / Git Bash) — plain tar, no extra flags needed:
+# tar -czf my-bundle.tar.gz my-service/
 
 # Upload the bundle — POST is synchronous; returns 201 Created when the bundle is active.
 # catalog_id, catalog_type, and version are read from metadata.yaml inside the archive.
@@ -1491,7 +1496,7 @@ curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
 # Update the bundle — PUT is async (202). catalog_id and catalog_type are resolved from
 # the existing DB record and must match the archive metadata (immutable).
 # version is read from the replacement archive's metadata.yaml.
-tar -czf my-bundle-v2.tar.gz my-service/
+COPYFILE_DISABLE=1 tar -czf my-bundle-v2.tar.gz my-service/
 curl -X PUT https://catalog-api.<domain>/api/v1/catalog/bundles/bnd_01JW4X9K2M8VQRP3T5YZ \
   -H "Authorization: Bearer $(cat token.txt)" \
   -F "file=@my-bundle-v2.tar.gz"
