@@ -122,8 +122,11 @@ func (p *CatalogProvider) loadBundleItems(ctx context.Context, items map[string]
 			continue
 		}
 
-		catalogType := b.CatalogType // "service" or "component" — matches the embedded path prefix
-		appPath := "."               // bundle FS root contains the service/component directly
+		// parseAndStoreMetadataWithFS dispatches on the plural path prefix used in the
+		// embedded FS ("services", "components", "architectures"). The DB stores the
+		// singular form ("service", "component"), so we append "s" to convert.
+		catalogType := b.CatalogType + "s" // "service" → "services", "component" → "components"
+		appPath := "."                     // bundle FS root contains the service/component directly
 
 		if err := parseAndStoreMetadataWithFS(ctx, catalogType, metaPath, appPath, bundleFS, data, items); err != nil {
 			logger.WarningfCtx(ctx, "bundle %s: failed to parse metadata: %v", b.ID, err)
