@@ -17,15 +17,16 @@ type BundleRepository interface {
 	// GetByID returns the bundle with the given internal ID, or nil if not found.
 	GetByID(ctx context.Context, id string) (*models.Bundle, error)
 
-	// ActiveCatalogIDExists returns true if any active bundle row with the given catalog_id exists.
-	ActiveCatalogIDExists(ctx context.Context, catalogID string) (bool, error)
+	// ActiveCatalogIDExists returns true if any active bundle row with the given
+	// catalog_type + catalog_id combination exists.
+	ActiveCatalogIDExists(ctx context.Context, catalogType, catalogID string) (bool, error)
 
 	// ListAll returns all bundle records ordered by uploaded_at descending.
 	ListAll(ctx context.Context) ([]models.Bundle, error)
 
-	// Activate sets the bundle to status='active' and updates version, name, and size_bytes
-	// in a single statement. Used by both POST and PUT after successful extraction.
-	Activate(ctx context.Context, id, version, name string, sizeBytes int64) error
+	// Activate sets the bundle to status='active' and updates version, dir_name, name,
+	// and size_bytes in a single statement. Used by both POST and PUT after successful extraction.
+	Activate(ctx context.Context, id, version, dirName, displayName string, sizeBytes int64) error
 
 	// Delete removes the bundle record by internal ID.
 	Delete(ctx context.Context, id string) error
@@ -46,13 +47,14 @@ func NewBundleRepository(pool *pgxpool.Pool) BundleRepository {
 func (r *bundleRepo) Insert(ctx context.Context, bundle *models.Bundle) error {
 	query := `
 		INSERT INTO catalog_bundles
-			(name, status, catalog_type, catalog_id, version, uploaded_by)
+			(dir_name, name, status, catalog_type, catalog_id, version, uploaded_by)
 		VALUES
-			($1, 'processing', $2, $3, $4, $5)
+			($1, $2, 'processing', $3, $4, $5, $6)
 		RETURNING id, uploaded_at
 	`
 
 	err := r.pool.QueryRow(ctx, query,
+		bundle.DirName,
 		bundle.Name,
 		bundle.CatalogType,
 		bundle.CatalogID,
@@ -71,7 +73,7 @@ func (r *bundleRepo) Insert(ctx context.Context, bundle *models.Bundle) error {
 // GetByID returns the bundle record with the given ID, or nil if not found.
 func (r *bundleRepo) GetByID(ctx context.Context, id string) (*models.Bundle, error) {
 	query := `
-		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
+		SELECT id, name, dir_name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
 		FROM catalog_bundles
 		WHERE id = $1
 	`
@@ -81,6 +83,7 @@ func (r *bundleRepo) GetByID(ctx context.Context, id string) (*models.Bundle, er
 	err := r.pool.QueryRow(ctx, query, id).Scan(
 		&bundle.ID,
 		&bundle.Name,
+		&bundle.DirName,
 		&bundle.Status,
 		&bundle.SizeBytes,
 		&bundle.CatalogType,
@@ -101,46 +104,19 @@ func (r *bundleRepo) GetByID(ctx context.Context, id string) (*models.Bundle, er
 	return bundle, nil
 }
 
-// GetActiveByCatalogID returns the active bundle for the given catalog_id, or nil if not found.
-func (r *bundleRepo) GetActiveByCatalogID(ctx context.Context, catalogID string) (*models.Bundle, error) {
+// ActiveCatalogIDExists returns true if an active bundle with the given catalog_type
+// and catalog_id already exists.
+func (r *bundleRepo) ActiveCatalogIDExists(ctx context.Context, catalogType, catalogID string) (bool, error) {
 	query := `
-		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
-		FROM catalog_bundles
-		WHERE catalog_id = $1 AND status = 'active'
+		SELECT EXISTS(
+			SELECT 1 FROM catalog_bundles
+			WHERE catalog_type = $1 AND catalog_id = $2 AND status = 'active'
+		)
 	`
-
-	bundle := &models.Bundle{}
-
-	err := r.pool.QueryRow(ctx, query, catalogID).Scan(
-		&bundle.ID,
-		&bundle.Name,
-		&bundle.Status,
-		&bundle.SizeBytes,
-		&bundle.CatalogType,
-		&bundle.CatalogID,
-		&bundle.Version,
-		&bundle.Error,
-		&bundle.UploadedBy,
-		&bundle.UploadedAt,
-	)
-	if err != nil {
-		if isNoRows(err) {
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("failed to get active catalog bundle: %w", err)
-	}
-
-	return bundle, nil
-}
-
-// ActiveCatalogIDExists returns true if an active bundle with the given catalog_id already exists.
-func (r *bundleRepo) ActiveCatalogIDExists(ctx context.Context, catalogID string) (bool, error) {
-	query := `SELECT EXISTS(SELECT 1 FROM catalog_bundles WHERE catalog_id = $1 AND status = 'active')`
 
 	var exists bool
 
-	if err := r.pool.QueryRow(ctx, query, catalogID).Scan(&exists); err != nil {
+	if err := r.pool.QueryRow(ctx, query, catalogType, catalogID).Scan(&exists); err != nil {
 		return false, fmt.Errorf("failed to check catalog_id existence: %w", err)
 	}
 
@@ -150,7 +126,7 @@ func (r *bundleRepo) ActiveCatalogIDExists(ctx context.Context, catalogID string
 // ListAll returns all bundle records ordered by uploaded_at descending.
 func (r *bundleRepo) ListAll(ctx context.Context) ([]models.Bundle, error) {
 	query := `
-		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
+		SELECT id, name, dir_name, status, size_bytes, catalog_type, catalog_id, version, error, uploaded_by, uploaded_at
 		FROM catalog_bundles
 		ORDER BY uploaded_at DESC
 	`
@@ -168,6 +144,7 @@ func (r *bundleRepo) ListAll(ctx context.Context) ([]models.Bundle, error) {
 		if err := rows.Scan(
 			&b.ID,
 			&b.Name,
+			&b.DirName,
 			&b.Status,
 			&b.SizeBytes,
 			&b.CatalogType,
@@ -190,16 +167,16 @@ func (r *bundleRepo) ListAll(ctx context.Context) ([]models.Bundle, error) {
 	return bundles, nil
 }
 
-// Activate sets a bundle to status='active' and updates version, name, and size_bytes
-// in a single statement.
-func (r *bundleRepo) Activate(ctx context.Context, id, version, name string, sizeBytes int64) error {
+// Activate sets a bundle to status='active' and updates version, dir_name, name,
+// and size_bytes in a single statement.
+func (r *bundleRepo) Activate(ctx context.Context, id, version, dirName, displayName string, sizeBytes int64) error {
 	query := `
 		UPDATE catalog_bundles
-		SET status = 'active', version = $1, name = $2, size_bytes = $3
-		WHERE id = $4
+		SET status = 'active', version = $1, dir_name = $2, name = $3, size_bytes = $4
+		WHERE id = $5
 	`
 
-	_, err := r.pool.Exec(ctx, query, version, name, sizeBytes, id)
+	_, err := r.pool.Exec(ctx, query, version, dirName, displayName, sizeBytes, id)
 	if err != nil {
 		return fmt.Errorf("failed to activate bundle: %w", err)
 	}

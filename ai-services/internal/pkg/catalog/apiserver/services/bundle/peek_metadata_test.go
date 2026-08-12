@@ -55,48 +55,78 @@ type tarEntry struct {
 	content  string
 }
 
-const validMetadata = "id: my-service\ntype: service\nversion: 1.0.0\n"
+const (
+	validServiceMetadata   = "id: my-service\ntype: service\nversion: 1.0.0\n"
+	validComponentMetadata = "id: my-provider\ntype: component\ncomponent_type: llm\nversion: 1.0.0\n"
+)
 
-// TestPeekMetadata_HappyPath verifies that a well-formed archive returns the correct metadata.
-// This is the baseline: dir entry first, then metadata.yaml.
+// TestPeekMetadata_HappyPath verifies that a well-formed service archive returns the correct metadata.
+// The archive top-level directory name is irrelevant — identity comes from metadata.yaml.
 func TestPeekMetadata_HappyPath(t *testing.T) {
 	archive := makeTarGz(t, []tarEntry{
-		{"my-service/", tar.TypeDir, ""},
-		{"my-service/metadata.yaml", tar.TypeReg, validMetadata},
+		{"anything/", tar.TypeDir, ""},
+		{"anything/metadata.yaml", tar.TypeReg, validServiceMetadata},
 	})
 
 	meta, err := peekMetadata(archive)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if meta.CatalogID != "my-service" {
-		t.Errorf("CatalogID = %q, want %q", meta.CatalogID, "my-service")
+	if meta.CatalogID() != "my-service" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "my-service")
 	}
-	if meta.CatalogType != "service" {
-		t.Errorf("CatalogType = %q, want %q", meta.CatalogType, "service")
+	if meta.CatalogType() != "service" {
+		t.Errorf("CatalogType = %q, want %q", meta.CatalogType(), "service")
 	}
-	if meta.Version != "1.0.0" {
-		t.Errorf("Version = %q, want %q", meta.Version, "1.0.0")
+	if meta.Version() != "1.0.0" {
+		t.Errorf("Version = %q, want %q", meta.Version(), "1.0.0")
+	}
+}
+
+// TestPeekMetadata_ComponentHappyPath verifies that a component archive with component_type
+// returns valid metadata regardless of the top-level directory name.
+func TestPeekMetadata_ComponentHappyPath(t *testing.T) {
+	archive := makeTarGz(t, []tarEntry{
+		{"irrelevant-dir-name/", tar.TypeDir, ""},
+		{"irrelevant-dir-name/metadata.yaml", tar.TypeReg, validComponentMetadata},
+	})
+
+	meta, err := peekMetadata(archive)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Component catalog_id is composite: "<component_type>:<id>"
+	if meta.CatalogID() != "llm:my-provider" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "llm:my-provider")
+	}
+	if meta.CatalogType() != "component" {
+		t.Errorf("CatalogType = %q, want %q", meta.CatalogType(), "component")
+	}
+	if meta.Version() != "1.0.0" {
+		t.Errorf("Version = %q, want %q", meta.Version(), "1.0.0")
+	}
+	// DirName for a component is "<component_type>-<id>-<version>"
+	if meta.DirName() != "llm-my-provider-1.0.0" {
+		t.Errorf("DirName = %q, want %q", meta.DirName(), "llm-my-provider-1.0.0")
 	}
 }
 
 // TestPeekMetadata_RootLevelLooseFiles verifies that root-level loose files appearing
 // before the bundle directory (e.g. macOS ._* sidecars) do not corrupt topDir inference.
-// The fix: topDir is only inferred from entries that contain a "/".
 func TestPeekMetadata_RootLevelLooseFiles(t *testing.T) {
 	archive := makeTarGz(t, []tarEntry{
-		{"._my-service", tar.TypeReg, "junk"},          // macOS Apple Double at root
+		{"._my-service", tar.TypeReg, "junk"},               // macOS Apple Double at root
 		{"my-service/", tar.TypeDir, ""},
 		{"my-service/._metadata.yaml", tar.TypeReg, "junk"}, // sidecar for metadata.yaml
-		{"my-service/metadata.yaml", tar.TypeReg, validMetadata},
+		{"my-service/metadata.yaml", tar.TypeReg, validServiceMetadata},
 	})
 
 	meta, err := peekMetadata(archive)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if meta.CatalogID != "my-service" {
-		t.Errorf("CatalogID = %q, want %q", meta.CatalogID, "my-service")
+	if meta.CatalogID() != "my-service" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "my-service")
 	}
 }
 
@@ -117,7 +147,7 @@ func TestPeekMetadata_RootLevelLooseFilesVariants(t *testing.T) {
 
 	entries := append(rootFiles,
 		tarEntry{"my-service/", tar.TypeDir, ""},
-		tarEntry{"my-service/metadata.yaml", tar.TypeReg, validMetadata},
+		tarEntry{"my-service/metadata.yaml", tar.TypeReg, validServiceMetadata},
 	)
 
 	archive := makeTarGz(t, entries)
@@ -126,24 +156,42 @@ func TestPeekMetadata_RootLevelLooseFilesVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if meta.CatalogID != "my-service" {
-		t.Errorf("CatalogID = %q, want %q", meta.CatalogID, "my-service")
+	if meta.CatalogID() != "my-service" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "my-service")
 	}
 }
 
 // TestPeekMetadata_DotSlashPrefix verifies archives packed with leading "./" are handled.
+// The dir name ("my-service") still does not need to match the id in metadata.yaml.
 func TestPeekMetadata_DotSlashPrefix(t *testing.T) {
 	archive := makeTarGz(t, []tarEntry{
 		{"./my-service/", tar.TypeDir, ""},
-		{"./my-service/metadata.yaml", tar.TypeReg, validMetadata},
+		{"./my-service/metadata.yaml", tar.TypeReg, validServiceMetadata},
 	})
 
 	meta, err := peekMetadata(archive)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if meta.CatalogID != "my-service" {
-		t.Errorf("CatalogID = %q, want %q", meta.CatalogID, "my-service")
+	if meta.CatalogID() != "my-service" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "my-service")
+	}
+}
+
+// TestPeekMetadata_DirNameMismatch verifies that a top-level directory whose name
+// differs from the id in metadata.yaml is now ACCEPTED — the dir name is irrelevant.
+func TestPeekMetadata_DirNameMismatch(t *testing.T) {
+	archive := makeTarGz(t, []tarEntry{
+		{"completely-different-name/", tar.TypeDir, ""},
+		{"completely-different-name/metadata.yaml", tar.TypeReg, validServiceMetadata},
+	})
+
+	meta, err := peekMetadata(archive)
+	if err != nil {
+		t.Fatalf("dir name mismatch should now be accepted, got error: %v", err)
+	}
+	if meta.CatalogID() != "my-service" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "my-service")
 	}
 }
 
@@ -167,8 +215,8 @@ func TestPeekMetadata_MissingMetadataYAML(t *testing.T) {
 // TestPeekMetadata_MissingType verifies the error when type is absent from metadata.yaml.
 func TestPeekMetadata_MissingType(t *testing.T) {
 	archive := makeTarGz(t, []tarEntry{
-		{"my-service/", tar.TypeDir, ""},
-		{"my-service/metadata.yaml", tar.TypeReg, "id: my-service\nversion: 1.0.0\n"},
+		{"any-dir/", tar.TypeDir, ""},
+		{"any-dir/metadata.yaml", tar.TypeReg, "id: my-service\nversion: 1.0.0\n"},
 	})
 
 	_, err := peekMetadata(archive)
@@ -183,8 +231,8 @@ func TestPeekMetadata_MissingType(t *testing.T) {
 // TestPeekMetadata_MissingVersion verifies the error when version is absent.
 func TestPeekMetadata_MissingVersion(t *testing.T) {
 	archive := makeTarGz(t, []tarEntry{
-		{"my-service/", tar.TypeDir, ""},
-		{"my-service/metadata.yaml", tar.TypeReg, "id: my-service\ntype: service\n"},
+		{"any-dir/", tar.TypeDir, ""},
+		{"any-dir/metadata.yaml", tar.TypeReg, "id: my-service\ntype: service\n"},
 	})
 
 	_, err := peekMetadata(archive)
@@ -192,23 +240,6 @@ func TestPeekMetadata_MissingVersion(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("version is missing")) {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-// TestPeekMetadata_IDMismatch verifies that a metadata.yaml id that differs from
-// the top-level directory name is rejected.
-func TestPeekMetadata_IDMismatch(t *testing.T) {
-	archive := makeTarGz(t, []tarEntry{
-		{"my-service/", tar.TypeDir, ""},
-		{"my-service/metadata.yaml", tar.TypeReg, "id: other-service\ntype: service\nversion: 1.0.0\n"},
-	})
-
-	_, err := peekMetadata(archive)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("does not match archive top-level directory")) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -264,13 +295,13 @@ func TestPeekMetadata_RealArchive(t *testing.T) {
 		t.Fatalf("peekMetadata on real archive failed: %v", err)
 	}
 
-	if meta.CatalogID != "mayuka-service" {
-		t.Errorf("CatalogID = %q, want %q", meta.CatalogID, "mayuka-service")
+	if meta.CatalogID() != "mayuka-service" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "mayuka-service")
 	}
-	if meta.CatalogType != "service" {
-		t.Errorf("CatalogType = %q, want %q", meta.CatalogType, "service")
+	if meta.CatalogType() != "service" {
+		t.Errorf("CatalogType = %q, want %q", meta.CatalogType(), "service")
 	}
-	if meta.Version != "1.0.0" {
-		t.Errorf("Version = %q, want %q", meta.Version, "1.0.0")
+	if meta.Version() != "1.0.0" {
+		t.Errorf("Version = %q, want %q", meta.Version(), "1.0.0")
 	}
 }

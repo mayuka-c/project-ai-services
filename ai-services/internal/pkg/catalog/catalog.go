@@ -107,12 +107,11 @@ func (p *CatalogProvider) loadBundleItems(ctx context.Context, items map[string]
 			continue
 		}
 
-		// Bundle directory: <bundleStorageRoot>/<catalog_type>/<name>
+		// Bundle directory: <bundleStorageRoot>/<catalog_type>/<dir_name>
 		// e.g. /data/catalog-bundles/service/mayuka-service-1.0.0
 		// The archive is extracted with the top-level directory stripped, so
 		// metadata.yaml sits directly at <bundleDir>/metadata.yaml.
-		// b.Name is the DB Name field (<catalogID>-<version>), the canonical dir name.
-		bundleDir := filepath.Join(bundleStorageRoot, b.CatalogType, b.Name)
+		bundleDir := filepath.Join(bundleStorageRoot, b.CatalogType, b.DirName)
 		bundleFS := os.DirFS(bundleDir)
 
 		metaPath := "metadata.yaml"
@@ -123,8 +122,8 @@ func (p *CatalogProvider) loadBundleItems(ctx context.Context, items map[string]
 			continue
 		}
 
-		catalogType := b.CatalogType + "s" // "service" → "services", "component" → "components"
-		appPath := "."                      // bundle FS root contains the service/component directly
+		catalogType := b.CatalogType // "service" or "component" — matches the embedded path prefix
+		appPath := "."               // bundle FS root contains the service/component directly
 
 		if err := parseAndStoreMetadataWithFS(ctx, catalogType, metaPath, appPath, bundleFS, data, items); err != nil {
 			logger.WarningfCtx(ctx, "bundle %s: failed to parse metadata: %v", b.ID, err)
