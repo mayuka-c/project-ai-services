@@ -95,7 +95,7 @@ Currently, there is no supported mechanism to extend the catalog at runtime. Cus
 
 1. Provide a secure, authenticated API endpoint (`POST /api/v1/catalog/bundles`) through which customers can register new **service and component** assets into a live deployment without platform downtime.
 2. At apiserver startup, load customer-uploaded bundles alongside the embedded `CatalogFS`: `CatalogProvider` queries all `status='active'` bundle rows from the DB and mounts each one via `os.DirFS` rooted at the bundle's on-disk directory, presenting a unified catalog that includes both platform and customer items.
-3. Protect the integrity of built-in platform items — bundles that attempt to use a reserved `catalog_id` are rejected; the embedded catalog is immutable at runtime.
+3. Protect the integrity of built-in platform items — the embedded catalog is loaded first and is immutable at runtime. Custom bundles are loaded on top; a reserved-ID check to reject conflicting uploads (§11.1) is planned.
 4. Maintain full backward compatibility — in the absence of any uploaded bundles, behaviour is identical to the current release.
 
 ---
@@ -224,7 +224,12 @@ services:
 
 ### 4.3 Custom service assets (proposed)
 
-A user-supplied service bundle is a `.tar.gz` archive containing **one top-level directory** at its root. The top-level directory name is **irrelevant** — it is stripped during extraction and the server writes the contents into the directory determined by `meta.DirName()` (i.e. `<id>-<version>`). Identity comes entirely from the `metadata.yaml` inside the archive.
+A user-supplied service bundle is a `.tar.gz` archive. Two layouts are accepted:
+
+- **Wrapped** — one top-level directory at the archive root; `metadata.yaml` sits inside it (e.g. `my-service/metadata.yaml`). The top-level directory name is **irrelevant** and is stripped during extraction.
+- **Flat** — no top-level directory; `metadata.yaml` sits at the archive root (e.g. produced by `tar -czf bundle.tar.gz -C my-service/ .`).
+
+In both cases the server writes extracted contents into the directory determined by `meta.DirName()` (i.e. `<id>-<version>`). Identity comes entirely from the `metadata.yaml` inside the archive.
 
 ```
 my-bundle.tar.gz
@@ -238,7 +243,7 @@ my-bundle.tar.gz
             └── my-service.yaml.tmpl
 ```
 
-The `id` in `metadata.yaml` must **not** match any built-in service — if it does, validation rejects the bundle with a `422` error. `CatalogProvider` uses `os.DirFS` rooted at the extracted bundle directory (`service/<id>-<version>/`) to load the service's assets alongside the embedded catalog.
+`CatalogProvider` uses `os.DirFS` rooted at the extracted bundle directory (`service/<id>-<version>/`) to load the service's assets alongside the embedded catalog.
 
 ### 4.4 Custom component assets (proposed)
 
@@ -255,7 +260,7 @@ version:        "1.0.0"
 
 ```
 my-component-bundle.tar.gz
-└── anything/                        ← top-level dir name is irrelevant; stripped on extract
+└── anything/                        ← wrapped layout (top-level dir stripped); flat layout also accepted
     ├── metadata.yaml                 # required: id, type, component_type, version
     └── podman/
         ├── metadata.yaml            # required (version, resources, podTemplateExecutions)
@@ -269,7 +274,7 @@ Extracted on-disk as `component/llm-my-provider-1.0.0/` (i.e. `component/<compon
 
 **Component type values** recognised by the server:
 
-| `component_type` | On-disk prefix | DB `catalog_id` |
+| `component_type` | `DirName()` prefix | DB `catalog_id` |
 |---|---|---|
 | `llm` | `llm-` | `llm:<id>` |
 | `embedding` | `embedding-` | `embedding:<id>` |
@@ -295,7 +300,7 @@ The `component_type` field is required. Missing or unrecognised values are rejec
 [`CatalogProvider`](ai-services/internal/pkg/catalog/catalog.go) maintains two separate loading paths in a single `load` / `Reload` cycle:
 
 1. **Embedded items** — `loadEmbeddedItems` walks `assets.CatalogFS` (baked into the binary) and dispatches on the first path segment (`"architectures"`, `"services"`, `"components"`).
-2. **Bundle items** — `loadBundleItems` queries the DB for all `status = 'active'` rows, then for each bundle reads `<bundleDir>/<catalog_id>/metadata.yaml` via `os.DirFS` rooted at the bundle's on-disk directory.
+2. **Bundle items** — `loadBundleItems` queries the DB for all `status = 'active'` rows, then for each bundle reads `metadata.yaml` via `os.DirFS` rooted at the bundle's on-disk directory (`<bundleDir>/metadata.yaml`). Files are extracted with the archive's top-level directory stripped, so `metadata.yaml` lands directly at the bundle root.
 
 ```go
 // loadBundleItems — actual implementation in catalog.go
@@ -307,8 +312,11 @@ func (p *CatalogProvider) loadBundleItems(ctx context.Context, items map[string]
         // /data/catalog-bundles/<catalog_type>/<dir_name>/
         bundleDir := filepath.Join(bundleStorageRoot, b.CatalogType, b.DirName)
         bundleFS  := os.DirFS(bundleDir)
-        // reads metadata.yaml from the bundle FS root
-        parseAndStoreMetadataWithFS(ctx, b.CatalogType+"s", metaPath, b.CatalogID, bundleFS, data, items)
+        metaPath  := "metadata.yaml"
+        data, _   := fs.ReadFile(bundleFS, metaPath)
+        // CatalogType "service"/"component" → "services"/"components" to match the embedded FS dispatch keys
+        catalogType := b.CatalogType + "s"
+        parseAndStoreMetadataWithFS(ctx, catalogType, metaPath, ".", bundleFS, data, items)
     }
     return nil
 }
@@ -665,13 +673,12 @@ flowchart TD
     RESP["202 Accepted immediately<br/>same bundle_id, status: active (current)<br/>Location: /api/v1/catalog/bundles/:bundle_id"]
 
     subgraph ASYNC["Goroutine — async after 202"]
-        EXTRACT["Extract to meta.DirName()/ inside bundle volume<br/>(top-level dir stripped regardless of its name)"]
-        PATHGUARD["Path-traversal guard"]
+        EXTRACT["extractAndMeasure: extract to meta.DirName()/ inside bundle volume<br/>• top-level dir stripped (wrapped or flat archive)<br/>• path-traversal guard + 200 MB size guard"]
         VALIDATE["validateBundleStructure"]
 
         subgraph ACTIVATE["Activate — success path"]
             direction LR
-            DBUPDATE["UPDATE existing row in-place<br/>status=active, version, dir_name, size_bytes<br/>single UPDATE — no unique index conflict"]
+            DBUPDATE["UPDATE existing row in-place<br/>status=active, version, dir_name, name, size_bytes<br/>single UPDATE — no unique index conflict"]
             RMOLDDIR["Delete old directory<br/>(only if dir_name changed)"]
             RELOAD["CatalogProvider.Reload()"]
             DBUPDATE --> RMOLDDIR --> RELOAD
@@ -679,7 +686,7 @@ flowchart TD
 
         FAIL["Delete new meta.DirName()/ directory<br/>DB row left unchanged — existing bundle still active"]
 
-        EXTRACT --> PATHGUARD --> VALIDATE
+        EXTRACT --> VALIDATE
         VALIDATE -->|"valid"| ACTIVATE
         VALIDATE -->|"invalid"| FAIL
     end
@@ -1106,7 +1113,7 @@ func (m *ComponentMetadata) DisplayName() string { return m.displayName }
 func (m *ComponentMetadata) ComponentType() string { return m.componentType }
 ```
 
-`parseMetadataYAML` reads `id`, `type`, `name`, `version` (and `component_type` for components) as scalar fields. For `component`, `component_type` is required and rejected with `422` if absent or unrecognised. The rest of the pipeline — `ValidateBundle`, `ProcessBundle`, `ReplaceBundle` — calls only the `BundleMetadata` interface methods and never type-asserts. `extractAndMeasure` takes no `catalogID` parameter — it strips the archive top-level directory blindly and writes into the caller-supplied `destDir` (`meta.DirName()`).
+`parseMetadataYAML` reads `id`, `type`, `name`, `version` (and `component_type` for components) as scalar fields. For `component`, `component_type` is required and rejected with `422` if absent or unrecognised. `ProcessBundle` and `ReplaceBundle` call only the `BundleMetadata` interface methods. `ValidateBundle` performs a single type-assertion `meta.(*ComponentMetadata)` to populate the `ComponentType` field on `ComponentValidationResult` — this is the only place where a type switch on the concrete metadata type occurs. `extractAndMeasure` takes no `catalogID` parameter — it strips the archive top-level directory blindly and writes into the caller-supplied `destDir` (`meta.DirName()`).
 
 ```go
 // ValidationResult is the interface returned by ValidateBundle and serialised as the
@@ -2122,20 +2129,22 @@ curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
 # 201 Created — catalog_id: "embedding:my-provider", dir_name: "embedding-my-provider-1.0.0"
 ```
 
-### 10.3 Attempt to use a reserved built-in ID (rejected)
+### 10.3 Uploading with a built-in ID (caution)
 
-Uploading a bundle whose `catalog_id` (declared in `metadata.yaml`) matches a built-in service is rejected synchronously during POST — the extracted directory is cleaned up and a `422` is returned immediately:
+Uploading a bundle whose `catalog_id` matches a built-in service is not currently rejected at the API level. When `CatalogProvider.Reload()` runs after upload, the bundle entry will overwrite the embedded entry in the items map (last write wins). Custom bundles should deliberately avoid `catalog_id` values that match built-in items.
 
 ```bash
-# Attempting to upload a bundle with catalog_id "chat" (a built-in service)
-tar -czf chat-bundle.tar.gz chat/
-
-curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles \
-  -H "Authorization: Bearer $(cat token.txt)" \
-  -F "file=@chat-bundle.tar.gz"
-# 422 Unprocessable Entity
-# {"error":"catalog_id \"chat\" is reserved by a built-in service and cannot be overridden"}
+# Check which IDs are currently loaded in the catalog before uploading
+curl -s https://catalog-api.<domain>/api/v1/services \
+  -H "Authorization: Bearer $(cat token.txt)" | jq '.[].id'
+# "chat"
+# "digitize"
+# "similarity"
+# "summarize"
+# "my-service"   ← custom, safe to re-upload
 ```
+
+> A reserved-ID check (returning `422 Conflict` before extraction) is listed as a future enhancement.
 
 ### 10.4 Create an application from the custom service
 
@@ -2227,9 +2236,10 @@ curl -X POST https://catalog-api.<domain>/api/v1/catalog/bundles/validate \
 
 ## 11. Future Enhancements
 
-1. **Scaffolding generator** — `ai-services catalog scaffold --service my-service --runtime podman` emits a minimal but correct directory skeleton ready to be tar'd and uploaded.
-2. **Remote catalog repositories** — fetch a bundle from an OCI registry or HTTPS URL; the server pulls and applies it directly, removing the need for a client upload.
-3. **Schema enforcement on custom `metadata.yaml`** — reuse the existing [`validators.ApplicationValidator`](ai-services/internal/pkg/catalog/validators/validation.go) to reject malformed custom metadata at validation time.
-4. **Version compatibility checks** — validate that a custom service's `version` satisfies any `>=x.y.z` constraint declared by the built-in architecture that references it.
-5. **Role-based upload access** — introduce a `catalog-editor` JWT role that can upload bundles but cannot perform `DELETE /applications` or other destructive operations.
-6. **New `BundleMetadata` implementations** — adding support for a new catalog type (e.g. `architecture`) requires only: (a) a new struct implementing the `BundleMetadata` interface, and (b) a new `case` in `parseMetadataYAML`. The entire processing pipeline (`ProcessBundle`, `ReplaceBundle`, `ValidateBundle`) is unchanged.
+1. **Reserved-ID guard** — reject a `POST` (with `422`) whose `catalog_id` conflicts with a built-in embedded item. Currently the bundle is accepted and overwrites the embedded entry in the items map on reload. The check should run after `peekMetadata` and before extraction.
+2. **Scaffolding generator** — `ai-services catalog scaffold --service my-service --runtime podman` emits a minimal but correct directory skeleton ready to be tar'd and uploaded.
+3. **Remote catalog repositories** — fetch a bundle from an OCI registry or HTTPS URL; the server pulls and applies it directly, removing the need for a client upload.
+4. **Schema enforcement on custom `metadata.yaml`** — reuse the existing [`validators.ApplicationValidator`](ai-services/internal/pkg/catalog/validators/validation.go) to reject malformed custom metadata at validation time.
+5. **Version compatibility checks** — validate that a custom service's `version` satisfies any `>=x.y.z` constraint declared by the built-in architecture that references it.
+6. **Role-based upload access** — introduce a `catalog-editor` JWT role that can upload bundles but cannot perform `DELETE /applications` or other destructive operations.
+7. **New `BundleMetadata` implementations** — adding support for a new catalog type (e.g. `architecture`) requires only: (a) a new struct implementing the `BundleMetadata` interface, and (b) a new `case` in `parseMetadataYAML`. The entire processing pipeline (`ProcessBundle`, `ReplaceBundle`, `ValidateBundle`) is unchanged.
