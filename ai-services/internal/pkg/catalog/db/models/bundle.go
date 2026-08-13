@@ -41,4 +41,6 @@ type Bundle struct {
 	CreatedBy string `json:"created_by"`
 	// CreatedAt is the timestamp when the bundle was first recorded.
 	CreatedAt time.Time `json:"created_at"`
+	// UpdatedAt is the timestamp of the last status change or replacement.
+	UpdatedAt time.Time `json:"updated_at"`
 }

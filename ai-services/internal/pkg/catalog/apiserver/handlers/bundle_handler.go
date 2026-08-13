@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/middleware"
 	bundlesvc "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/bundle"
 )
@@ -103,6 +104,14 @@ func (h *BundleHandler) UpdateBundle(c *gin.Context) {
 
 	bundleID := c.Param("bundle_id")
 
+	if _, err := uuid.Parse(bundleID); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: fmt.Sprintf("bundle_id %q is not a valid UUID; use the internal bundle ID from bundle list or bundle create", bundleID),
+		})
+
+		return
+	}
+
 	existing, err := h.bundleService.GetByBundleID(c.Request.Context(), bundleID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to look up bundle"})
@@ -168,6 +177,14 @@ func (h *BundleHandler) UpdateBundle(c *gin.Context) {
 func (h *BundleHandler) DeleteBundle(c *gin.Context) {
 	bundleID := c.Param("bundle_id")
 
+	if _, err := uuid.Parse(bundleID); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: fmt.Sprintf("bundle_id %q is not a valid UUID; use the internal bundle ID from bundle list or bundle create", bundleID),
+		})
+
+		return
+	}
+
 	existing, err := h.bundleService.GetByBundleID(c.Request.Context(), bundleID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to look up bundle"})
@@ -206,6 +223,14 @@ func (h *BundleHandler) DeleteBundle(c *gin.Context) {
 //	@Router      /catalog/bundles/{bundle_id} [get]
 func (h *BundleHandler) GetBundle(c *gin.Context) {
 	bundleID := c.Param("bundle_id")
+
+	if _, err := uuid.Parse(bundleID); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: fmt.Sprintf("bundle_id %q is not a valid UUID; use the internal bundle ID from bundle list or bundle create", bundleID),
+		})
+
+		return
+	}
 
 	resp, err := h.bundleService.GetBundleByID(c.Request.Context(), bundleID)
 	if err != nil {

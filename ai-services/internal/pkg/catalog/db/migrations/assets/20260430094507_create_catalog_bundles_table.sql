@@ -34,8 +34,24 @@ CREATE TABLE catalog_bundles (
 
     error            TEXT,
     created_by       VARCHAR(100),
-    created_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+    created_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    -- updated_at is maintained automatically by the set_updated_at trigger below.
+    -- It reflects the last time the row was modified by any UPDATE statement.
+    updated_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
+
+-- Trigger function: stamp updated_at on every UPDATE.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER catalog_bundles_set_updated_at
+    BEFORE UPDATE ON catalog_bundles
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- Enforce at most one active bundle per (catalog_type, catalog_id) pair.
 -- Using the composite key makes the constraint explicit and future-proof:
@@ -50,7 +66,9 @@ CREATE UNIQUE INDEX uq_catalog_bundles_active
 
 -- +goose Down
 -- +goose StatementBegin
-DROP INDEX  IF EXISTS uq_catalog_bundles_active;
-DROP TABLE  IF EXISTS catalog_bundles;
-DROP TYPE   IF EXISTS bundle_status;
+DROP TRIGGER  IF EXISTS catalog_bundles_set_updated_at ON catalog_bundles;
+DROP FUNCTION IF EXISTS set_updated_at();
+DROP INDEX    IF EXISTS uq_catalog_bundles_active;
+DROP TABLE    IF EXISTS catalog_bundles;
+DROP TYPE     IF EXISTS bundle_status;
 -- +goose StatementEnd

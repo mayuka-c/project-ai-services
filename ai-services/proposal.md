@@ -546,6 +546,7 @@ The on-disk directory is derived at runtime as `<catalog_id>-<version>` — it i
       "name":         "My Custom Service",
       "status":       "active",
       "created_at":  "2026-05-12T09:14:02Z",
+      "updated_at":  "2026-05-14T10:00:00Z",
       "size_bytes":   286720,
       "catalog_type": "service",
       "catalog_id":   "my-service",
@@ -557,6 +558,7 @@ The on-disk directory is derived at runtime as `<catalog_id>-<version>` — it i
       "name":         "My Custom LLM Provider",
       "status":       "active",
       "created_at":  "2026-05-13T11:30:00Z",
+      "updated_at":  "2026-05-13T11:30:00Z",
       "size_bytes":   196608,
       "catalog_type": "component",
       "catalog_id":   "llm--my-provider",
@@ -719,6 +721,8 @@ The on-disk directory path is **derived at runtime** from `catalog_id` and `vers
 
 The `status` column tracks lifecycle using only `processing`, `active`, `failed`, and `deleting`: **POST** inserts a new row as `processing`, reloads the catalog, then activates it with a single `Activate` UPDATE. **PUT** marks the existing row `processing`, extracts the replacement, reloads the catalog, re-activates the row in-place, and removes the old directory only at the end. **DELETE** marks the row `deleting`, removes the directory, reloads the catalog, and then deletes the row. If any post-transition step fails during POST, PUT, or DELETE, the row is marked `failed` and the error message is stored. **Only one `active` row per `(catalog_type, catalog_id)` is permitted** — enforced by a partial composite unique index.
 
+`updated_at` is maintained automatically by the `set_updated_at` trigger — it fires `BEFORE UPDATE` on every row change, so the application never writes it explicitly. This means it is always accurate regardless of which code path mutates the row, and new mutations added in future require no extra consideration. On a freshly created bundle that has never been replaced, `updated_at` equals `created_at`.
+
 ```sql
 -- +goose Up
 -- +goose StatementBegin
@@ -756,7 +760,8 @@ CREATE TABLE catalog_bundles (
 
     error            TEXT,
     created_by       VARCHAR(100),
-    created_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+    created_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
 
 -- Enforce at most one active bundle per (catalog_type, catalog_id) pair.

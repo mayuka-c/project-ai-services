@@ -997,6 +997,7 @@ func toRecord(b *models.Bundle) *BundleRecord {
 		Version:     b.Version,
 		CreatedBy:   b.CreatedBy,
 		CreatedAt:   b.CreatedAt,
+		UpdatedAt:   b.UpdatedAt,
 	}
 
 	if b.SizeBytes.Valid {
@@ -1014,6 +1015,7 @@ func toResponse(b *models.Bundle) *BundleResponse {
 		Name:        b.Name.String,
 		Status:      string(b.Status),
 		CreatedAt:   b.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   b.UpdatedAt.UTC().Format(time.RFC3339),
 		CatalogType: b.CatalogType,
 		CatalogID:   b.CatalogID,
 		Version:     b.Version,

@@ -35,6 +35,7 @@ type BundleRepository interface {
 
 	// Activate sets the bundle to status='active' and updates version, name,
 	// and size_bytes in a single statement. Used by both POST and PUT after successful extraction.
+	// updated_at is maintained automatically by the set_updated_at DB trigger on every UPDATE.
 	Activate(ctx context.Context, id, version, displayName string, sizeBytes int64) error
 
 	// Delete removes the bundle record by internal ID.
@@ -59,7 +60,7 @@ func (r *bundleRepo) Insert(ctx context.Context, bundle *models.Bundle) error {
 			(name, status, catalog_type, catalog_id, version, created_by)
 		VALUES
 			($1, 'processing', $2, $3, $4, $5)
-		RETURNING id, created_at
+		RETURNING id, created_at, updated_at
 	`
 
 	err := r.pool.QueryRow(ctx, query,
@@ -68,7 +69,7 @@ func (r *bundleRepo) Insert(ctx context.Context, bundle *models.Bundle) error {
 		bundle.CatalogID,
 		bundle.Version,
 		bundle.CreatedBy,
-	).Scan(&bundle.ID, &bundle.CreatedAt)
+	).Scan(&bundle.ID, &bundle.CreatedAt, &bundle.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to insert catalog bundle: %w", err)
 	}
@@ -81,7 +82,7 @@ func (r *bundleRepo) Insert(ctx context.Context, bundle *models.Bundle) error {
 // GetByID returns the bundle record with the given ID, or nil if not found.
 func (r *bundleRepo) GetByID(ctx context.Context, id string) (*models.Bundle, error) {
 	query := `
-		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, created_by, created_at
+		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, created_by, created_at, updated_at
 		FROM catalog_bundles
 		WHERE id = $1
 	`
@@ -99,6 +100,7 @@ func (r *bundleRepo) GetByID(ctx context.Context, id string) (*models.Bundle, er
 		&bundle.Error,
 		&bundle.CreatedBy,
 		&bundle.CreatedAt,
+		&bundle.UpdatedAt,
 	)
 	if err != nil {
 		if isNoRows(err) {
@@ -133,7 +135,7 @@ func (r *bundleRepo) ActiveCatalogIDExists(ctx context.Context, catalogType, cat
 // ListAll returns all bundle records ordered by created_at descending.
 func (r *bundleRepo) ListAll(ctx context.Context) ([]models.Bundle, error) {
 	query := `
-		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, created_by, created_at
+		SELECT id, name, status, size_bytes, catalog_type, catalog_id, version, error, created_by, created_at, updated_at
 		FROM catalog_bundles
 		ORDER BY created_at DESC
 	`
@@ -159,6 +161,7 @@ func (r *bundleRepo) ListAll(ctx context.Context) ([]models.Bundle, error) {
 			&b.Error,
 			&b.CreatedBy,
 			&b.CreatedAt,
+			&b.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan catalog bundle: %w", err)
 		}
@@ -203,8 +206,9 @@ func (r *bundleRepo) MarkFailed(ctx context.Context, id, errorMessage string) er
 	return nil
 }
 
-// Activate sets a bundle to status='active' and updates version, name,
-// size_bytes, and clears any prior error in a single statement.
+// Activate sets a bundle to status='active' and updates version, name, size_bytes, and clears
+// any prior error in a single statement. updated_at is maintained automatically by the
+// set_updated_at DB trigger — the application never writes it explicitly.
 func (r *bundleRepo) Activate(ctx context.Context, id, version, displayName string, sizeBytes int64) error {
 	query := `
 		UPDATE catalog_bundles

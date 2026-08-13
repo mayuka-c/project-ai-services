@@ -47,6 +47,7 @@ type BundleRecord struct {
 	Version     string
 	CreatedBy   string
 	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +207,7 @@ type BundleResponse struct {
 	Name        string  `json:"name,omitempty"`
 	Status      string  `json:"status"`
 	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
 	SizeBytes   *int64  `json:"size_bytes"`
 	CatalogType string  `json:"catalog_type"`
 	CatalogID   string  `json:"catalog_id"`
