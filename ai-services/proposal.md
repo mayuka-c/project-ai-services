@@ -488,11 +488,11 @@ curl -X PUT https://catalog-api.<domain>/api/v1/catalog/bundles/bnd_01JW4X9K2M8V
 | Status | Meaning |
 |---|---|
 | `200 OK` | Archive validated, existing bundle marked `processing`, replacement extracted into a staging directory, current final directory replaced by renaming the staging directory into place, bundle marked `active`, catalog reloaded, and old bundle directory removed at the end when different — all synchronously. The response body contains the updated bundle record with `status: active`. |
-| `400 Bad Request` | Missing `file` field; archive top-level directory does not match the resolved `id`; wrong content-type; or archive exceeds size limit. |
+| `400 Bad Request` | Missing `file` field; wrong content-type; or archive exceeds size limit. |
 | `401 Unauthorized` | Missing or invalid JWT. |
 | `403 Forbidden` | Token does not carry admin role. |
 | `404 Not Found` | No bundle with the given `bundle_id` exists. Use `POST` to create a new bundle first. |
-| `422 Unprocessable Entity` | Validation of the archive's `metadata.yaml` failed; or `id`, `type`, or `component_type` (for components) differs from the existing record. The replacement is rejected before any status transition. |
+| `422 Unprocessable Entity` | Validation of the archive's `metadata.yaml` failed; or `catalog_id` or `catalog_type` in the archive differs from the existing DB record — these fields are immutable. For component bundles `catalog_id` is the composite `<component_type>--<id>`, so changing either the bare `id` or `component_type` is also rejected. The replacement is rejected before any status transition. |
 
 The `200` response returns the updated bundle record with `status: active`, `version`, `name`, and `size_bytes` populated from the newly activated bundle. The existing row is first moved to `processing`, then the replacement is extracted into a staging directory (`<catalog_id>-<version>-new`), the current final directory is removed, and the staging directory is renamed into place before the row is updated in-place to `active`. The old on-disk directory is deleted only at the very end when it differs from the new final path. This keeps the replace flow simple and avoids stale files even when replacing a bundle with the same `catalog_id` and `version`. If extraction, rename, activation, reload, or final cleanup fails after the status transition, the row is marked `failed` and the error message is stored in the `error` column.
 
@@ -633,6 +633,7 @@ Extracted on-disk as `component/llm--my-provider-1.0.0/` — directory is `<cata
 - All `metadata.yaml` files must pass validation for the declared `type` before the bundle is marked `active`.
 - Validation is performed directly from the archive and covers archive structure, root and runtime metadata parsing, `values.yaml` and schema/metadata consistency checks, template parsing, service label checks, annotation checks, `steps.md` inspection, and line-by-line scanning of relevant files.
 - Lifecycle statuses are limited to `processing`, `active`, `failed`, and `deleting`.
+- **`catalog_id` and `catalog_type` are immutable on `PUT`.** The server validates the archive's `catalog_id` and `catalog_type` against the existing DB record; mismatches are rejected with `422` before any extraction is attempted. For component bundles, `catalog_id` is the composite `<component_type>--<id>` — so neither the bare `id` nor `component_type` can be changed via `PUT`.
 
 **Rules (component bundles only):**
 - `component_type` is required. Missing or unrecognised values are rejected with `422`.
@@ -705,7 +706,7 @@ flowchart TD
 - **On-disk layout** — directory name is always `<catalog_id>-<version>` (derived at runtime, never stored in DB):
   - Services: `/data/catalog-bundles/service/my-service-1.0.0/`
   - Components: `/data/catalog-bundles/component/llm--my-provider-1.0.0/`  (`catalog_id` uses `--` as separator)
-- **PUT** immutability check: `meta.CatalogID()` and `meta.CatalogType()` from the archive must match the existing DB record. `version` may differ. Mismatch → `422`, no extraction attempted.
+- **PUT** immutability check: `meta.CatalogID()` and `meta.CatalogType()` from the archive must match the existing DB record. For service bundles `catalog_id` equals the bare `id`; for component bundles `catalog_id` is the composite `<component_type>--<id>`, so changing either the bare `id` or `component_type` produces a different `catalog_id` and is rejected with `422`. `version` is the only identity field that may differ. Mismatch on any immutable field → `422`, no extraction attempted.
 - `CatalogProvider.Reload()` re-queries the DB and rebuilds the in-memory catalog under `sync.RWMutex`.
 - Bundle files are stored in the **dedicated `catalog-bundles` volume** — isolated from `$BASE_DIR`.
 - The validate-only API uses the same archive-based validation approach as `POST` and `PUT`, but stops before any extraction to the permanent bundle directory, DB write, or catalog reload.
