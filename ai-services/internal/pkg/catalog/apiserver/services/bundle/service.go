@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	texttemplate "text/template"
 	"time"
+
+	validators "github.com/project-ai-services/ai-services/internal/pkg/catalog/validators"
+	clitemplates "github.com/project-ai-services/ai-services/internal/pkg/cli/templates"
+	"github.com/project-ai-services/ai-services/internal/pkg/utils"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/db/models"
 	dbrepo "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/repository"
@@ -659,17 +666,54 @@ func extractAndMeasure(r io.Reader, destDir string) (int64, error) {
 	return totalBytes, nil
 }
 
-// validateBundleStructureFromArchive validates the bundle structure directly from the archive
-// without extracting it to disk. It checks that metadata.yaml exists in the archive root.
+type archiveEntry struct {
+	Path    string
+	IsDir   bool
+	Content []byte
+}
+
+// validateBundleStructureFromArchive validates required bundle files directly from the archive
+// without extracting it to disk.
 func validateBundleStructureFromArchive(archiveBytes []byte) error {
+	entries, err := readArchiveEntries(archiveBytes)
+	if err != nil {
+		return err
+	}
+
+	rootMetadata, ok := entries["metadata.yaml"]
+	if !ok || rootMetadata.IsDir {
+		return fmt.Errorf("missing required file metadata.yaml in bundle root")
+	}
+
+	meta, err := parseMetadataYAML(rootMetadata.Content, "")
+	if err != nil {
+		return err
+	}
+
+	runtimeDirs := findSupportedRuntimeDirs(entries)
+	if len(runtimeDirs) == 0 {
+		return fmt.Errorf("bundle must include at least one supported runtime directory: podman or openshift")
+	}
+
+	for _, runtimeDir := range runtimeDirs {
+		if err := validateRuntimeDir(entries, runtimeDir, meta.CatalogType()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func readArchiveEntries(archiveBytes []byte) (map[string]archiveEntry, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(archiveBytes))
 	if err != nil {
-		return fmt.Errorf("invalid gzip: %w", err)
+		return nil, fmt.Errorf("invalid gzip: %w", err)
 	}
 	defer gr.Close()
 
 	tr := tar.NewReader(gr)
-	metadataFound := false
+	entries := make(map[string]archiveEntry)
+	topDir := ""
 
 	for {
 		hdr, err := tr.Next()
@@ -677,27 +721,241 @@ func validateBundleStructureFromArchive(archiveBytes []byte) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("tar read error: %w", err)
+			return nil, fmt.Errorf("tar read error: %w", err)
 		}
 
-		// Look for metadata.yaml at the bundle root (after top-level directory is stripped).
-		// The path will be like "topdir/metadata.yaml" in wrapped archives.
-		parts := strings.Split(hdr.Name, "/")
-		if len(parts) >= 2 && parts[1] == "metadata.yaml" && hdr.Typeflag == tar.TypeReg {
-			metadataFound = true
-			break
+		name := strings.TrimPrefix(filepath.ToSlash(hdr.Name), "./")
+		if filepath.IsAbs(name) || strings.Contains(name, "..") {
+			return nil, fmt.Errorf("unsafe path in archive: %q", hdr.Name)
 		}
-		// Also check for flat archives where metadata.yaml is at root.
-		if len(parts) == 1 && parts[0] == "metadata.yaml" && hdr.Typeflag == tar.TypeReg {
-			metadataFound = true
-			break
+
+		if topDir == "" && strings.Contains(name, "/") {
+			topDir = strings.SplitN(name, "/", 2)[0]
+		}
+
+		strippedName := name
+		if topDir != "" {
+			parts := strings.SplitN(name, "/", 2)
+			if len(parts) < 2 || parts[1] == "" {
+				continue
+			}
+			strippedName = parts[1]
+		}
+		if strippedName == "" {
+			continue
+		}
+
+		entry := archiveEntry{Path: strippedName, IsDir: hdr.Typeflag == tar.TypeDir}
+		if hdr.Typeflag == tar.TypeReg {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read %s: %w", strippedName, err)
+			}
+			entry.Content = data
+		}
+		entries[strippedName] = entry
+	}
+
+	return entries, nil
+}
+
+func requireArchiveFile(entries map[string]archiveEntry, path string) error {
+	entry, ok := entries[path]
+	if !ok || entry.IsDir {
+		return fmt.Errorf("missing required file %s", path)
+	}
+	return nil
+}
+
+func findSupportedRuntimeDirs(entries map[string]archiveEntry) []string {
+	seen := map[string]bool{}
+	for path := range entries {
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		switch parts[0] {
+		case "podman", "openshift":
+			seen[parts[0]] = true
 		}
 	}
 
-	if !metadataFound {
-		return fmt.Errorf("missing required file metadata.yaml in bundle root")
+	runtimeDirs := make([]string, 0, 2)
+	if seen["podman"] {
+		runtimeDirs = append(runtimeDirs, "podman")
+	}
+	if seen["openshift"] {
+		runtimeDirs = append(runtimeDirs, "openshift")
 	}
 
+	return runtimeDirs
+}
+
+func validateRuntimeDir(entries map[string]archiveEntry, runtimeDir, catalogType string) error {
+	if err := requireArchiveFile(entries, filepath.ToSlash(filepath.Join(runtimeDir, "metadata.yaml"))); err != nil {
+		return err
+	}
+	if err := requireArchiveFile(entries, filepath.ToSlash(filepath.Join(runtimeDir, "values.yaml"))); err != nil {
+		return err
+	}
+	if err := requireArchiveFile(entries, filepath.ToSlash(filepath.Join(runtimeDir, "values.schema.json"))); err != nil {
+		return err
+	}
+
+	if err := validateRuntimeMetadata(entries[runtimeDir+"/metadata.yaml"].Content); err != nil {
+		return err
+	}
+	if err := validateValuesYAML(entries[runtimeDir+"/values.yaml"].Content); err != nil {
+		return err
+	}
+	if err := validateValuesSchema(entries[runtimeDir+"/values.schema.json"].Content); err != nil {
+		return err
+	}
+
+	switch runtimeDir {
+	case "podman":
+		if err := validatePodmanTemplates(entries, runtimeDir, catalogType); err != nil {
+			return err
+		}
+	case "openshift":
+		if err := validateOpenShiftTemplates(entries, runtimeDir); err != nil {
+			return err
+		}
+	}
+
+	if err := validateStepsFiles(entries, runtimeDir); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateRuntimeMetadata(data []byte) error {
+	var metadata clitemplates.AppMetadata
+	if err := yaml.Unmarshal(data, &metadata); err != nil {
+		return fmt.Errorf("failed to parse runtime metadata.yaml: %w", err)
+	}
+	return nil
+}
+
+func validateValuesYAML(data []byte) error {
+	processedData, err := utils.ProcessGenerateAnnotationsFromYAML(data)
+	if err != nil {
+		return fmt.Errorf("failed to process generate annotations in values.yaml: %w", err)
+	}
+	values := make(map[string]any)
+	if err := yaml.Unmarshal(processedData, &values); err != nil {
+		return fmt.Errorf("failed to parse values.yaml: %w", err)
+	}
+	return nil
+}
+
+func validateValuesSchema(data []byte) error {
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return fmt.Errorf("failed to parse values.schema.json: %w", err)
+	}
+	if err := validators.ValidateParams(map[string]any{}, schema, "bundle values.schema.json"); err != nil {
+		return fmt.Errorf("invalid values.schema.json: %w", err)
+	}
+	return nil
+}
+
+func validatePodmanTemplates(entries map[string]archiveEntry, runtimeDir, catalogType string) error {
+	templatePrefix := runtimeDir + "/templates/"
+	found := false
+	for path, entry := range entries {
+		if entry.IsDir || !strings.HasPrefix(path, templatePrefix) {
+			continue
+		}
+		if !strings.HasSuffix(path, ".tmpl") {
+			return fmt.Errorf("template file %s must use .tmpl extension", path)
+		}
+		if _, err := texttemplate.New(filepath.Base(path)).Parse(string(entry.Content)); err != nil {
+			return fmt.Errorf("failed to parse template %s: %w", path, err)
+		}
+		if catalogType == "service" {
+			content := string(entry.Content)
+			if !strings.Contains(content, "ai-services.io/template") {
+				return fmt.Errorf("template %s must define metadata.labels.ai-services.io/template", path)
+			}
+			if !strings.Contains(content, "ai-services.io/routes") {
+				return fmt.Errorf("template %s must define metadata.annotations.ai-services.io/routes", path)
+			}
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("missing required template files under %s/templates", runtimeDir)
+	}
+	return nil
+}
+
+func validateOpenShiftTemplates(entries map[string]archiveEntry, runtimeDir string) error {
+	if err := requireArchiveFile(entries, filepath.ToSlash(filepath.Join(runtimeDir, "Chart.yaml"))); err != nil {
+		return err
+	}
+
+	templatePrefix := runtimeDir + "/templates/"
+	found := false
+	for path, entry := range entries {
+		if entry.IsDir || !strings.HasPrefix(path, templatePrefix) {
+			continue
+		}
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
+			return fmt.Errorf("OpenShift template file %s must use .yaml or .yml extension", path)
+		}
+		var manifest map[string]any
+		if err := yaml.Unmarshal(entry.Content, &manifest); err != nil {
+			return fmt.Errorf("failed to parse OpenShift template %s as YAML: %w", path, err)
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("missing required template files under %s/templates", runtimeDir)
+	}
+	return nil
+}
+
+func validateStepsFiles(entries map[string]archiveEntry, runtimeDir string) error {
+	stepsPrefix := runtimeDir + "/steps/"
+	foundMarkdown := false
+	foundVars := false
+	for path, entry := range entries {
+		if entry.IsDir || !strings.HasPrefix(path, stepsPrefix) {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(path, ".md"):
+			if _, err := texttemplate.New(filepath.Base(path)).Parse(string(entry.Content)); err != nil {
+				return fmt.Errorf("failed to parse step file %s: %w", path, err)
+			}
+			lines := strings.Split(string(entry.Content), "\n")
+			nonEmpty := false
+			for _, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					nonEmpty = true
+					break
+				}
+			}
+			if !nonEmpty {
+				return fmt.Errorf("step file %s must not be empty", path)
+			}
+			foundMarkdown = true
+		case strings.HasSuffix(path, "vars_file.yaml"):
+			var vars clitemplates.Vars
+			if err := yaml.Unmarshal(entry.Content, &vars); err != nil {
+				return fmt.Errorf("failed to parse %s: %w", path, err)
+			}
+			foundVars = true
+		}
+	}
+	if !foundMarkdown {
+		return fmt.Errorf("missing required markdown step files under %s/steps", runtimeDir)
+	}
+	if !foundVars {
+		return fmt.Errorf("missing required file %s/steps/vars_file.yaml", runtimeDir)
+	}
 	return nil
 }
 
