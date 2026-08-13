@@ -20,6 +20,9 @@ import (
 	clitemplates "github.com/project-ai-services/ai-services/internal/pkg/cli/templates"
 	"github.com/project-ai-services/ai-services/internal/pkg/utils"
 	"go.yaml.in/yaml/v3"
+	helmchart "helm.sh/helm/v4/pkg/chart"
+	"helm.sh/helm/v4/pkg/chart/loader/archive"
+	"helm.sh/helm/v4/pkg/chart/v2/loader"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/db/models"
 	dbrepo "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/repository"
@@ -879,9 +882,6 @@ func validatePodmanTemplates(entries map[string]archiveEntry, runtimeDir, catalo
 			if !strings.Contains(content, "ai-services.io/template") {
 				return fmt.Errorf("template %s must define metadata.labels.ai-services.io/template", path)
 			}
-			if !strings.Contains(content, "ai-services.io/routes") {
-				return fmt.Errorf("template %s must define metadata.annotations.ai-services.io/routes", path)
-			}
 		}
 		found = true
 	}
@@ -892,8 +892,12 @@ func validatePodmanTemplates(entries map[string]archiveEntry, runtimeDir, catalo
 }
 
 func validateOpenShiftTemplates(entries map[string]archiveEntry, runtimeDir string) error {
-	if err := requireArchiveFile(entries, filepath.ToSlash(filepath.Join(runtimeDir, "Chart.yaml"))); err != nil {
+	chartData, err := loadOpenShiftChart(entries, runtimeDir)
+	if err != nil {
 		return err
+	}
+	if chartData == nil {
+		return fmt.Errorf("failed to load Helm chart from %s", runtimeDir)
 	}
 
 	templatePrefix := runtimeDir + "/templates/"
@@ -905,16 +909,34 @@ func validateOpenShiftTemplates(entries map[string]archiveEntry, runtimeDir stri
 		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
 			return fmt.Errorf("OpenShift template file %s must use .yaml or .yml extension", path)
 		}
-		var manifest map[string]any
-		if err := yaml.Unmarshal(entry.Content, &manifest); err != nil {
-			return fmt.Errorf("failed to parse OpenShift template %s as YAML: %w", path, err)
-		}
 		found = true
 	}
 	if !found {
 		return fmt.Errorf("missing required template files under %s/templates", runtimeDir)
 	}
 	return nil
+}
+
+func loadOpenShiftChart(entries map[string]archiveEntry, runtimeDir string) (helmchart.Charter, error) {
+	files := make([]*archive.BufferedFile, 0)
+	prefix := runtimeDir + "/"
+	for path, entry := range entries {
+		if entry.IsDir || !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(path, prefix)
+		files = append(files, &archive.BufferedFile{Name: rel, Data: entry.Content})
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("missing required Helm chart files under %s", runtimeDir)
+	}
+
+	chartData, err := loader.LoadFiles(files)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load Helm chart from %s: %w", runtimeDir, err)
+	}
+
+	return chartData, nil
 }
 
 func validateStepsFiles(entries map[string]archiveEntry, runtimeDir string) error {
