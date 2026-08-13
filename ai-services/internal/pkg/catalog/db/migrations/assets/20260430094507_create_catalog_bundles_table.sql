@@ -3,7 +3,8 @@
 CREATE TYPE bundle_status AS ENUM (
     'processing',
     'active',
-    'failed'
+    'failed',
+    'deleting'
 );
 
 CREATE TABLE catalog_bundles (
@@ -15,14 +16,9 @@ CREATE TABLE catalog_bundles (
     -- Not required to be unique — the same label may appear for different catalog_ids.
     name             VARCHAR(255),
 
-    -- Server-determined on-disk directory name: meta.DirName().
-    -- Services:   <id>-<version>                       e.g. "my-service-1.0.0"
-    -- Components: <component_type>-<id>-<version>       e.g. "llm-my-provider-1.0.0"
-    dir_name         VARCHAR(200)   NOT NULL,
-
     status           bundle_status  NOT NULL DEFAULT 'processing',
     -- Uncompressed on-disk size in bytes, populated after extraction completes.
-    -- NULL until the bundle reaches 'active' or 'failed'.
+    -- NULL until the bundle reaches 'active', 'failed', or 'deleting'.
     size_bytes       BIGINT,
 
     -- The catalog item type: "service" or "component".
@@ -37,8 +33,8 @@ CREATE TABLE catalog_bundles (
     version          VARCHAR(50)    NOT NULL DEFAULT '',
 
     error            TEXT,
-    uploaded_by      VARCHAR(100),
-    uploaded_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+    created_by       VARCHAR(100),
+    created_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
 
 -- Enforce at most one active bundle per (catalog_type, catalog_id) pair.

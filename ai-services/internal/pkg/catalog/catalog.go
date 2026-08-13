@@ -25,7 +25,7 @@ import (
 // catalogItem represents a cached catalog item with its metadata and path.
 // itemFS is the filesystem used to read this item's files:
 //   - assets.CatalogFS for built-in embedded items
-//   - os.DirFS(bundleDir) for customer-uploaded on-disk bundles
+//   - os.DirFS(bundleDir) for customer-created on-disk bundles
 type catalogItem struct {
 	Path         string // Application path (e.g., "services/chat" or "my-service")
 	itemFS       fs.FS  // FS to read files from — either embedded or on-disk
@@ -43,7 +43,7 @@ type CatalogProvider struct {
 }
 
 // NewCatalogProvider creates a new CatalogProvider, loading all embedded catalog items
-// and any active customer-uploaded bundles from the DB (if bundleRepo is non-nil).
+// and any active customer-created bundles from the DB (if bundleRepo is non-nil).
 func NewCatalogProvider(bundleRepo dbrepo.BundleRepository) (*CatalogProvider, error) {
 	p := &CatalogProvider{
 		items:      make(map[string]*catalogItem),
@@ -107,11 +107,12 @@ func (p *CatalogProvider) loadBundleItems(ctx context.Context, items map[string]
 			continue
 		}
 
-		// Bundle directory: <bundleStorageRoot>/<catalog_type>/<dir_name>
+		// Bundle directory: <bundleStorageRoot>/<catalog_type>/<catalog_id>-<version>
 		// e.g. /data/catalog-bundles/service/mayuka-service-1.0.0
+		//      /data/catalog-bundles/component/llm--my-provider-1.0.0
 		// The archive is extracted with the top-level directory stripped, so
 		// metadata.yaml sits directly at <bundleDir>/metadata.yaml.
-		bundleDir := filepath.Join(bundleStorageRoot, b.CatalogType, b.DirName)
+		bundleDir := filepath.Join(bundleStorageRoot, b.CatalogType, b.CatalogID+"-"+b.Version)
 		bundleFS := os.DirFS(bundleDir)
 
 		metaPath := "metadata.yaml"

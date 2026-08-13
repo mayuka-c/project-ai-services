@@ -1,4 +1,4 @@
-// Package bundle implements the service layer for catalog bundle upload and management.
+// Package bundle implements the service layer for catalog bundle creation and management.
 package bundle
 
 import (
@@ -15,32 +15,25 @@ type BundleServiceInterface interface {
 	// Returns a ServiceValidationResult or ComponentValidationResult (both implement ValidationResult).
 	ValidateBundle(ctx context.Context, file io.Reader) (ValidationResult, error)
 
-	// ProcessBundle handles a synchronous POST upload.
-	// Peeks metadata.yaml, conflict-checks, extracts, validates, inserts + activates
-	// the DB row in a single UPDATE, reloads the catalog, and returns status=active (201).
+	// ProcessBundle handles a synchronous POST bundle creation.
+	// Peeks metadata.yaml, conflict-checks, extracts, inserts the DB row as processing,
+	// reloads the catalog, activates the row, and returns status=active (201).
 	ProcessBundle(ctx context.Context, file io.Reader, userID string) (*BundleResponse, error)
 
-	// ReplaceBundle handles a PUT update.
-	// Sync: validates archive and immutable fields, returns 202 immediately with the existing ID.
-	// Async goroutine: extracts to meta.DirName()/, validates, UPDATEs the existing row
-	// in-place (version/dir_name/name/size_bytes/status). Directory behaviour:
-	//   - Same version: extracts into the existing directory (overwrites files in place); no dir deleted.
-	//   - New version:  extracts into a new meta.DirName()/ directory;
-	//                   old directory is deleted after activation.
+	// ReplaceBundle handles a synchronous PUT update.
 	ReplaceBundle(ctx context.Context, existing *BundleRecord, file io.Reader, userID string) (*BundleResponse, error)
 
 	// GetByBundleID returns the bundle record for the given internal bundle ID, or nil.
 	GetByBundleID(ctx context.Context, bundleID string) (*BundleRecord, error)
 
 	// GetBundleByID returns the BundleResponse for the given internal bundle ID, or nil.
-	// Poll this after PUT (202) until status is "active".
 	GetBundleByID(ctx context.Context, bundleID string) (*BundleResponse, error)
 
-	// DeleteBundle removes the bundle's on-disk directory, deletes the DB record, and
-	// triggers a reload — all synchronously.
+	// DeleteBundle marks the bundle deleting, removes the on-disk directory, reloads,
+	// and deletes the DB record — all synchronously.
 	DeleteBundle(ctx context.Context, existing *BundleRecord) error
 
-	// ListBundles returns all bundles ordered by uploaded_at descending.
+	// ListBundles returns all bundles ordered by created_at descending.
 	ListBundles(ctx context.Context) (*BundleListResponse, error)
 }
 
@@ -48,14 +41,13 @@ type BundleServiceInterface interface {
 type BundleRecord struct {
 	ID          string
 	Name        string // human-readable display label (may be empty)
-	DirName     string // server-determined on-disk directory name, e.g. "my-service-1.0.0"
 	Status      string
 	SizeBytes   *int64
 	CatalogType string
 	CatalogID   string
 	Version     string
-	UploadedBy  string
-	UploadedAt  time.Time
+	CreatedBy   string
+	CreatedAt   time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -73,8 +65,8 @@ type BundleRecord struct {
 //     is unchanged — it calls only these methods.
 type BundleMetadata interface {
 	// CatalogID returns the globally unique value stored in the DB catalog_id column.
-	// Services:   bare id                         e.g. "my-service"
-	// Components: composite <component_type>:<id>  e.g. "llm:my-provider"
+	// Services:   bare id                              e.g. "my-service"
+	// Components: composite <component_type>--<id>     e.g. "llm--my-provider"
 	CatalogID() string
 
 	// CatalogType returns "service" or "component".
@@ -82,11 +74,6 @@ type BundleMetadata interface {
 
 	// Version returns the semantic version string.
 	Version() string
-
-	// DirName returns the server-determined on-disk directory name (DB dir_name column).
-	// Services:   <id>-<version>                       e.g. "my-service-1.0.0"
-	// Components: <component_type>-<id>-<version>       e.g. "llm-my-provider-1.0.0"
-	DirName() string
 
 	// DisplayName returns the human-readable label from the metadata.yaml `name:` field.
 	// e.g. "My Custom Service", "My Custom LLM Provider"
@@ -104,17 +91,15 @@ type ServiceMetadata struct {
 func (m *ServiceMetadata) CatalogID() string   { return m.id }
 func (m *ServiceMetadata) CatalogType() string { return "service" }
 func (m *ServiceMetadata) Version() string     { return m.version }
-
-// DirName returns "<id>-<version>", e.g. "my-service-1.0.0".
-func (m *ServiceMetadata) DirName() string    { return m.id + "-" + m.version }
 func (m *ServiceMetadata) DisplayName() string { return m.displayName }
 
 // ComponentMetadata is the BundleMetadata implementation for catalog_type="component".
 // ComponentType is required and must be one of the recognised values
 // (llm, embedding, reranker, vector_store).
 //
-// CatalogID is the composite "<component_type>:<id>" value stored in the DB.
-// DirName encodes both as "<component_type>-<id>-<version>" (e.g. "llm-my-provider-1.0.0").
+// CatalogID is the composite "<component_type>--<id>" value stored in the DB,
+// e.g. "llm--my-provider". The double-dash separator avoids filesystem conflicts
+// (colons are not valid in directory names on most OSes).
 // The same bare id may exist under different component types — they produce different
 // CatalogID() values and are stored as entirely independent DB rows and on-disk directories.
 type ComponentMetadata struct {
@@ -124,12 +109,10 @@ type ComponentMetadata struct {
 	displayName   string
 }
 
-func (m *ComponentMetadata) CatalogID() string   { return m.componentType + ":" + m.id }
+// CatalogID returns "<component_type>--<id>", e.g. "llm--my-provider".
+func (m *ComponentMetadata) CatalogID() string   { return m.componentType + "--" + m.id }
 func (m *ComponentMetadata) CatalogType() string { return "component" }
 func (m *ComponentMetadata) Version() string     { return m.version }
-
-// DirName returns "<component_type>-<id>-<version>", e.g. "llm-my-provider-1.0.0".
-func (m *ComponentMetadata) DirName() string    { return m.componentType + "-" + m.id + "-" + m.version }
 func (m *ComponentMetadata) DisplayName() string { return m.displayName }
 
 // ComponentType returns the component_type for this metadata.
@@ -158,11 +141,6 @@ type ValidationResult interface {
 
 	// GetDisplayName returns the human-readable label from metadata.yaml `name:`.
 	GetDisplayName() string
-
-	// GetDirName returns the server-determined on-disk directory name.
-	// Services:   <id>-<version>                  e.g. "my-service-1.0.0"
-	// Components: <component_type>-<id>-<version>  e.g. "llm-my-provider-1.0.0"
-	GetDirName() string
 }
 
 // ServiceValidationResult is the ValidationResult implementation for catalog_type="service".
@@ -173,8 +151,7 @@ type ValidationResult interface {
 //	  "catalog_type": "service",
 //	  "catalog_id":   "my-service",
 //	  "version":      "1.0.0",
-//	  "name":         "My Custom Service",
-//	  "dir_name":     "my-service-1.0.0"
+//	  "name":         "My Custom Service"
 //	}
 type ServiceValidationResult struct {
 	Valid       bool   `json:"valid"`
@@ -182,7 +159,6 @@ type ServiceValidationResult struct {
 	CatalogID   string `json:"catalog_id"`
 	Version     string `json:"version"`
 	Name        string `json:"name,omitempty"` // display label; omitted if blank
-	DirName     string `json:"dir_name"`
 }
 
 func (r *ServiceValidationResult) IsValid() bool          { return r.Valid }
@@ -190,7 +166,6 @@ func (r *ServiceValidationResult) GetCatalogType() string { return r.CatalogType
 func (r *ServiceValidationResult) GetCatalogID() string   { return r.CatalogID }
 func (r *ServiceValidationResult) GetVersion() string     { return r.Version }
 func (r *ServiceValidationResult) GetDisplayName() string { return r.Name }
-func (r *ServiceValidationResult) GetDirName() string     { return r.DirName }
 
 // ComponentValidationResult is the ValidationResult implementation for catalog_type="component".
 // JSON shape:
@@ -199,10 +174,9 @@ func (r *ServiceValidationResult) GetDirName() string     { return r.DirName }
 //	  "valid":          true,
 //	  "catalog_type":   "component",
 //	  "component_type": "llm",
-//	  "catalog_id":     "llm:my-provider",
+//	  "catalog_id":     "llm--my-provider",
 //	  "version":        "1.0.0",
-//	  "name":           "My Custom LLM Provider",
-//	  "dir_name":       "llm-my-provider-1.0.0"
+//	  "name":           "My Custom LLM Provider"
 //	}
 type ComponentValidationResult struct {
 	Valid         bool   `json:"valid"`
@@ -211,7 +185,6 @@ type ComponentValidationResult struct {
 	CatalogID     string `json:"catalog_id"`
 	Version       string `json:"version"`
 	Name          string `json:"name,omitempty"` // display label; omitted if blank
-	DirName       string `json:"dir_name"`
 }
 
 func (r *ComponentValidationResult) IsValid() bool          { return r.Valid }
@@ -219,7 +192,6 @@ func (r *ComponentValidationResult) GetCatalogType() string { return r.CatalogTy
 func (r *ComponentValidationResult) GetCatalogID() string   { return r.CatalogID }
 func (r *ComponentValidationResult) GetVersion() string     { return r.Version }
 func (r *ComponentValidationResult) GetDisplayName() string { return r.Name }
-func (r *ComponentValidationResult) GetDirName() string     { return r.DirName }
 
 // GetComponentType returns the component_type for this result.
 // Defined on the concrete type — callers that need it may type-assert to *ComponentValidationResult.
@@ -229,18 +201,17 @@ func (r *ComponentValidationResult) GetComponentType() string { return r.Compone
 // HTTP response types
 // ---------------------------------------------------------------------------
 
-// BundleResponse is the HTTP response body for a single bundle (201 / 202 / GET).
+// BundleResponse is the HTTP response body for a single bundle (201 / GET).
 type BundleResponse struct {
 	ID          string  `json:"id"`
 	Name        string  `json:"name,omitempty"`
-	DirName     string  `json:"dir_name"`
 	Status      string  `json:"status"`
-	UploadedAt  string  `json:"uploaded_at"`
+	CreatedAt   string  `json:"created_at"`
 	SizeBytes   *int64  `json:"size_bytes"`
 	CatalogType string  `json:"catalog_type"`
 	CatalogID   string  `json:"catalog_id"`
 	Version     string  `json:"version"`
-	UploadedBy  string  `json:"uploaded_by"`
+	CreatedBy   string  `json:"created_by"`
 	Error       *string `json:"error,omitempty"`
 }
 

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +24,6 @@ const (
 
 	// maxUncompressedBytes is the maximum allowed uncompressed size (200 MB).
 	maxUncompressedBytes = 200 * 1024 * 1024
-
 )
 
 // validCatalogTypes lists the accepted catalog_type values.
@@ -86,7 +84,7 @@ func (s *bundleService) GetBundleByID(ctx context.Context, bundleID string) (*Bu
 	return toResponse(b), nil
 }
 
-// ListBundles returns all bundle records ordered by uploaded_at descending.
+// ListBundles returns all bundle records ordered by created_at descending.
 func (s *bundleService) ListBundles(ctx context.Context) (*BundleListResponse, error) {
 	bundles, err := s.repo.ListAll(ctx)
 	if err != nil {
@@ -115,23 +113,8 @@ func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (Valid
 		return nil, &ValidationError{Code: http.StatusUnprocessableEntity, Message: err.Error()}
 	}
 
-	tmpDir, err := os.MkdirTemp("", "bundle-validate-*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp dir: %w", err)
-	}
-
-	defer os.RemoveAll(tmpDir)
-
-	if _, err := extractAndMeasure(bytes.NewReader(archiveBytes), tmpDir); err != nil {
-		var valErr *ValidationError
-		if errors.As(err, &valErr) {
-			return nil, valErr
-		}
-
-		return nil, &ValidationError{Code: http.StatusBadRequest, Message: fmt.Sprintf("failed to extract archive: %v", err)}
-	}
-
-	if err := validateBundleStructure(tmpDir); err != nil {
+	// Validate bundle structure from archive (no extraction to disk).
+	if err := validateBundleStructureFromArchive(archiveBytes); err != nil {
 		return nil, &ValidationError{Code: http.StatusUnprocessableEntity, Message: err.Error()}
 	}
 
@@ -145,7 +128,6 @@ func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (Valid
 			CatalogID:   meta.CatalogID(),
 			Version:     meta.Version(),
 			Name:        meta.DisplayName(),
-			DirName:     meta.DirName(),
 		}
 		if cm != nil {
 			result.ComponentType = cm.ComponentType()
@@ -159,21 +141,21 @@ func (s *bundleService) ValidateBundle(_ context.Context, file io.Reader) (Valid
 			CatalogID:   meta.CatalogID(),
 			Version:     meta.Version(),
 			Name:        meta.DisplayName(),
-			DirName:     meta.DirName(),
 		}, nil
 	}
 }
 
-// ProcessBundle handles a POST upload — fully synchronous.
+// ProcessBundle handles bundle creation — fully synchronous.
 //
 // Steps:
 //  1. Read archive bytes.
 //  2. Peek metadata.yaml → id, type, version.
 //  3. Conflict check: reject 409 if an active bundle with catalog_id already exists.
-//  4. Extract to the permanent bundle directory and measure uncompressed size.
-//  5. Validate bundle structure.
-//  6. Insert DB row with status = active and the measured size.
-//  7. Trigger catalog reload.
+//  4. Validate bundle structure from archive (no extraction).
+//  5. Extract to the permanent bundle directory and measure uncompressed size.
+//  6. Insert DB row with status = processing.
+//  7. Reload catalog.
+//  8. Activate the bundle row.
 func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userID string) (*BundleResponse, error) {
 	archiveBytes, err := io.ReadAll(file)
 	if err != nil {
@@ -186,7 +168,7 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 		return nil, &ValidationError{Code: http.StatusUnprocessableEntity, Message: err.Error()}
 	}
 
-	// Step 3: conflict check.
+	// Step 3: conflict check using the identity fields from metadata.yaml.
 	exists, err := s.repo.ActiveCatalogIDExists(ctx, meta.CatalogType(), meta.CatalogID())
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing bundles: %w", err)
@@ -199,10 +181,13 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 		}
 	}
 
-	// Step 4: extract to the permanent directory and measure size.
-	// dirName is the server-determined on-disk directory name (stored in DB dir_name column).
-	dirName := meta.DirName()
-	destDir := bundleDirPath(meta.CatalogType(), dirName)
+	// Step 4: validate bundle structure from archive (before any disk writes).
+	if err := validateBundleStructureFromArchive(archiveBytes); err != nil {
+		return nil, &ValidationError{Code: http.StatusUnprocessableEntity, Message: err.Error()}
+	}
+
+	// Step 5: extract to the permanent directory and measure size.
+	destDir := bundleDirPath(meta.CatalogType(), meta.CatalogID(), meta.Version())
 
 	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create bundle directory: %w", err)
@@ -220,20 +205,12 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 		return nil, fmt.Errorf("extraction failed: %w", err)
 	}
 
-	// Step 5: validate bundle structure.
-	if err := validateBundleStructure(destDir); err != nil {
-		os.RemoveAll(destDir)
-
-		return nil, &ValidationError{Code: http.StatusUnprocessableEntity, Message: err.Error()}
-	}
-
 	// Step 6: insert DB row — id is generated by the DB and written back via RETURNING.
 	bundle := &models.Bundle{
-		DirName:     dirName,
 		CatalogType: meta.CatalogType(),
 		CatalogID:   meta.CatalogID(),
 		Version:     meta.Version(),
-		UploadedBy:  userID,
+		CreatedBy:   userID,
 	}
 
 	if err := s.repo.Insert(ctx, bundle); err != nil {
@@ -242,19 +219,24 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 		return nil, fmt.Errorf("failed to record bundle: %w", err)
 	}
 
-	if err := s.repo.Activate(ctx, bundle.ID, meta.Version(), dirName, meta.DisplayName(), sizeBytes); err != nil {
-		// Best-effort cleanup: remove the directory and the DB row.
+	// Step 7: reload catalog so the new bundle is immediately available.
+	if err := s.reloader.Reload(ctx); err != nil {
 		os.RemoveAll(destDir)
-		_ = s.repo.Delete(ctx, bundle.ID)
+		_ = s.repo.MarkFailed(ctx, bundle.ID, fmt.Sprintf("failed to reload catalog: %v", err))
+
+		return nil, fmt.Errorf("failed to reload catalog: %w", err)
+	}
+
+	// Step 8: activate the bundle row after reload succeeds.
+	if err := s.repo.Activate(ctx, bundle.ID, meta.Version(), meta.DisplayName(), sizeBytes); err != nil {
+		os.RemoveAll(destDir)
+		_ = s.repo.MarkFailed(ctx, bundle.ID, fmt.Sprintf("failed to activate bundle: %v", err))
 
 		return nil, fmt.Errorf("failed to activate bundle: %w", err)
 	}
 
-	// Step 7: reload catalog so the new service is immediately available.
-	_ = s.reloader.Reload(ctx)
-
 	// Re-fetch from DB so the response reflects the final persisted state
-	// (status=active, size_bytes, uploaded_at) rather than the stale local struct.
+	// (status=active, size_bytes, created_at) rather than the stale local struct.
 	persisted, err := s.repo.GetByID(ctx, bundle.ID)
 	if err != nil || persisted == nil {
 		return toResponse(bundle), nil
@@ -263,19 +245,7 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 	return toResponse(persisted), nil
 }
 
-// ReplaceBundle handles a PUT update.
-//
-// Sync steps (returns 202 immediately):
-//  1. Read archive bytes and peek metadata.yaml — validate archive upfront.
-//  2. Validate that catalog_id and catalog_type are unchanged (immutable fields).
-//
-// Async steps (goroutine):
-//  3. Extract archive to disk, validate structure.
-//  4. UPDATE the existing row in place: status=active, version, name, size_bytes.
-//  5. Delete the old on-disk directory, reload catalog.
-//
-// The existing DB row (same ID) is reused throughout — no new row is inserted,
-// so the unique partial index on (catalog_id) WHERE status='active' is never violated.
+// ReplaceBundle handles a synchronous PUT update.
 func (s *bundleService) ReplaceBundle(ctx context.Context, existing *BundleRecord, file io.Reader, userID string) (*BundleResponse, error) {
 	archiveBytes, err := io.ReadAll(file)
 	if err != nil {
@@ -302,76 +272,103 @@ func (s *bundleService) ReplaceBundle(ctx context.Context, existing *BundleRecor
 		}
 	}
 
-	newDirName := meta.DirName()
-	go s.runReplaceAsync(existing.ID, existing.DirName, newDirName, meta.Version(), existing.CatalogType, archiveBytes)
+	// Perform the replacement synchronously.
+	if err := s.runReplace(ctx, existing.ID, existing.Version, meta.Version(), meta.DisplayName(), existing.CatalogID, existing.CatalogType, archiveBytes); err != nil {
+		return nil, err
+	}
 
-	// Return the existing record immediately — the client polls the same ID.
-	return toResponse(&models.Bundle{
-		ID:          existing.ID,
-		Name:        sql.NullString{String: existing.Name, Valid: existing.Name != ""},
-		DirName:     existing.DirName,
-		Status:      models.BundleStatusProcessing,
-		CatalogType: existing.CatalogType,
-		CatalogID:   existing.CatalogID,
-		Version:     existing.Version,
-		UploadedBy:  existing.UploadedBy,
-		UploadedAt:  existing.UploadedAt,
-	}), nil
+	// Fetch and return the updated bundle record.
+	return s.GetBundleByID(ctx, existing.ID)
 }
 
-// runReplaceAsync extracts and activates a bundle replacement in a goroutine.
+// runReplace extracts and activates a bundle replacement synchronously.
 // It updates the existing DB row in place — no new row is inserted.
-// On any failure the existing row is left unchanged (still active, old version).
-func (s *bundleService) runReplaceAsync(bundleID, oldDirName, newDirName, version, catalogType string, archiveBytes []byte) {
-	ctx := context.Background()
-
-	destDir := bundleDirPath(catalogType, newDirName)
-
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
-		return
+func (s *bundleService) runReplace(ctx context.Context, bundleID, oldVersion, newVersion, displayName, catalogID, catalogType string, archiveBytes []byte) error {
+	// Validate bundle structure from archive before any extraction.
+	if err := validateBundleStructureFromArchive(archiveBytes); err != nil {
+		return &ValidationError{Code: http.StatusUnprocessableEntity, Message: fmt.Sprintf("bundle structure validation failed: %v", err)}
 	}
 
-	// For a PUT replace we trust the catalogID (from the existing record) was already
-	// validated in ReplaceBundle, so we pass an empty string to skip the dir-name check.
-	sizeBytes, err := extractAndMeasure(bytes.NewReader(archiveBytes), destDir)
+	if err := s.repo.MarkProcessing(ctx, bundleID); err != nil {
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to mark bundle processing: %v", err)}
+	}
+
+	newDir := bundleDirPath(catalogType, catalogID, newVersion)
+	oldDir := bundleDirPath(catalogType, catalogID, oldVersion)
+	stagingDir := newDir + "-new"
+
+	if err := os.RemoveAll(stagingDir); err != nil {
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to clean staging bundle directory: %v", err))
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to clean staging bundle directory: %v", err)}
+	}
+
+	if err := os.MkdirAll(stagingDir, 0o750); err != nil {
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to create staging bundle directory: %v", err))
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to create staging bundle directory: %v", err)}
+	}
+
+	sizeBytes, err := extractAndMeasure(bytes.NewReader(archiveBytes), stagingDir)
 	if err != nil {
-		os.RemoveAll(destDir)
-		return
+		os.RemoveAll(stagingDir)
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to extract archive: %v", err))
+		return &ValidationError{Code: http.StatusUnprocessableEntity, Message: fmt.Sprintf("failed to extract archive: %v", err)}
 	}
 
-	if err := validateBundleStructure(destDir); err != nil {
-		os.RemoveAll(destDir)
-		return
+	if err := os.RemoveAll(newDir); err != nil {
+		os.RemoveAll(stagingDir)
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to remove existing target bundle directory: %v", err))
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to remove existing target bundle directory: %v", err)}
 	}
 
-	// UPDATE the existing row in place — same ID, no unique index conflict.
-	if err := s.repo.Activate(ctx, bundleID, version, newDirName, "", sizeBytes); err != nil {
-		os.RemoveAll(destDir)
-		return
+	if err := os.Rename(stagingDir, newDir); err != nil {
+		os.RemoveAll(stagingDir)
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to promote staging bundle directory: %v", err))
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to promote staging bundle directory: %v", err)}
 	}
 
-	// Remove the old on-disk directory now that the row points to the new one.
-	if oldDirName != "" && oldDirName != newDirName {
-		os.RemoveAll(bundleDirPath(catalogType, oldDirName))
-	}
-
-	_ = s.reloader.Reload(ctx)
-}
-
-// DeleteBundle removes the on-disk directory, deletes the DB record, and triggers a reload.
-func (s *bundleService) DeleteBundle(ctx context.Context, existing *BundleRecord) error {
-	bundleDir := bundleDirPath(existing.CatalogType, existing.DirName)
-
-	if err := os.RemoveAll(bundleDir); err != nil {
-		return fmt.Errorf("failed to remove bundle directory: %w", err)
-	}
-
-	if err := s.repo.Delete(ctx, existing.ID); err != nil {
-		return fmt.Errorf("failed to delete bundle record: %w", err)
+	if err := s.repo.Activate(ctx, bundleID, newVersion, displayName, sizeBytes); err != nil {
+		os.RemoveAll(newDir)
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to activate bundle: %v", err))
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to activate bundle: %v", err)}
 	}
 
 	if err := s.reloader.Reload(ctx); err != nil {
+		_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to reload catalog: %v", err))
+		return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to reload catalog: %v", err)}
+	}
+
+	if oldDir != newDir {
+		if err := os.RemoveAll(oldDir); err != nil {
+			_ = s.repo.MarkFailed(ctx, bundleID, fmt.Sprintf("failed to remove old bundle directory: %v", err))
+			return &ValidationError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to remove old bundle directory: %v", err)}
+		}
+	}
+
+	return nil
+}
+
+// DeleteBundle marks the bundle deleting, removes the on-disk directory, reloads the catalog,
+// and then deletes the DB record.
+func (s *bundleService) DeleteBundle(ctx context.Context, existing *BundleRecord) error {
+	bundleDir := bundleDirPath(existing.CatalogType, existing.CatalogID, existing.Version)
+
+	if err := s.repo.MarkDeleting(ctx, existing.ID); err != nil {
+		return fmt.Errorf("failed to mark bundle deleting: %w", err)
+	}
+
+	if err := os.RemoveAll(bundleDir); err != nil {
+		_ = s.repo.MarkFailed(ctx, existing.ID, fmt.Sprintf("failed to remove bundle directory: %v", err))
+		return fmt.Errorf("failed to remove bundle directory: %w", err)
+	}
+
+	if err := s.reloader.Reload(ctx); err != nil {
+		_ = s.repo.MarkFailed(ctx, existing.ID, fmt.Sprintf("failed to reload catalog: %v", err))
 		return fmt.Errorf("failed to reload catalog: %w", err)
+	}
+
+	if err := s.repo.Delete(ctx, existing.ID); err != nil {
+		_ = s.repo.MarkFailed(ctx, existing.ID, fmt.Sprintf("failed to delete bundle record: %v", err))
+		return fmt.Errorf("failed to delete bundle record: %w", err)
 	}
 
 	return nil
@@ -380,13 +377,16 @@ func (s *bundleService) DeleteBundle(ctx context.Context, existing *BundleRecord
 // ---- Archive helpers --------------------------------------------------------
 
 // bundleDirPath returns the on-disk directory for a bundle.
-// Layout: <bundleStorageRoot>/<catalogType>/<dirName>
+// Layout: <bundleStorageRoot>/<catalogType>/<catalogID>-<version>
 // e.g.   /data/catalog-bundles/service/mayuka-service-1.0.0
 //
+//	/data/catalog-bundles/component/llm--my-provider-1.0.0
+//
 // catalogType is the singular DB value ("service", "component").
-// dirName is the DB dir_name column value (<catalogID>-<version>).
-func bundleDirPath(catalogType, dirName string) string {
-	return filepath.Join(bundleStorageRoot, catalogType, dirName)
+// catalogID is the DB catalog_id value (e.g. "my-service", "llm--my-provider").
+// version is the semantic version string (e.g. "1.0.0").
+func bundleDirPath(catalogType, catalogID, version string) string {
+	return filepath.Join(bundleStorageRoot, catalogType, catalogID+"-"+version)
 }
 
 // peekMetadata reads id (catalog_id), type (catalog_type), and version from
@@ -468,10 +468,10 @@ func peekMetadata(archiveBytes []byte) (BundleMetadata, error) {
 
 // validComponentTypes lists the accepted component_type values for component bundles.
 var validComponentTypes = map[string]bool{
-	"llm":        true,
-	"embedding":  true,
-	"reranker":   true,
-	"vector_db":  true,
+	"llm":       true,
+	"embedding": true,
+	"reranker":  true,
+	"vector_db": true,
 }
 
 // parseMetadataYAML extracts id, type, name, version (and component_type for components)
@@ -659,11 +659,42 @@ func extractAndMeasure(r io.Reader, destDir string) (int64, error) {
 	return totalBytes, nil
 }
 
-// validateBundleStructure checks that the extracted bundle directory contains the
-// minimum required file: metadata.yaml directly at <destDir>/metadata.yaml.
-func validateBundleStructure(destDir string) error {
-	metaPath := filepath.Join(destDir, "metadata.yaml")
-	if _, err := os.Stat(metaPath); err != nil {
+// validateBundleStructureFromArchive validates the bundle structure directly from the archive
+// without extracting it to disk. It checks that metadata.yaml exists in the archive root.
+func validateBundleStructureFromArchive(archiveBytes []byte) error {
+	gr, err := gzip.NewReader(bytes.NewReader(archiveBytes))
+	if err != nil {
+		return fmt.Errorf("invalid gzip: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	metadataFound := false
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar read error: %w", err)
+		}
+
+		// Look for metadata.yaml at the bundle root (after top-level directory is stripped).
+		// The path will be like "topdir/metadata.yaml" in wrapped archives.
+		parts := strings.Split(hdr.Name, "/")
+		if len(parts) >= 2 && parts[1] == "metadata.yaml" && hdr.Typeflag == tar.TypeReg {
+			metadataFound = true
+			break
+		}
+		// Also check for flat archives where metadata.yaml is at root.
+		if len(parts) == 1 && parts[0] == "metadata.yaml" && hdr.Typeflag == tar.TypeReg {
+			metadataFound = true
+			break
+		}
+	}
+
+	if !metadataFound {
 		return fmt.Errorf("missing required file metadata.yaml in bundle root")
 	}
 
@@ -677,13 +708,12 @@ func toRecord(b *models.Bundle) *BundleRecord {
 	rec := &BundleRecord{
 		ID:          b.ID,
 		Name:        b.Name.String,
-		DirName:     b.DirName,
 		Status:      string(b.Status),
 		CatalogType: b.CatalogType,
 		CatalogID:   b.CatalogID,
 		Version:     b.Version,
-		UploadedBy:  b.UploadedBy,
-		UploadedAt:  b.UploadedAt,
+		CreatedBy:   b.CreatedBy,
+		CreatedAt:   b.CreatedAt,
 	}
 
 	if b.SizeBytes.Valid {
@@ -699,13 +729,12 @@ func toResponse(b *models.Bundle) *BundleResponse {
 	resp := &BundleResponse{
 		ID:          b.ID,
 		Name:        b.Name.String,
-		DirName:     b.DirName,
 		Status:      string(b.Status),
-		UploadedAt:  b.UploadedAt.UTC().Format(time.RFC3339),
+		CreatedAt:   b.CreatedAt.UTC().Format(time.RFC3339),
 		CatalogType: b.CatalogType,
 		CatalogID:   b.CatalogID,
 		Version:     b.Version,
-		UploadedBy:  b.UploadedBy,
+		CreatedBy:   b.CreatedBy,
 	}
 
 	if b.SizeBytes.Valid {

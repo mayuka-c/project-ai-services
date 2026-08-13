@@ -13,7 +13,7 @@ import (
 // maxBundleSizeBytes is the maximum allowed compressed upload size (50 MB).
 const maxBundleSizeBytes = 50 * 1024 * 1024
 
-// BundleHandler handles catalog bundle upload, replacement, deletion, and listing.
+// BundleHandler handles catalog bundle creation, replacement, deletion, and listing.
 // It follows the same pattern as ApplicationHandler.
 type BundleHandler struct {
 	bundleService bundlesvc.BundleServiceInterface
@@ -24,9 +24,9 @@ func NewBundleHandler(svc bundlesvc.BundleServiceInterface) *BundleHandler {
 	return &BundleHandler{bundleService: svc}
 }
 
-// UploadBundle godoc
+// CreateBundle godoc
 //
-//	@Summary     Upload a new custom catalog bundle
+//	@Summary     Create a new custom catalog bundle
 //	@Description Accepts a .tar.gz archive for a single catalog item. id, type, and version
 //	             are all read from metadata.yaml inside the archive — no extra form fields
 //	             are required. Returns 409 if a bundle with the same id is already registered
@@ -43,7 +43,7 @@ func NewBundleHandler(svc bundlesvc.BundleServiceInterface) *BundleHandler {
 //	@Failure     409  {object}  ErrorResponse             "id already registered; use PUT"
 //	@Failure     422  {object}  ErrorResponse             "Validation failed (bad metadata, missing files, etc.)"
 //	@Router      /catalog/bundles [post]
-func (h *BundleHandler) UploadBundle(c *gin.Context) {
+func (h *BundleHandler) CreateBundle(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBundleSizeBytes)
 
 	file, header, err := c.Request.FormFile("file")
@@ -70,7 +70,7 @@ func (h *BundleHandler) UploadBundle(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "bundle upload failed"})
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "bundle creation failed"})
 
 		return
 	}
@@ -85,15 +85,14 @@ func (h *BundleHandler) UploadBundle(c *gin.Context) {
 //	@Description Replaces the bundle identified by bundle_id. id and type are resolved from
 //	             the DB record and validated as immutable against the archive's metadata.yaml —
 //	             no form fields are needed beyond the file. Version is read from the archive.
-//	             Returns 404 if no bundle with that bundle_id exists. The existing bundle
-//	             remains active until the replacement is validated and activated.
+//	             Returns 404 if no bundle with that bundle_id exists.
 //	@Tags        Catalog
 //	@Accept      multipart/form-data
 //	@Produce     json
 //	@Security    BearerAuth
 //	@Param       bundle_id  path      string  true  "Internal record ID of the bundle to replace"
 //	@Param       file       formData  file    true  ".tar.gz replacement archive (max 50 MB)"
-//	@Success     202  {object}  bundlesvc.BundleResponse  "Replacement bundle accepted and processing"
+//	@Success     200  {object}  bundlesvc.BundleResponse  "Bundle replaced and active"
 //	@Failure     400  {object}  ErrorResponse             "Missing file field or archive too large"
 //	@Failure     401  {object}  ErrorResponse             "Unauthorized"
 //	@Failure     404  {object}  ErrorResponse             "No bundle with this bundle_id"
@@ -149,7 +148,7 @@ func (h *BundleHandler) UpdateBundle(c *gin.Context) {
 	}
 
 	c.Header("Location", fmt.Sprintf("/api/v1/catalog/bundles/%s", resp.ID))
-	c.JSON(http.StatusAccepted, resp)
+	c.JSON(http.StatusOK, resp)
 }
 
 // DeleteBundle godoc
@@ -232,7 +231,7 @@ func (h *BundleHandler) GetBundle(c *gin.Context) {
 //	@Summary     Validate a catalog bundle archive
 //	@Description Accepts a .tar.gz archive and validates it — reads metadata.yaml, extracts to
 //	             a temp directory, checks structure — then cleans up. No DB record is written
-//	             and CatalogProvider is not reloaded. Use this to check a bundle before uploading.
+//	             and CatalogProvider is not reloaded. Use this to check a bundle before creating it.
 //	@Tags        Catalog
 //	@Accept      multipart/form-data
 //	@Produce     json
@@ -279,7 +278,7 @@ func (h *BundleHandler) ValidateBundle(c *gin.Context) {
 // ListBundles godoc
 //
 //	@Summary     List all catalog bundles
-//	@Description Returns all uploaded bundles ordered by upload time (newest first).
+//	@Description Returns all created bundles ordered by creation time (newest first).
 //	@Tags        Catalog
 //	@Produce     json
 //	@Security    BearerAuth

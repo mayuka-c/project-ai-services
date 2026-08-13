@@ -57,11 +57,11 @@ func (c *ApplicationClient) GetBundle(id string) (*bundlesvc.BundleResponse, err
 	return &result, nil
 }
 
-// UploadBundle POSTs a .tar.gz archive as multipart/form-data to create a new bundle.
+// CreateBundle POSTs a .tar.gz archive as multipart/form-data to create a new bundle.
 // Returns the 201 BundleResponse (status is always "active" on success — the POST endpoint
 // is fully synchronous). catalog_id, catalog_type, and version are read from metadata.yaml
 // inside the archive; no additional flags are required.
-func (c *ApplicationClient) UploadBundle(filePath string) (*bundlesvc.BundleResponse, error) {
+func (c *ApplicationClient) CreateBundle(filePath string) (*bundlesvc.BundleResponse, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open bundle file: %w", err)
@@ -74,7 +74,7 @@ func (c *ApplicationClient) UploadBundle(filePath string) (*bundlesvc.BundleResp
 		SetResult(&result).
 		Post(catalogBundlesRoute)
 	if err != nil {
-		return nil, fmt.Errorf("upload bundle: %w", err)
+		return nil, fmt.Errorf("create bundle: %w", err)
 	}
 
 	if resp.IsError() {
@@ -89,8 +89,7 @@ func (c *ApplicationClient) UploadBundle(filePath string) (*bundlesvc.BundleResp
 
 // UpdateBundle PUTs a replacement .tar.gz archive for the bundle identified by bundleID.
 // The server validates that catalog_id and catalog_type are unchanged (immutable).
-// Returns the 202 BundleResponse immediately — the server processes the replacement
-// asynchronously. Use PollBundleActive to wait for status == "active".
+// Returns the 200 BundleResponse after the synchronous replacement completes.
 func (c *ApplicationClient) UpdateBundle(bundleID, filePath string) (*bundlesvc.BundleResponse, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -179,13 +178,11 @@ func (c *ApplicationClient) ValidateBundle(filePath string) (bundlesvc.Validatio
 		CatalogID:   raw.CatalogID,
 		Version:     raw.Version,
 		Name:        raw.Name,
-		DirName:     raw.DirName,
 	}, nil
 }
 
 // PollBundleActive polls GET /api/v1/catalog/bundles/:bundleID at the given interval
 // until status equals "active" or the context is cancelled.
-// Used after a 202 Accepted PUT response to wait for the async replacement to complete.
 func (c *ApplicationClient) PollBundleActive(ctx context.Context, bundleID string, interval time.Duration) (*bundlesvc.BundleResponse, error) {
 	for {
 		select {

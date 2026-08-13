@@ -95,19 +95,15 @@ func TestPeekMetadata_ComponentHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Component catalog_id is composite: "<component_type>:<id>"
-	if meta.CatalogID() != "llm:my-provider" {
-		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "llm:my-provider")
+	// Component catalog_id is composite: "<component_type>--<id>"
+	if meta.CatalogID() != "llm--my-provider" {
+		t.Errorf("CatalogID = %q, want %q", meta.CatalogID(), "llm--my-provider")
 	}
 	if meta.CatalogType() != "component" {
 		t.Errorf("CatalogType = %q, want %q", meta.CatalogType(), "component")
 	}
 	if meta.Version() != "1.0.0" {
 		t.Errorf("Version = %q, want %q", meta.Version(), "1.0.0")
-	}
-	// DirName for a component is "<component_type>-<id>-<version>"
-	if meta.DirName() != "llm-my-provider-1.0.0" {
-		t.Errorf("DirName = %q, want %q", meta.DirName(), "llm-my-provider-1.0.0")
 	}
 }
 
