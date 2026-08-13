@@ -196,7 +196,6 @@ func (h *BundleHandler) DeleteBundle(c *gin.Context) {
 //
 //	@Summary     Get a catalog bundle by ID
 //	@Description Returns the current status and metadata for a specific bundle.
-//	             Poll this endpoint after PUT (202) until status is "active".
 //	@Tags        Catalog
 //	@Produce     json
 //	@Security    BearerAuth
@@ -229,8 +228,7 @@ func (h *BundleHandler) GetBundle(c *gin.Context) {
 // ValidateBundle godoc
 //
 //	@Summary     Validate a catalog bundle archive
-//	@Description Accepts a .tar.gz archive and validates it — reads metadata.yaml, extracts to
-//	             a temp directory, checks structure — then cleans up. No DB record is written
+//	@Description Accepts a .tar.gz archive and validates it. No DB record is written
 //	             and CatalogProvider is not reloaded. Use this to check a bundle before creating it.
 //	@Tags        Catalog
 //	@Accept      multipart/form-data

@@ -9,13 +9,12 @@ import (
 
 // BundleServiceInterface defines the contract for bundle business logic.
 type BundleServiceInterface interface {
-	// ValidateBundle performs a validate-only pass on the archive: reads metadata.yaml,
-	// extracts to a temp directory, validates structure, then cleans up.
+	// ValidateBundle performs a validate-only pass on the archive.
 	// No DB row is written and no reload is triggered.
 	// Returns a ServiceValidationResult or ComponentValidationResult (both implement ValidationResult).
 	ValidateBundle(ctx context.Context, file io.Reader) (ValidationResult, error)
 
-	// ProcessBundle handles a synchronous POST bundle creation.
+	// ProcessBundle handles a synchronous POST Create Bundle operation.
 	// Peeks metadata.yaml, conflict-checks, extracts, inserts the DB row as processing,
 	// reloads the catalog, activates the row, and returns status=active (201).
 	ProcessBundle(ctx context.Context, file io.Reader, userID string) (*BundleResponse, error)

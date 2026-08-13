@@ -54,7 +54,7 @@ type bundleService struct {
 }
 
 // NewBundleService creates a BundleService backed by the given repository and catalog reloader.
-// Pass the *catalog.CatalogProvider as the reloader so that uploads immediately refresh the catalog.
+// Pass the *catalog.CatalogProvider as the reloader so that created bundles immediately refresh the catalog.
 func NewBundleService(repo dbrepo.BundleRepository, reloader CatalogReloader) BundleServiceInterface {
 	return &bundleService{repo: repo, reloader: reloader}
 }
@@ -229,20 +229,23 @@ func (s *bundleService) ProcessBundle(ctx context.Context, file io.Reader, userI
 		return nil, fmt.Errorf("failed to record bundle: %w", err)
 	}
 
-	// Step 7: reload catalog so the new bundle is immediately available.
-	if err := s.reloader.Reload(ctx); err != nil {
-		os.RemoveAll(destDir)
-		_ = s.repo.MarkFailed(ctx, bundle.ID, fmt.Sprintf("failed to reload catalog: %v", err))
-
-		return nil, fmt.Errorf("failed to reload catalog: %w", err)
-	}
-
-	// Step 8: activate the bundle row after reload succeeds.
+	// Step 7: activate the bundle row so it is visible to loadBundleItems during reload.
+	// Reload queries the DB and skips any row whose status != 'active', so the row must
+	// be active before Reload runs — otherwise the custom service is never loaded into
+	// the CatalogProvider and GET /api/v1/services will not return it.
 	if err := s.repo.Activate(ctx, bundle.ID, meta.Version(), meta.DisplayName(), sizeBytes); err != nil {
 		os.RemoveAll(destDir)
 		_ = s.repo.MarkFailed(ctx, bundle.ID, fmt.Sprintf("failed to activate bundle: %v", err))
 
 		return nil, fmt.Errorf("failed to activate bundle: %w", err)
+	}
+
+	// Step 8: reload catalog so the new bundle is immediately available.
+	if err := s.reloader.Reload(ctx); err != nil {
+		os.RemoveAll(destDir)
+		_ = s.repo.MarkFailed(ctx, bundle.ID, fmt.Sprintf("failed to reload catalog: %v", err))
+
+		return nil, fmt.Errorf("failed to reload catalog: %w", err)
 	}
 
 	// Re-fetch from DB so the response reflects the final persisted state

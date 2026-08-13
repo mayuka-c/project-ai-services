@@ -25,8 +25,8 @@ CREATE TABLE catalog_bundles (
     catalog_type     VARCHAR(50)    NOT NULL,
 
     -- Unique identity of the catalog item within its type.
-    -- Services:   bare id                              e.g. "my-service"
-    -- Components: composite <component_type>:<id>      e.g. "llm:my-provider"
+    -- Services:   bare id                               e.g. "my-service"
+    -- Components: composite <component_type>--<id>      e.g. "llm--my-provider"
     catalog_id       VARCHAR(200)   NOT NULL,
 
     -- Semantic version of this bundle: e.g. "1.0.0", "2.1.0"
@@ -41,7 +41,7 @@ CREATE TABLE catalog_bundles (
 -- Using the composite key makes the constraint explicit and future-proof:
 -- a new catalog_type with the same catalog_id string as an existing one
 -- is correctly treated as a distinct item.
--- 'processing' and 'failed' rows are exempt so a replacement in-flight
+-- 'processing', 'failed', and 'deleting' rows are exempt so a replacement in-flight
 -- does not block itself.
 CREATE UNIQUE INDEX uq_catalog_bundles_active
     ON catalog_bundles (catalog_type, catalog_id)
