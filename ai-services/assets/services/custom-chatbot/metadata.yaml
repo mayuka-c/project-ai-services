@@ -1,6 +1,7 @@
 # Service identification
 id: custom-chatbot
 name: "Custom Chatbot"
+version: "1.0.0"
 description: "A lightweight conversational AI service with a built-in chat UI and FastAPI backend. Supports multi-turn conversations with in-memory session history, streaming responses, and interactive API docs (/docs)."
 type: service
 
