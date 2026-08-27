@@ -5,4 +5,6 @@ containers:
 
 hosts:
   - fetch: UI_ROUTE
-    type: route
+    type: ui
+  - fetch: API_ROUTE
+    type: api

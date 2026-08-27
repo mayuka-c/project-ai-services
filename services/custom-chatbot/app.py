@@ -18,6 +18,7 @@ PORT              Port the service listens on (default: 8080)
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -180,21 +181,39 @@ async def _call_llm(payload: dict) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-async def _stream_llm(payload: dict) -> AsyncGenerator[str, None]:
+async def _stream_llm(
+    payload: dict, session: dict, user_message: str
+) -> AsyncGenerator[str, None]:
+    """Stream LLM tokens as SSE, then persist the full assistant reply to session history."""
     url = f"{LLM_ENDPOINT.rstrip('/')}/v1/chat/completions"
     payload = {**payload, "stream": True}
+    accumulated = []
+
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream("POST", url, json=payload, headers=_llm_headers()) as resp:
             if resp.status_code != 200:
                 yield f"data: [ERROR] LLM returned {resp.status_code}\n\n"
                 return
             async for line in resp.aiter_lines():
-                if line.startswith("data:"):
-                    chunk = line[5:].strip()
-                    if chunk == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        return
-                    yield f"data: {chunk}\n\n"
+                if not line.startswith("data:"):
+                    continue
+                chunk = line[5:].strip()
+                if chunk == "[DONE]":
+                    # Persist both turns to history now that the full reply is known
+                    full_reply = "".join(accumulated)
+                    session["messages"].append({"role": "user", "content": user_message})
+                    session["messages"].append({"role": "assistant", "content": full_reply})
+                    yield "data: [DONE]\n\n"
+                    return
+                # Extract the text delta and accumulate it
+                try:
+                    delta = json.loads(chunk)
+                    token = delta["choices"][0].get("delta", {}).get("content", "")
+                    if token:
+                        accumulated.append(token)
+                except Exception:
+                    pass
+                yield f"data: {chunk}\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -222,11 +241,8 @@ async def chat(req: ChatRequest):
 
     if req.stream:
         payload = _build_payload(session, req.message)
-        # Append user turn optimistically; assistant turn accumulated client-side
-        session["messages"].append({"role": "user", "content": req.message})
-
         return StreamingResponse(
-            _stream_llm(payload),
+            _stream_llm(payload, session, req.message),
             media_type="text/event-stream",
             headers={
                 "X-Session-Id": session_id,

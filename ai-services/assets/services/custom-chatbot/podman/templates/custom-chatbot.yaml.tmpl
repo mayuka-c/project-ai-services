@@ -5,7 +5,7 @@ metadata:
   labels:
     ai-services.io/template: "{{ .TemplateID }}"
   annotations:
-    ai-services.io/routes: "8080:custom-chatbot-{{ .InstanceSlug }}:ui"
+    ai-services.io/routes: "8080:custom-chatbot-{{ .InstanceSlug }}:ui,8080:custom-chatbot-{{ .InstanceSlug }}:api"
 spec:
   restartPolicy: always
   containers:

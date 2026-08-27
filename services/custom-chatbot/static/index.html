@@ -321,7 +321,7 @@
     inputEl.disabled = val;
   }
 
-  /* ── Send message ──────────────────────────────────────── */
+  /* ── Send message (streaming) ──────────────────────────── */
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text || busy) return;
@@ -331,11 +331,14 @@
     setBusy(true);
 
     addBubble('user', renderText(text));
+    showTyping();
 
-    const typingBub = showTyping();
+    // Create the bot bubble that will be filled token-by-token
+    let botBub = null;
+    let rawAccum = '';
 
     try {
-      const body = { message: text, stream: false };
+      const body = { message: text, stream: true };
       if (sessionId) body.session_id = sessionId;
 
       const res = await fetch('/chat', {
@@ -344,18 +347,72 @@
         body: JSON.stringify(body),
       });
 
-      removeTyping();
+      // Grab session-id from response header before reading body
+      const hdrSession = res.headers.get('X-Session-Id');
+      if (hdrSession) {
+        sessionId = hdrSession;
+        setLabel('Session: ' + shortId(sessionId));
+      }
 
       if (!res.ok) {
+        removeTyping();
         const err = await res.text();
         addBubble('bot', `<span style="color:var(--danger)">Error ${res.status}: ${escapeHtml(err)}</span>`);
         return;
       }
 
-      const data = await res.json();
-      sessionId = data.session_id;
-      setLabel('Session: ' + shortId(sessionId));
-      addBubble('bot', renderText(data.reply));
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process all complete SSE lines in the buffer
+        let newline;
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newline).trimEnd();
+          buffer = buffer.slice(newline + 1);
+
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+
+          if (payload === '[DONE]') break;
+          if (payload.startsWith('[ERROR]')) {
+            removeTyping();
+            addBubble('bot', `<span style="color:var(--danger)">${escapeHtml(payload)}</span>`);
+            return;
+          }
+
+          let token = '';
+          try {
+            const parsed = JSON.parse(payload);
+            token = parsed?.choices?.[0]?.delta?.content ?? '';
+          } catch (_) { continue; }
+
+          if (!token) continue;
+
+          // On the very first token: swap typing indicator for a real bubble
+          if (!botBub) {
+            removeTyping();
+            botBub = addBubble('bot', '');
+          }
+
+          rawAccum += token;
+          // Update bubble with rendered markdown as tokens arrive
+          botBub.innerHTML = renderText(rawAccum);
+          chatEl.scrollTop = chatEl.scrollHeight;
+        }
+      }
+
+      // Ensure typing indicator is removed even if no tokens arrived
+      removeTyping();
+      if (!botBub) {
+        addBubble('bot', '<em style="color:var(--muted)">No response.</em>');
+      }
 
     } catch (e) {
       removeTyping();

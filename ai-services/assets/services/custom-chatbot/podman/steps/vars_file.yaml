@@ -4,6 +4,11 @@ pods:
     default: ""
     alias: UI_PORT
 
+  - name: "{{ .AppName }}--custom-chatbot"
+    format: "index .Ports \"8080/tcp\" 0"
+    default: ""
+    alias: API_PORT
+
 containers:
   - name: "{{ .AppName }}--custom-chatbot-custom-chatbot"
     format: ".Status"
