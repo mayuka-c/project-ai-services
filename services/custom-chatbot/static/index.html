@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Custom Chatbot</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2d3e;
+      --input-bg:  #22253a;
+      --accent:    #5b8def;
+      --accent-h:  #4a7de0;
+      --user-bg:   #2a3a5e;
+      --bot-bg:    #1e2235;
+      --text:      #e2e6f0;
+      --muted:     #6e748a;
+      --code-bg:   #12141e;
+      --danger:    #e05b5b;
+      --radius:    12px;
+      --font:      -apple-system, "Segoe UI", system-ui, sans-serif;
+      --mono:      "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .avatar {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), #9b5de5);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; flex-shrink: 0;
+    }
+    .header-title { font-size: 15px; font-weight: 600; }
+    .header-sub   { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+    .btn-reset {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+      transition: border-color .15s, color .15s;
+    }
+    .btn-reset:hover { border-color: var(--danger); color: var(--danger); }
+
+    /* ── Chat area ───────────────────────────────────────── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      scroll-behavior: smooth;
+    }
+
+    .bubble-row {
+      display: flex;
+      gap: 10px;
+      max-width: 780px;
+      width: 100%;
+    }
+    .bubble-row.user  { align-self: flex-end; flex-direction: row-reverse; }
+    .bubble-row.bot   { align-self: flex-start; }
+
+    .bubble-avatar {
+      width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; font-size: 14px;
+    }
+    .bubble-row.user  .bubble-avatar { background: var(--user-bg); }
+    .bubble-row.bot   .bubble-avatar { background: linear-gradient(135deg, var(--accent), #9b5de5); }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      line-height: 1.65;
+      max-width: calc(100% - 44px);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble-row.user .bubble {
+      background: var(--user-bg);
+      border-bottom-right-radius: 3px;
+    }
+    .bubble-row.bot .bubble {
+      background: var(--bot-bg);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 3px;
+    }
+
+    /* inline code */
+    .bubble code {
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--code-bg);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    /* code blocks */
+    .bubble pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      margin-top: 8px;
+    }
+    .bubble pre code { background: none; padding: 0; font-size: 12px; line-height: 1.55; }
+
+    /* typing indicator */
+    .typing-dots span {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin: 0 2px;
+      animation: bounce 1.2s infinite ease-in-out;
+    }
+    .typing-dots span:nth-child(2) { animation-delay: .2s; }
+    .typing-dots span:nth-child(3) { animation-delay: .4s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: .4; }
+      40%            { transform: translateY(-5px); opacity: 1; }
+    }
+
+    /* ── Input area ──────────────────────────────────────── */
+    #input-area {
+      padding: 16px 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      max-width: 780px;
+      margin: 0 auto;
+    }
+    #msg-input {
+      flex: 1;
+      resize: none;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      padding: 12px 14px;
+      line-height: 1.5;
+      max-height: 140px;
+      overflow-y: auto;
+      transition: border-color .15s;
+      outline: none;
+    }
+    #msg-input:focus { border-color: var(--accent); }
+    #msg-input::placeholder { color: var(--muted); }
+
+    #send-btn {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: var(--accent);
+      border: none; cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s, transform .1s;
+    }
+    #send-btn:hover   { background: var(--accent-h); }
+    #send-btn:active  { transform: scale(.94); }
+    #send-btn:disabled { background: var(--border); cursor: default; }
+    #send-btn svg { width: 18px; height: 18px; fill: #fff; }
+
+    .hint {
+      text-align: center; font-size: 11px; color: var(--muted);
+      margin-top: 8px; max-width: 780px; margin-left: auto; margin-right: auto;
+    }
+
+    /* ── Empty state ─────────────────────────────────────── */
+    #empty-state {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 12px;
+      opacity: .5; pointer-events: none; user-select: none;
+    }
+    #empty-state .big-icon { font-size: 48px; }
+    #empty-state p { font-size: 14px; color: var(--muted); }
+
+    /* scrollbar */
+    #chat::-webkit-scrollbar { width: 6px; }
+    #chat::-webkit-scrollbar-track { background: transparent; }
+    #chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <div class="avatar">🤖</div>
+    <div>
+      <div class="header-title">Custom Chatbot</div>
+      <div class="header-sub" id="session-label">Starting session…</div>
+    </div>
+  </div>
+  <button class="btn-reset" id="reset-btn" title="Clear conversation">↺ Reset</button>
+</header>
+
+<div id="chat">
+  <div id="empty-state">
+    <div class="big-icon">💬</div>
+    <p>Send a message to start the conversation</p>
+  </div>
+</div>
+
+<div id="input-area">
+  <div class="input-row">
+    <textarea id="msg-input" rows="1" placeholder="Ask me anything…"></textarea>
+    <button id="send-btn" title="Send">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 21l21-9L2 3v7l15 2-15 2z"/>
+      </svg>
+    </button>
+  </div>
+  <div class="hint">Enter ↵ to send · Shift+Enter for new line</div>
+</div>
+
+<script>
+  /* ── State ─────────────────────────────────────────────── */
+  let sessionId = null;
+  let busy = false;
+
+  const chatEl    = document.getElementById('chat');
+  const inputEl   = document.getElementById('msg-input');
+  const sendBtn   = document.getElementById('send-btn');
+  const resetBtn  = document.getElementById('reset-btn');
+  const sessionLbl = document.getElementById('session-label');
+  const emptyState = document.getElementById('empty-state');
+
+  /* ── Helpers ───────────────────────────────────────────── */
+  function setLabel(text) { sessionLbl.textContent = text; }
+
+  function shortId(id) { return id ? id.slice(0, 8) + '…' : '–'; }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /** Very lightweight markdown-ish renderer (code blocks + inline code only) */
+  function renderText(raw) {
+    // fenced code blocks
+    raw = raw.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+      return `<pre><code class="lang-${escapeHtml(lang)}">${escapeHtml(code.trimEnd())}</code></pre>`;
+    });
+    // inline code
+    raw = raw.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHtml(c)}</code>`);
+    // paragraphs: split on double newline
+    const parts = raw.split(/\n{2,}/);
+    return parts.map(p => {
+      if (p.startsWith('<pre>')) return p;
+      return '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+  }
+
+  function addBubble(role, html, id) {
+    if (emptyState) emptyState.style.display = 'none';
+    const row = document.createElement('div');
+    row.className = `bubble-row ${role}`;
+    if (id) row.id = id;
+
+    const av = document.createElement('div');
+    av.className = 'bubble-avatar';
+    av.textContent = role === 'user' ? '🧑' : '🤖';
+
+    const bub = document.createElement('div');
+    bub.className = 'bubble';
+    bub.innerHTML = html;
+
+    row.appendChild(av);
+    row.appendChild(bub);
+    chatEl.appendChild(row);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return bub;
+  }
+
+  function showTyping() {
+    return addBubble('bot',
+      '<span class="typing-dots"><span></span><span></span><span></span></span>',
+      'typing-row'
+    );
+  }
+
+  function removeTyping() {
+    const el = document.getElementById('typing-row');
+    if (el) el.remove();
+  }
+
+  function setBusy(val) {
+    busy = val;
+    sendBtn.disabled = val;
+    inputEl.disabled = val;
+  }
+
+  /* ── Send message ──────────────────────────────────────── */
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || busy) return;
+
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    setBusy(true);
+
+    addBubble('user', renderText(text));
+
+    const typingBub = showTyping();
+
+    try {
+      const body = { message: text, stream: false };
+      if (sessionId) body.session_id = sessionId;
+
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      removeTyping();
+
+      if (!res.ok) {
+        const err = await res.text();
+        addBubble('bot', `<span style="color:var(--danger)">Error ${res.status}: ${escapeHtml(err)}</span>`);
+        return;
+      }
+
+      const data = await res.json();
+      sessionId = data.session_id;
+      setLabel('Session: ' + shortId(sessionId));
+      addBubble('bot', renderText(data.reply));
+
+    } catch (e) {
+      removeTyping();
+      addBubble('bot', `<span style="color:var(--danger)">Network error: ${escapeHtml(String(e))}</span>`);
+    } finally {
+      setBusy(false);
+      inputEl.focus();
+    }
+  }
+
+  /* ── Reset ─────────────────────────────────────────────── */
+  async function resetSession() {
+    if (!sessionId) return;
+    try {
+      await fetch(`/chat/history/${sessionId}`, { method: 'DELETE' });
+    } catch (_) { /* ignore */ }
+    sessionId = null;
+    chatEl.innerHTML = '';
+    chatEl.appendChild(emptyStateEl());
+    setLabel('Session reset — start a new conversation');
+  }
+
+  function emptyStateEl() {
+    const d = document.createElement('div');
+    d.id = 'empty-state';
+    d.innerHTML = '<div class="big-icon">💬</div><p>Send a message to start the conversation</p>';
+    d.style.cssText = 'flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;opacity:.5;pointer-events:none;user-select:none;';
+    return d;
+  }
+
+  /* ── Event listeners ───────────────────────────────────── */
+  sendBtn.addEventListener('click', sendMessage);
+  resetBtn.addEventListener('click', resetSession);
+
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // Auto-grow textarea
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+  });
+
+  // Init
+  setLabel('No active session');
+  inputEl.focus();
+</script>
+</body>
+</html>

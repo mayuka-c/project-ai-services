@@ -1,0 +1,8 @@
+containers:
+  - name: "custom-chatbot"
+    format: ".Status"
+    alias: UI_STATUS
+
+hosts:
+  - fetch: UI_ROUTE
+    type: route

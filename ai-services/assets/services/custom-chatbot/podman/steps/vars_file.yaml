@@ -1,0 +1,14 @@
+pods:
+  - name: "{{ .AppName }}--custom-chatbot"
+    format: "index .Ports \"8080/tcp\" 0"
+    default: ""
+    alias: UI_PORT
+
+containers:
+  - name: "{{ .AppName }}--custom-chatbot-custom-chatbot"
+    format: ".Status"
+    alias: UI_STATUS
+
+hosts:
+  - fetch: HOST_IP
+    type: ip
