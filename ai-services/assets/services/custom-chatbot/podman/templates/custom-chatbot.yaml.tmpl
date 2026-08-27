@@ -19,7 +19,7 @@ spec:
           {{- if .Values.llm.apiKey }}
           export LLM_API_KEY=$(cat /etc/secret/vllm-secret/apiKey)
           {{- end }}
-          exec uvicorn main:app \
+          exec /var/venv/bin/python -m uvicorn app:app \
             --host 0.0.0.0 \
             --port 8080 \
             --loop uvloop \
