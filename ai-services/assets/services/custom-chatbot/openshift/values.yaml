@@ -1,5 +1,5 @@
 chatbot:
-  image: icr.io/ai-services-cicd/custom-chatbot-service:v1.0.0
+  image: icr.io/ai-services-private/custom-chatbot-service:v1.0.0
   log_level: "INFO"
   max_tokens: "1024"
   system_prompt: ""
