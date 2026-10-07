@@ -171,12 +171,12 @@ func (h *ModelHandler) GetModel(c *gin.Context) {
 // UndeployModel godoc
 //
 //	@Summary		Undeploy a local model
-//	@Description	Initiates async teardown: deregisters the LiteLLM route, revokes the virtual key, and deletes the component row. Returns 202 immediately.
+//	@Description	Initiates async teardown: stops pod, deletes secrets/volumes, deregisters the LiteLLM route, revokes the virtual key, and deletes the component row. Returns 202 immediately.
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
 //	@Param			id			path		string						true	"Model component UUID"
-//	@Param			keep_data	query		bool						false	"Preserve host volume (stop pod but keep weights)"	default(false)
+//	@Param			keep_data	query		bool						false	"Preserve host volume (stop pod but keep model weights on disk)"	default(false)
 //	@Success		202			{object}	models.UndeployModelResponse	"Undeploy initiated"
 //	@Failure		400			{object}	ErrorResponse				"Invalid UUID format"
 //	@Failure		401			{object}	ErrorResponse				"Unauthorized"
@@ -204,7 +204,9 @@ func (h *ModelHandler) UndeployModel(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.modelSvc.UndeployModel(c.Request.Context(), id, userID)
+	keepData := c.Query("keep_data") == "true"
+
+	resp, err := h.modelSvc.UndeployModel(c.Request.Context(), id, userID, keepData)
 	if err != nil {
 		if valErr, ok := err.(*repository.ValidationError); ok {
 			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})

@@ -19,7 +19,8 @@ type ModelServiceInterface interface {
 	GetModel(ctx context.Context, id uuid.UUID) (*apimodels.GetModelResponse, error)
 	// UndeployModel initiates async teardown of a local model pod and its LiteLLM route.
 	// Returns 202 immediately after validating ownership and confirming no active applications.
-	UndeployModel(ctx context.Context, id uuid.UUID, userID string) (*apimodels.UndeployModelResponse, error)
+	// keepData=true preserves host volumes (model weights on disk); keepData=false deletes everything.
+	UndeployModel(ctx context.Context, id uuid.UUID, userID string, keepData bool) (*apimodels.UndeployModelResponse, error)
 	// GetModelKey returns the LiteLLM virtual key for a deployed local model.
 	GetModelKey(ctx context.Context, componentID uuid.UUID) (*apimodels.GetModelKeyResponse, error)
 }

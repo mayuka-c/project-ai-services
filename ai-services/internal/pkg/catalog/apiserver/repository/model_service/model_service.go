@@ -16,6 +16,7 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog"
 	apimodels "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/models"
 	podmandeployer "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/deployment/repository/podman"
+	podmandeletion "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/deletion/repository/podman"
 	deploymenttypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/deployment/types"
 	catalogconstants "github.com/project-ai-services/ai-services/internal/pkg/catalog/constants"
 	dbmodels "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/models"
@@ -765,7 +766,8 @@ func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*apimodels.G
 
 // UndeployModel initiates async undeployment of a managed local model.
 // It verifies ownership and that no active applications are using the model before proceeding.
-func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID string) (*apimodels.UndeployModelResponse, error) {
+// keepData=true preserves host volumes (model weights on disk); keepData=false deletes everything.
+func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID string, keepData bool) (*apimodels.UndeployModelResponse, error) {
 	c, err := s.componentRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch component: %w", err)
@@ -795,7 +797,7 @@ func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID s
 	}
 
 	// Kick off async teardown.
-	go s.undeployAsync(context.Background(), c)
+	go s.undeployAsync(context.Background(), c, keepData)
 
 	return &apimodels.UndeployModelResponse{
 		ID:      id.String(),
@@ -803,8 +805,11 @@ func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID s
 	}, nil
 }
 
-// undeployAsync drives the LiteLLM-deregister → key-revoke → DB-cleanup sequence.
-func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component) {
+// undeployAsync drives the full teardown sequence:
+//  1. Deregister the LiteLLM route
+//  2. Revoke and delete the virtual key
+//  3. Stop and delete the pod + secrets (+ volumes unless keepData=true) via PodmanDeletion
+func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component, keepData bool) {
 	log := func(msg string, args ...any) {
 		logger.InfofCtx(ctx, "[modelmanager] component %s: undeploy: "+msg, append([]any{c.ID}, args...)...)
 	}
@@ -834,11 +839,28 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 		}
 	}
 
-	// Step 4: delete component row (cascade deletes keys row if still present).
-	log("deleting component row")
-	if err := s.componentRepo.Delete(ctx, c.ID); err != nil {
-		logger.ErrorfCtx(ctx, "[modelmanager] component %s: failed to delete component row: %v", c.ID, err)
+	// Step 4: stop pod + delete secrets/volumes + delete component DB row.
+	// PodmanDeletion.deleteOrphanedComponents finds pods by the ai-services.io/template=<componentID>
+	// label stamped at deploy time, mirrors the application deletion path exactly.
+	log("deleting pod resources (keepData=%v)", keepData)
+
+	workerSelector := ""
+	if c.WorkerSelector != nil {
+		workerSelector = *c.WorkerSelector
 	}
+
+	rt, err := s.buildRuntime(workerSelector)
+	if err != nil {
+		logger.ErrorfCtx(ctx, "[modelmanager] component %s: failed to build runtime for deletion: %v", c.ID, err)
+		// Fall back to DB-only cleanup so the row is not left dangling.
+		if dbErr := s.componentRepo.Delete(ctx, c.ID); dbErr != nil {
+			logger.ErrorfCtx(ctx, "[modelmanager] component %s: failed to delete component row: %v", c.ID, dbErr)
+		}
+		return
+	}
+
+	podmandeletion.NewPodmanDeletion(rt, nil, nil, s.componentRepo, nil).
+		DeleteComponent(ctx, c.ID, keepData)
 }
 
 // GetModelKey returns the virtual key for a deployed local model.

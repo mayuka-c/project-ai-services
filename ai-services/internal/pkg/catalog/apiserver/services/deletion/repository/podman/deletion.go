@@ -201,6 +201,16 @@ func (s *PodmanDeletion) deletePods(ctx context.Context, pods []runtimeTypes.Pod
 	return podErrors
 }
 
+// DeleteComponent deletes a single managed model component: stops its pod, removes secrets,
+// optionally removes volumes (keepData=false), and deletes the DB row.
+// This is the exported entry-point used by ModelService.undeployAsync.
+func (s *PodmanDeletion) DeleteComponent(ctx context.Context, componentID uuid.UUID, keepData bool) {
+	errors := s.deleteOrphanedComponents(ctx, []uuid.UUID{componentID}, keepData)
+	for _, msg := range errors {
+		logger.ErrorfCtx(ctx, "[modelmanager] component %s: %s", componentID, msg)
+	}
+}
+
 // deleteOrphanedComponents deletes orphaned components (pods + DB records) and returns any error messages.
 //
 //nolint:cyclop // Function complexity is acceptable for deletion orchestration
