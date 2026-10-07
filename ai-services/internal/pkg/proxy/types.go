@@ -12,10 +12,10 @@ type ProxyManager interface {
 	// server (:8443) and returns the fully-qualified mTLS URL for the route.
 	RegisterMTLSRoute(ctx context.Context, route Route) (string, error)
 
-	// RegisterMTLSPathRoute registers a catch-all reverse-proxy route on the
-	// worker's mTLS ingress server (:8443). It matches "/*" and forwards directly
-	// to Upstream. The CP egress is the sole place that strips the namespace path
-	// prefix — the worker ingress just reverse-proxies whatever arrives.
+	// RegisterMTLSPathRoute registers a path-based route on the worker's mTLS
+	// ingress server (:8443). It matches on PathPrefix, strips it, and
+	// reverse-proxies to Upstream. Both CP egress and worker ingress use the same
+	// prefix so each model gets an isolated, non-overlapping route on :8443.
 	RegisterMTLSPathRoute(ctx context.Context, route Route) error
 
 	// RegisterEgressRoute registers an outbound mTLS egress route on the private mTLS egress server.

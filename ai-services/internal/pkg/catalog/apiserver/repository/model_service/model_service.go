@@ -322,27 +322,30 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 			return
 		}
 
-		// 1. Register mTLS ingress on worker Caddy :8443 — catch-all.
-		//    Matches "/*" and reverse-proxies directly to the vLLM pod.
-		//    No path rewriting here: the CP egress strips the namespace prefix
-		//    before the request arrives, so the worker already sees /v1/...
+		// Both sides use the same path prefix so each model gets an isolated,
+		// non-overlapping route — multiple models on the same worker never collide.
+		//
+		//   CP egress  :8080  match /worker/<w>/models/<r>/*  → strip → mTLS dial :8443
+		//   Worker ingress :8443  match /worker/<w>/models/<r>/*  → strip → pod :8000
+		//
+		// The prefix is stripped on both hops so vLLM always receives /v1/...
+		ingressPathPrefix := fmt.Sprintf("/worker/%s/models/%s", workerName, routeID)
+
+		// 1. Register mTLS ingress on worker Caddy :8443 — path-based.
 		remotePM := proxy.NewRemoteProxyManager(remoteRT.Sender)
 		mtlsRoute := proxy.Route{
-			ID:       routeID + "--mtls",
-			Upstream: podHost + ":8000",
-			Terminal: true,
+			ID:         routeID + "--mtls",
+			PathPrefix: ingressPathPrefix,
+			Upstream:   podHost + ":8000",
+			Terminal:   true,
 		}
-		log("registering mTLS catch-all ingress route %q on worker Caddy :8443", mtlsRoute.ID)
+		log("registering mTLS path ingress route %q on worker Caddy :8443 (prefix %s)", mtlsRoute.ID, ingressPathPrefix)
 		if err := remotePM.RegisterMTLSPathRoute(ctx, mtlsRoute); err != nil {
 			fail(fmt.Sprintf("worker mTLS ingress route registration failed: %v", err))
 			return
 		}
 
 		// 2. Register mTLS egress on CP Caddy :8080.
-		//    Path:   /worker/<workerName>/models/<routeID>/*
-		//    Rewrite: strip the prefix  → vLLM receives /v1/...
-		//    Dial:   <workerName>.<workerDomainSuffix>:8443  (mTLS)
-		ingressPathPrefix := fmt.Sprintf("/worker/%s/models/%s", workerName, routeID)
 		localPM, err := proxy.GetCaddyProxyManager()
 		if err != nil {
 			fail(fmt.Sprintf("CP Caddy proxy manager unavailable: %v", err))
@@ -364,10 +367,11 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 			return
 		}
 
-		// LiteLLM api_base: plain HTTP to local CP Caddy egress.
-		// CP Caddy strips the prefix, sets Host, upgrades to mTLS, and forwards.
-		// The /v1 suffix is appended because LiteLLM appends the endpoint path
-		// (/chat/completions etc.) to api_base directly.
+		// LiteLLM api_base: plain HTTP to local CP Caddy egress :8080.
+		// CP Caddy matches the prefix and forwards the full path (no strip) to
+		// worker Caddy :8443 over mTLS. Worker Caddy strips the prefix, leaving
+		// /v1/... for the vLLM pod. The /v1 here is included so LiteLLM appends
+		// /chat/completions etc. at the right point in the path.
 		caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
 		caddyHost := "ai-services--caddy"
 		if caddyAdminURL != "" {

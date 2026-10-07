@@ -143,13 +143,15 @@ func (c *caddyManager) registerRouteOnServer(ctx context.Context, route Route, s
 	return buildExternalURL(domain, port), nil
 }
 
-// RegisterMTLSPathRoute registers a catch-all reverse-proxy route on the worker's
-// private mTLS ingress server (:8443). It matches all paths ("/*") and forwards
-// directly to Upstream without any path rewriting — the CP egress has already
-// stripped the namespace prefix before the request arrives here.
+// RegisterMTLSPathRoute registers a path-based route on the worker's private mTLS
+// ingress server (:8443). It matches on PathPrefix, strips it, and reverse-proxies
+// to Upstream — giving each model an isolated, non-overlapping route on :8443.
 func (c *caddyManager) RegisterMTLSPathRoute(ctx context.Context, route Route) error {
 	if route.ID == "" {
 		return fmt.Errorf("cannot register mTLS path route: route ID is empty")
+	}
+	if route.PathPrefix == "" {
+		return fmt.Errorf("cannot register mTLS path route %s: path prefix is empty", route.ID)
 	}
 	if route.Upstream == "" {
 		return fmt.Errorf("cannot register mTLS path route %s: upstream is empty", route.ID)
@@ -159,10 +161,17 @@ func (c *caddyManager) RegisterMTLSPathRoute(ctx context.Context, route Route) e
 		return fmt.Errorf("caddy health check failed: %w", err)
 	}
 
+	prefixPattern := strings.TrimRight(route.PathPrefix, "/") + "/*"
+	stripPrefix := strings.TrimRight(route.PathPrefix, "/")
+
 	routeConfig := map[string]any{
 		"@id":   route.ID,
-		"match": []map[string]any{{"path": []string{"/*"}}},
+		"match": []map[string]any{{"path": []string{prefixPattern}}},
 		"handle": []map[string]any{
+			{
+				"handler":           "rewrite",
+				"strip_path_prefix": stripPrefix,
+			},
 			{
 				"handler":   "reverse_proxy",
 				"upstreams": []map[string]any{{"dial": route.Upstream}},
@@ -206,8 +215,11 @@ func (c *caddyManager) RegisterEgressRoute(ctx context.Context, route EgressRout
 		return fmt.Errorf("caddy health check failed: %w", err)
 	}
 
+	// CP egress: match the prefix but do NOT strip it.
+	// The full path (including the prefix) is forwarded to worker Caddy :8443,
+	// where the worker ingress route matches and strips it before hitting the pod.
+	// This keeps each model's route isolated on the worker — no catch-all needed.
 	prefixPattern := strings.TrimRight(route.PathPrefix, "/") + "/*"
-	stripPrefix := strings.TrimRight(route.PathPrefix, "/")
 
 	transport := map[string]any{
 		"protocol": "http",
@@ -227,22 +239,16 @@ func (c *caddyManager) RegisterEgressRoute(ctx context.Context, route EgressRout
 		transport["tls"] = tlsConfig
 	}
 
-	handlers := []map[string]any{
-		{
-			"handler":           "rewrite",
-			"strip_path_prefix": stripPrefix,
-		},
-		{
-			"handler":   "reverse_proxy",
-			"transport": transport,
-			"upstreams": []map[string]any{{"dial": route.DialUpstream}},
-		},
-	}
-
 	routeConfig := map[string]any{
 		"@id":   route.ID,
 		"match": []map[string]any{{"path": []string{prefixPattern}}},
-		"handle": handlers,
+		"handle": []map[string]any{
+			{
+				"handler":   "reverse_proxy",
+				"transport": transport,
+				"upstreams": []map[string]any{{"dial": route.DialUpstream}},
+			},
+		},
 	}
 
 	idURL, err := url.JoinPath(c.adminURL, "id", route.ID)

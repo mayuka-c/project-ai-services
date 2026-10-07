@@ -8,10 +8,14 @@
 	servers :8443 {
 		name private_mtls_ingress
 	}
+
+	servers :8080 {
+		name private_mtls_egress
+	}
 }
 
 :443 {
-	# 1. This initializes the routes array natively so it's never empty
+	# Seed the routes array so it is never empty at startup.
 	handle /internal/health {
 		# @id internal-health
 		respond "OK" 200
@@ -34,10 +38,13 @@
 	}
 }
 
-# Internal health check endpoint (Bypasses automatic HTTPS redirection)
+# Egress server: plain HTTP in, mTLS out to remote worker Caddy :8443.
+# Routes are registered dynamically via the Admin API by the catalog process.
 :8080 {
-	respond /health "OK" 200
+	handle /health {
+		# @id internal-egress-health
+		respond "OK" 200
+	}
 }
 
-# This file serves as the base configuration
 # Routes will be dynamically added via Caddy Admin API
