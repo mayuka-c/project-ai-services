@@ -9,7 +9,36 @@ import (
 	"fmt"
 	"math/big"
 	"time"
+
+	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
+	workerconstants "github.com/project-ai-services/ai-services/internal/pkg/worker/constants"
 )
+
+// workerCertDNSNames returns the DNS SANs to embed in a signed worker certificate.
+// The SANs must cover every hostname the CP Caddy egress will use as ServerName
+// when dialing the worker's :8443 ingress — Go TLS dropped CN matching in Go 1.15.
+//
+// For Podman: workerName.domainSuffix (the nip.io dial hostname)
+// For OpenShift: workerName (cluster-internal service hostname — TBD, extend when needed)
+func workerCertDNSNames(workerName string, runtimeType types.RuntimeType, meta map[string]string) []string {
+	switch runtimeType {
+	case types.RuntimeTypePodman:
+		if meta != nil {
+			if domainSuffix := meta[workerconstants.MetaKeyDomainSuffix]; domainSuffix != "" {
+				return []string{workerName + "." + domainSuffix}
+			}
+		}
+
+		return nil
+	case types.RuntimeTypeOpenShift:
+		// On OpenShift the worker is a pod in the cluster; CP Caddy dials the
+		// worker's service DNS name. Extend this when OpenShift cross-cluster
+		// mTLS is implemented.
+		return []string{workerName}
+	default:
+		return nil
+	}
+}
 
 // signWorkerCSR validates and signs a PEM-encoded CSR using the gateway CA,
 // returning the signed certificate and CA certificate as PEM bytes together with

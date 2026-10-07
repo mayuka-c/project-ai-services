@@ -161,20 +161,12 @@ func (g *Gateway) Register(ctx context.Context, req *workerpb.RegisterRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "CSR is required")
 	}
 
-	// Build the DNS SANs for the worker cert.
-	// The worker sends its DOMAIN_SUFFIX in metadata at join time so the CP can
-	// construct the dial hostname without knowing the worker's IP directly.
-	// CP Caddy dials workerName.domainSuffix:8443 and Go TLS verifies the
-	// ServerName against SANs — CN matching was dropped in Go 1.15.
-	var workerDNSSANs []string
-	if meta := req.GetMetadata(); meta != nil {
-		if domainSuffix := meta[workerconstants.MetaKeyDomainSuffix]; domainSuffix != "" {
-			workerDNSSANs = []string{workerName + "." + domainSuffix}
-		}
-	}
+	// Build DNS SANs for the worker cert — runtime-type-aware, mirrors serverCertDNSNames in pki.go.
+	runtimeType := types.RuntimeType(req.GetRuntimeType())
+	workerDNSSANs := workerCertDNSNames(workerName, runtimeType, req.GetMetadata())
 	if len(workerDNSSANs) == 0 {
-		logger.WarningfCtx(ctx, "WorkerGateway: worker=%s did not send %s — cert will have no DNS SANs; mTLS ServerName verification will fail",
-			workerName, workerconstants.MetaKeyDomainSuffix)
+		logger.WarningfCtx(ctx, "WorkerGateway: worker=%s (runtime=%s) produced no DNS SANs — mTLS ServerName verification will fail",
+			workerName, runtimeType)
 	}
 
 	tlsCertPEM, caCertPEM, notAfter, signErr := signWorkerCSR(csrPEM, workerName, workerDNSSANs, g.caCert, g.caKey)
