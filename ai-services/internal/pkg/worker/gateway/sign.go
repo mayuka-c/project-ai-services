@@ -17,7 +17,12 @@ import (
 //
 // workerName is embedded as the cert CN so the worker can recover its registered
 // name from the cert on reconnect without any additional state file.
-func signWorkerCSR(csrPEM []byte, workerName string, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) (certPEM, caCertPEM []byte, notAfter time.Time, err error) {
+//
+// dnsNames is the list of DNS SANs to embed in the signed cert. It must include
+// the hostname that CP Caddy will use as ServerName when dialing the worker's
+// :8443 ingress (e.g. "mayuka-lpar.10.20.186.51.nip.io"). Go's TLS stack
+// dropped CN-based hostname verification in Go 1.15 — SANs are required.
+func signWorkerCSR(csrPEM []byte, workerName string, dnsNames []string, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) (certPEM, caCertPEM []byte, notAfter time.Time, err error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return nil, nil, time.Time{}, fmt.Errorf("malformed CSR: not a valid PEM CERTIFICATE REQUEST block")
@@ -35,12 +40,13 @@ func signWorkerCSR(csrPEM []byte, workerName string, caCert *x509.Certificate, c
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: workerName, Organization: csr.Subject.Organization},
+		DNSNames:     dnsNames,
 		NotBefore:    time.Now(),
 		NotAfter:     notAfter,
 		// ClientAuth: worker presents this cert as a client when its Caddy egress
 		//             dials the CP Caddy :8443.
 		// ServerAuth: worker Caddy also serves this cert on its own :8443 ingress;
-		//             some TLS stacks reject a server cert lacking this EKU.
+		//             Go TLS verifies the ServerName against DNSNames, not CN.
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 	}
