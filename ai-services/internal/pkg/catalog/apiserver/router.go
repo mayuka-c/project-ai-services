@@ -20,7 +20,7 @@ import (
 )
 
 // CreateRouter sets up the Gin router with the necessary routes and authentication middleware for the API server.
-func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist repository.TokenBlacklist, appService repository.ApplicationServiceInterface, workerReg *registry.Registry, workerRepo dbrepo.WorkerRepository, workerGatewayPort int, datasourceSvc repository.DatasourceServiceInterface, bundleService bundlesvc.BundleServiceInterface, catalogProvider *catalog.CatalogProvider) *gin.Engine {
+func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist repository.TokenBlacklist, appService repository.ApplicationServiceInterface, workerReg *registry.Registry, workerRepo dbrepo.WorkerRepository, workerGatewayPort int, datasourceSvc repository.DatasourceServiceInterface, bundleService bundlesvc.BundleServiceInterface, catalogProvider *catalog.CatalogProvider, modelSvc repository.ModelServiceInterface) *gin.Engine {
 	if mode := os.Getenv("GIN_MODE"); mode != "" {
 		gin.SetMode(mode)
 	}
@@ -48,6 +48,7 @@ func CreateRouter(authSvc auth.Service, tokenMgr *auth.TokenManager, blacklist r
 	registerWorkerRoutes(v1, handlers.NewWorkerHandler(workerReg, workerRepo, vars.RuntimeFactory.GetRuntimeType(), workerGatewayPort), auth)
 	registerDatasourceRoutes(v1, datasourceH, auth)
 	registerBundleRoutes(v1, handlers.NewBundleHandler(bundleService), auth)
+	registerModelRoutes(v1, handlers.NewModelHandler(modelSvc), auth)
 
 	return router
 }
@@ -133,6 +134,25 @@ func registerWorkerRoutes(v1 *gin.RouterGroup, h *handlers.WorkerHandler, authMw
 		g.GET("", h.ListWorkers)
 		g.GET("/:id", h.GetWorker)
 		g.DELETE("/:id", h.DeleteWorker)
+	}
+}
+
+func registerModelRoutes(v1 *gin.RouterGroup, h *handlers.ModelHandler, authMw gin.HandlerFunc) {
+	// Model routes — POST/GET /api/v1/models, GET/DELETE /api/v1/models/:id
+	models := v1.Group("models")
+	models.Use(authMw)
+	{
+		models.POST("", h.DeployModel)
+		models.GET("", h.ListModels)
+		models.GET("/:id", h.GetModel)
+		models.DELETE("/:id", h.UndeployModel)
+	}
+
+	// Virtual key endpoint — GET /api/v1/keys/:component_id
+	keys := v1.Group("keys")
+	keys.Use(authMw)
+	{
+		keys.GET("/:component_id", h.GetModelKey)
 	}
 }
 

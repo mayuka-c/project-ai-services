@@ -8,6 +8,22 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 )
 
+// ModelServiceInterface defines the contract for model-deploy business logic.
+type ModelServiceInterface interface {
+	// DeployModel validates the request, inserts a Deploying component row, and kicks off
+	// async pod creation + LiteLLM route registration. Returns 202 immediately.
+	DeployModel(ctx context.Context, req apimodels.DeployModelRequest) (*apimodels.DeployModelResponse, error)
+	// ListModels returns a paginated list of managed local model components.
+	ListModels(ctx context.Context, req apimodels.ListModelsRequest) (*apimodels.ListModelsResponse, error)
+	// GetModel returns the full details of a managed local model by UUID.
+	GetModel(ctx context.Context, id uuid.UUID) (*apimodels.GetModelResponse, error)
+	// UndeployModel initiates async teardown of a local model pod and its LiteLLM route.
+	// Returns 202 immediately after validating ownership and confirming no active applications.
+	UndeployModel(ctx context.Context, id uuid.UUID, userID string) (*apimodels.UndeployModelResponse, error)
+	// GetModelKey returns the LiteLLM virtual key for a deployed local model.
+	GetModelKey(ctx context.Context, componentID uuid.UUID) (*apimodels.GetModelKeyResponse, error)
+}
+
 // DatasourceServiceInterface defines the contract for datasource connector business logic.
 type DatasourceServiceInterface interface {
 	// CreateDatasource validates the request, tests the connection, encrypts credentials,

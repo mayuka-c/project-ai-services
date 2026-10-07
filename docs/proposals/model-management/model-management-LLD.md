@@ -150,25 +150,25 @@ POST http://litellm:4000/model/new
 Authorization: Bearer <LITELLM_MASTER_KEY>
 
 {
-  "model_name": "granite-3.3-8b-instruct-vllm-spyre",
+  "model_name": "granite-3.3-8b-instruct--vllm-spyre",
   "litellm_params": {
-    "model": "ibm-granite/granite-3.3-8b-instruct",
-    "custom_llm_provider": "hosted_vllm",
-    "api_base": "http://my-rag-app--llm-granite:8000/v1",
-    "api_key": "none"
+    "model": "hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
+    "api_base": "http://my-rag-app--llm-granite:8000/v1"
   }
 }
 ```
+
+> **Note:** `model` uses the `hosted_vllm/<upstream-model-name>` prefix — LiteLLM infers the provider from the prefix. No separate `custom_llm_provider` field and no `api_key` are needed for local vLLM endpoints.
 
 **Deregister (on undeploy):**
 ```
 DELETE http://litellm:4000/model/delete
 Authorization: Bearer <LITELLM_MASTER_KEY>
 
-{ "id": "granite-3.3-8b-instruct-vllm-spyre" }
+{ "id": "granite-3.3-8b-instruct--vllm-spyre" }
 ```
 
-**Route ID convention:** The route ID registered in LiteLLM is `{model_name}-{provider}` — e.g. `granite-3.3-8b-instruct-vllm-spyre`. This is unique per deployed model and allows multiple models to coexist in the gateway simultaneously. Consumer services reference models by this ID.
+**Route ID convention:** The route ID registered in LiteLLM is `{model_name}--{provider}` (double-dash separator) — e.g. `granite-3.3-8b-instruct--vllm-spyre`. The double dash unambiguously separates the model name segment (which may itself contain single hyphens) from the provider segment. This is unique per deployed model and allows multiple models to coexist in the gateway simultaneously. Consumer services reference models by this ID.
 
 ### Virtual Key Provisioning
 
@@ -180,13 +180,13 @@ POST http://litellm:4000/key/generate
 Authorization: Bearer <LITELLM_MASTER_KEY>
 
 {
-  "key_name": "granite-3.3-8b-instruct-vllm-spyre",
-  "models": ["granite-3.3-8b-instruct-vllm-spyre"],
+  "key_name": "granite-3.3-8b-instruct--vllm-spyre",
+  "models": ["granite-3.3-8b-instruct--vllm-spyre"],
   "duration": null
 }
 ```
 
-`"key_name"` matches the route ID (`{model_name}-{provider}`). `"models"` scopes the key to that single route — attempts to call any other route with this key return `401`. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
+`"key_name"` matches the route ID (`{model_name}--{provider}`). `"models"` scopes the key to that single route — attempts to call any other route with this key return `401`. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
 
 **Storage — `keys` table in Catalog DB (local models only):**
 
@@ -195,7 +195,7 @@ The generated virtual key for a **local model** is inserted into the `keys` tabl
 ```sql
 -- After POST /key/generate succeeds for a local model:
 INSERT INTO keys (component_id, virtual_key, route_id)
-VALUES ('<components.id>', 'sk-...', 'granite-3.3-8b-instruct-vllm-spyre');
+VALUES ('<components.id>', 'sk-...', 'granite-3.3-8b-instruct--vllm-spyre');
 ```
 
 **Consumers of the virtual key:**
@@ -236,7 +236,7 @@ POST http://litellm:4000/chat/completions
 Authorization: Bearer <virtual-key>
 
 {
-  "model": "granite-3.3-8b-instruct-vllm-spyre",
+  "model": "granite-3.3-8b-instruct--vllm-spyre",
   "messages": [{ "role": "user", "content": "Hello" }]
 }
 ```
@@ -316,7 +316,7 @@ When deploying with `provider: watsonx`, no local pod is created. Credentials ar
 
 ```json
 {
-  "model_name": "granite-3-8b-instruct-watsonx",
+  "model_name": "granite-3-8b-instruct--watsonx",
   "litellm_params": {
     "model": "ibm/granite-3-8b-instruct",
     "custom_llm_provider": "watsonx",
@@ -560,7 +560,7 @@ CREATE TABLE keys (
     id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     component_id UUID        NOT NULL REFERENCES components (id) ON DELETE CASCADE,
     virtual_key  TEXT        NOT NULL,   -- 'sk-...' value — treated as a secret; never logged
-    route_id     VARCHAR(255) NOT NULL,  -- LiteLLM route ID, e.g. 'granite-3.3-8b-instruct-vllm-spyre'
+    route_id     VARCHAR(255) NOT NULL,  -- LiteLLM route ID, e.g. 'granite-3.3-8b-instruct--vllm-spyre'
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1373,7 +1373,7 @@ WHERE sd.dependency_id   = :id
 ```json
 {
   "component_id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f",
-  "route_id": "granite-3.3-8b-instruct-vllm-spyre",
+  "route_id": "granite-3.3-8b-instruct--vllm-spyre",
   "virtual_key": "sk-WJIFUdKHNK8Jv9Iqa8Bn9w"
 }
 ```
@@ -1485,10 +1485,10 @@ POST /api/v1/models
   4. Return 202 { id: components.id }
   5. [async] LocalRuntime.CreatePod → Render vllm-server.yaml.tmpl → podman kube play
   6. [async] Poll InspectPod until liveness probe passes
-  7. [async] POST /model/new to LiteLLM (model_name="granite-3.3-8b-instruct-vllm-spyre",
-                                        custom_llm_provider="hosted_vllm",
+  7. [async] POST /model/new to LiteLLM (model_name="granite-3.3-8b-instruct--vllm-spyre",
+                                        model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
                                         api_base="http://<pod-name>:8000/v1")
-             route_id = "{sanitised model_name}-{provider_id}"  (e.g. granite-3.3-8b-instruct-vllm-spyre)
+             route_id = "{sanitised model_name}--{provider_id}"  (e.g. granite-3.3-8b-instruct--vllm-spyre)
   8. [async] POST /key/generate → LiteLLM Admin API
              body: { "key_name": "<route_id>", "models": ["<route_id>"], "duration": null }
   9. [async] INSERT into keys (component_id, virtual_key, route_id)
@@ -1521,10 +1521,10 @@ POST /api/v1/models
        WorkerGateway sends COMMAND_TYPE_CREATE_POD over gRPC stream to Worker Daemon
        Daemon: podman kube play vllm-server.yaml → pod starts on worker LPAR
   6. [async] Poll InspectPod (via gRPC COMMAND_TYPE_INSPECT_POD) until liveness probe passes
-  7. [async] POST /model/new to LiteLLM (model_name="granite-3.3-8b-instruct-vllm-spyre",
-                                        custom_llm_provider="hosted_vllm",
+  7. [async] POST /model/new to LiteLLM (model_name="granite-3.3-8b-instruct--vllm-spyre",
+                                        model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
                                         api_base="https://worker-caddy-lpar-1:443/v1")
-             route_id = "{sanitised model_name}-{provider_id}"  (e.g. granite-3.3-8b-instruct-vllm-spyre)
+             route_id = "{sanitised model_name}--{provider_id}"  (e.g. granite-3.3-8b-instruct--vllm-spyre)
   8. [async] POST /key/generate → LiteLLM Admin API
              body: { "key_name": "<route_id>", "models": ["<route_id>"], "duration": null }
   9. [async] INSERT into keys (component_id, virtual_key, route_id)
@@ -1545,7 +1545,7 @@ POST /api/v1/connectors/models
   1. Validate request fields (name uniqueness, required params)
   2. No pod, no pre-flight resource check
   3. POST /model/new to LiteLLM Gateway (passing params.auth secret fields directly — never stored in Catalog DB)
-             route_id = "{sanitised params.model_name}-{provider_id}"  (e.g. ibm-granite-3-8b-instruct-watsonx)
+             route_id = "{sanitised params.model_name}--{provider_id}"  (e.g. ibm-granite-3-8b-instruct--watsonx)
   4. Run connectivity probe via LiteLLM GET /health?model=<route_id> → if fails, DELETE /model/delete and return 422
   5. INSERT into connectors (name='prod-watsonx', type=llm, provider=watsonx,
                              status='connected', created_by=<user>,
@@ -1628,9 +1628,11 @@ The API layer distinguishes user-created components from infrastructure componen
 
 `connector_status.connected` means the last connectivity probe reached the endpoint with valid credentials. UI status display: green = `connected`, red = `offline`. Local model status uses `component_status` (`Running` / `Deploying` / `Error`).
 
-### 8. LiteLLM Route ID = `{model_name}-{provider}`
+### 8. LiteLLM Route ID = `{model_name}--{provider}` (double-dash separator)
 
-Registering routes under a `{model_name}-{provider}` ID (e.g. `granite-3.3-8b-instruct-vllm-spyre`) uniquely identifies each deployed model in the gateway and allows multiple models to coexist simultaneously. The same ID is used for deregistration at delete time.
+Registering routes under a `{model_name}--{provider}` ID (e.g. `granite-3.3-8b-instruct--vllm-spyre`) uniquely identifies each deployed model in the gateway and allows multiple models to coexist simultaneously. The double-dash separator (`--`) is chosen deliberately: model names commonly contain single hyphens (e.g. `granite-3.3-8b-instruct`), so a single dash would be ambiguous when parsing the route ID back into its components. The same ID is used for deregistration at delete time.
+
+The `litellm_params.model` field uses the `hosted_vllm/<upstream-model-name>` prefix (e.g. `hosted_vllm/ibm-granite/granite-3.3-8b-instruct`). LiteLLM infers the provider from this prefix — no separate `custom_llm_provider` field is required, and no `api_key` is needed for local vLLM endpoints.
 
 ### 9. Pre-flight Returns All Violations, Not Just First
 
@@ -1991,7 +1993,7 @@ ai-services model litellm key granite-llm --runtime podman
 curl -s http://litellm:4000/chat/completions \
   -H "Authorization: Bearer $(ai-services model litellm key granite-llm --runtime podman)" \
   -H "Content-Type: application/json" \
-  -d '{"model":"granite-3.3-8b-instruct-vllm-spyre","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"granite-3.3-8b-instruct--vllm-spyre","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 > The key is fetched from `GET /api/v1/keys/:component_id` and is **never logged** by the CLI. Only local models have a key retrievable this way — connector keys are managed internally by LiteLLM.

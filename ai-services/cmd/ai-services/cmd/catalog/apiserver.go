@@ -137,6 +137,7 @@ func buildAPIServerOptions(ctx context.Context, pool *pgxpool.Pool, secretKey, a
 	compRepo := repository.NewComponentRepository(pool)
 	svcDepRepo := repository.NewServiceDependencyRepository(pool)
 	connectorRepo := repository.NewConnectorRepository(pool)
+	keyRepo := repository.NewKeyRepository(pool)
 
 	catalogProvider, err := catalog.NewCatalogProvider(bundleRepo)
 	if err != nil {
@@ -174,6 +175,7 @@ func buildAPIServerOptions(ctx context.Context, pool *pgxpool.Pool, secretKey, a
 		Blacklist:          blacklist,
 		ApplicationService: apirepository.NewApplicationService(appRepo, svcRepo, compRepo, svcDepRepo, catalogProvider, vars.RuntimeFactory.GetRuntimeType(), workerReg, connectorRepo, datasourceSvc),
 		DatasourceService:  datasourceSvc,
+		ModelService:       apirepository.NewModelService(compRepo, keyRepo, workerRepo, catalogProvider, vars.RuntimeFactory, workerReg),
 		BundleService:      bundlesvc.NewBundleService(bundleRepo, svcRepo, compRepo, catalogProvider),
 		CatalogProvider:    catalogProvider,
 		WorkerGatewayPort:  workerGatewayPort,

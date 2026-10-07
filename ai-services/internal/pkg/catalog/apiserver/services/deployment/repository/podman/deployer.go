@@ -428,7 +428,7 @@ func (d *PodmanDeployer) deployComponent(ctx context.Context, hash string, comp 
 
 	logger.InfofCtx(ctx, "Component %s loaded: %s\n", component.ID, component.Name)
 
-	if err := d.deployComponentPods(ctx, comp, metadata, tmpls, comp.CatalogPath, plan); err != nil {
+	if err := d.DeployComponentPods(ctx, comp, metadata, tmpls, comp.CatalogPath, plan); err != nil {
 		return fmt.Errorf("failed to deploy component pods: %w", err)
 	}
 
@@ -448,9 +448,9 @@ func (d *PodmanDeployer) deployComponent(ctx context.Context, hash string, comp 
 
 // loadComponentResources loads all necessary resources for a component.
 func (d *PodmanDeployer) loadComponentResources(comp *ComponentPlan) (*types.Component, *templates.AppMetadata, map[string]*template.Template, error) {
-	scopedProvider, err := d.catalogProvider.WithRuntime(d.runtimeType)
+	metadata, tmpls, _, err := d.LoadComponentResources(comp.ComponentType, comp.ProviderID)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to scope catalog provider for runtime %q: %w", d.runtimeType, err)
+		return nil, nil, nil, err
 	}
 
 	component, err := d.catalogProvider.LoadComponent(comp.ComponentType, comp.ProviderID)
@@ -458,17 +458,34 @@ func (d *PodmanDeployer) loadComponentResources(comp *ComponentPlan) (*types.Com
 		return nil, nil, nil, fmt.Errorf("failed to load component from catalog: %w", err)
 	}
 
-	metadata, err := scopedProvider.LoadComponentRuntimeMetadata(comp.ComponentType, comp.ProviderID)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to load component runtime metadata: %w", err)
-	}
-
-	tmpls, err := scopedProvider.LoadComponentTemplates(comp.ComponentType, comp.ProviderID)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to load component templates: %w", err)
-	}
-
 	return component, metadata, tmpls, nil
+}
+
+// LoadComponentResources loads the runtime metadata, pod templates, and catalog path for a
+// component provider. It is exported so that the model-manager service can call it directly
+// for standalone model deployments outside the full application deploy flow.
+// Returns (metadata, templates, catalogPath, error).
+func (d *PodmanDeployer) LoadComponentResources(componentType, providerID string) (*templates.AppMetadata, map[string]*template.Template, string, error) {
+	scopedProvider, err := d.catalogProvider.WithRuntime(d.runtimeType)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to scope catalog provider for runtime %q: %w", d.runtimeType, err)
+	}
+
+	metadata, err := scopedProvider.LoadComponentRuntimeMetadata(componentType, providerID)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to load component runtime metadata: %w", err)
+	}
+
+	tmpls, err := scopedProvider.LoadComponentTemplates(componentType, providerID)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to load component templates: %w", err)
+	}
+
+	// Catalog path convention mirrors what the planner builds:
+	// components/<type>/<providerID>/<runtimeType>
+	catalogPath := fmt.Sprintf("components/%s/%s/%s", componentType, providerID, d.runtimeType)
+
+	return metadata, tmpls, catalogPath, nil
 }
 
 // mergeComponentEndpoints merges component endpoints into services that use the component.
@@ -545,8 +562,10 @@ func (d *PodmanDeployer) updateServiceValuesWithEndpoint(
 	}
 }
 
-// deployComponentPods deploys all pods for a component and extracts endpoint information.
-func (d *PodmanDeployer) deployComponentPods(
+// DeployComponentPods deploys all pods for a component and extracts endpoint information.
+// It is exported so that the model-manager service can call it directly for standalone
+// model deployments that are not part of a full application deploy flow.
+func (d *PodmanDeployer) DeployComponentPods(
 	ctx context.Context,
 	comp *ComponentPlan,
 	metadata *templates.AppMetadata,

@@ -7,9 +7,9 @@ metadata:
     ai-services.io/template: "{{ .AppTemplateName }}"
     ai-services.io/component: "catalog"
     ai-services.io/version: "{{ .Version }}"
-    ai-services.io/secret: "catalog-secret,catalog-db-encryption-secret,catalog-mtls-encryption-secret,podman-auth-secret"
+    ai-services.io/secret: "catalog-secret,catalog-db-encryption-secret,catalog-mtls-encryption-secret,podman-auth-secret,litellm-secret"
     ai-services.io/secret-skip-cleanup: "true"
-    ai-services.io/volume: "podman-auth-secret,catalog-secret,catalog-db-encryption-secret,catalog-mtls-encryption-secret,catalog-bundles,catalog-caddy-cert-secret,gateway-pki"
+    ai-services.io/volume: "podman-auth-secret,catalog-secret,catalog-db-encryption-secret,catalog-mtls-encryption-secret,catalog-bundles,catalog-caddy-cert-secret,gateway-pki,litellm-secret"
     ai-services.io/volume-skip-cleanup: "true"
   annotations:
     run.oci.keep_original_groups: "1"
@@ -101,6 +101,7 @@ spec:
           export DB_PASSWORD=$(cat /etc/secret/catalog-db-secret/db-password)
           export DB_ENCRYPTION_KEY=$(cat /etc/secret/catalog-db-encryption-secret/db-encryption-key)
           export MTLS_ENCRYPTION_KEY=$(cat /etc/secret/catalog-mtls-encryption-secret/mtls-encryption-key)
+          export LITELLM_MASTER_KEY=$(cat /etc/secret/litellm-secret/master-key)
           exec /usr/bin/ai-services catalog apiserver --port=8080 --admin-username=admin --admin-password-hash=${ADMIN_PASSWORD} --runtime={{ .Values.backend.runtime }} --workergateway-port={{ .Values.backend.workerGatewayPort }}
       env:
         - name: GIN_MODE
@@ -131,6 +132,8 @@ spec:
           value: "{{ .Values.backend.workerGatewayPort }}"
         - name: LOCAL_WORKER
           value: "{{ .Values.backend.localWorker }}"
+        - name: LITELLM_URL
+          value: "http://{{ .AppName }}--litellm:4000"
       ports:
         - containerPort: 8080
           protocol: TCP
@@ -170,6 +173,9 @@ spec:
           readOnly: true
         - name: catalog-mtls-encryption-secret
           mountPath: /etc/secret/catalog-mtls-encryption-secret
+          readOnly: true
+        - name: litellm-secret
+          mountPath: /etc/secret/litellm-secret
           readOnly: true
         - name: catalog-bundles
           mountPath: /data/catalog-bundles
@@ -215,3 +221,6 @@ spec:
     - name: gateway-pki
       persistentVolumeClaim:
         claimName: gateway-pki
+    - name: litellm-secret
+      secret:
+        secretName: litellm-secret

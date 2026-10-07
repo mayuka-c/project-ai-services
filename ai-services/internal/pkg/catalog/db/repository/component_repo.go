@@ -32,6 +32,23 @@ type ComponentRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	// ExistsByTypeAndProvider reports whether any row in the components table has the given type and provider.
 	ExistsByTypeAndProvider(ctx context.Context, componentType, provider string) (bool, error)
+
+	// ListManaged returns all managed local-model components (created_by IS NOT NULL).
+	// When componentType is non-empty, results are filtered to that type.
+	// Results are paginated: offset = (page-1)*pageSize.
+	ListManaged(ctx context.Context, componentType string, offset, limit int) ([]models.Component, int, error)
+	// ExistsByTypeAndActiveStatus reports whether a managed component with the given type
+	// is already in Running or Deploying status.
+	ExistsByTypeAndActiveStatus(ctx context.Context, componentType string) (bool, error)
+	// GetApplicationsByComponentID returns the list of applications linked to a component
+	// via service_dependencies (dependency_type = 'component').
+	GetApplicationsByComponentID(ctx context.Context, componentID uuid.UUID) ([]ApplicationRef, error)
+}
+
+// ApplicationRef is a lightweight struct for applications linked to a component.
+type ApplicationRef struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
 }
 
 // componentRepo implements ComponentRepository using pgx.
@@ -47,8 +64,8 @@ func NewComponentRepository(pool *pgxpool.Pool) ComponentRepository {
 // Insert creates a new component in the database.
 func (r *componentRepo) Insert(ctx context.Context, component *models.Component) error {
 	query := `
-		INSERT INTO components (id, type, provider, status, message, endpoints, version, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO components (id, type, provider, status, message, endpoints, version, metadata, name, created_by, worker_selector)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING created_at, updated_at
 	`
 
@@ -87,6 +104,9 @@ func (r *componentRepo) Insert(ctx context.Context, component *models.Component)
 		endpointsJSON,
 		sql.NullString{String: component.Version, Valid: component.Version != ""},
 		metadataJSON,
+		component.Name,
+		component.CreatedBy,
+		component.WorkerSelector,
 	).Scan(&component.CreatedAt, &component.UpdatedAt)
 
 	if err != nil {
@@ -99,17 +119,21 @@ func (r *componentRepo) Insert(ctx context.Context, component *models.Component)
 // GetByID retrieves a component by ID.
 func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Component, error) {
 	query := `
-		SELECT id, type, provider, status, message, endpoints, version, metadata, created_at, updated_at
+		SELECT id, type, provider, status, message, endpoints, version, metadata,
+		       name, created_by, worker_selector, created_at, updated_at
 		FROM components
 		WHERE id = $1
 	`
 
 	var (
-		component     models.Component
-		endpointsJSON []byte
-		metadataJSON  []byte
-		version       sql.NullString
-		message       sql.NullString
+		component      models.Component
+		endpointsJSON  []byte
+		metadataJSON   []byte
+		version        sql.NullString
+		message        sql.NullString
+		name           sql.NullString
+		createdBy      sql.NullString
+		workerSelector sql.NullString
 	)
 
 	err := r.pool.QueryRow(ctx, query, id).Scan(
@@ -121,6 +145,9 @@ func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Comp
 		&endpointsJSON,
 		&version,
 		&metadataJSON,
+		&name,
+		&createdBy,
+		&workerSelector,
 		&component.CreatedAt,
 		&component.UpdatedAt,
 	)
@@ -133,28 +160,10 @@ func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Comp
 		return nil, fmt.Errorf("failed to get component: %w", err)
 	}
 
-	if version.Valid {
-		component.Version = version.String
-	}
+	applyNullableFields(&component, version, message, name, createdBy, workerSelector)
 
-	if message.Valid {
-		component.Message = message.String
-	}
-
-	if len(endpointsJSON) > 0 {
-		var endpoints []map[string]any
-		if err := json.Unmarshal(endpointsJSON, &endpoints); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal endpoints: %w", err)
-		}
-		component.Endpoints = endpoints
-	}
-
-	if len(metadataJSON) > 0 {
-		var metadata map[string]any
-		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
-		}
-		component.Metadata = metadata
+	if err := unmarshalJSONFields(&component, endpointsJSON, metadataJSON); err != nil {
+		return nil, err
 	}
 
 	return &component, nil
@@ -163,53 +172,78 @@ func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Comp
 // scanComponent scans a component row and unmarshals JSON fields.
 func scanComponent(rows pgx.Rows) (*models.Component, error) {
 	var (
-		component     models.Component
-		endpointsJSON []byte
-		metadataJSON  []byte
-		version       sql.NullString
-		message       sql.NullString
+		component      models.Component
+		endpointsJSON  []byte
+		metadataJSON   []byte
+		version        sql.NullString
+		message        sql.NullString
+		name           sql.NullString
+		createdBy      sql.NullString
+		workerSelector sql.NullString
 	)
 
-	err := rows.Scan(&component.ID, &component.Type, &component.Provider, &component.Status, &message,
-		&endpointsJSON, &version, &metadataJSON, &component.CreatedAt, &component.UpdatedAt)
+	err := rows.Scan(
+		&component.ID, &component.Type, &component.Provider, &component.Status, &message,
+		&endpointsJSON, &version, &metadataJSON,
+		&name, &createdBy, &workerSelector,
+		&component.CreatedAt, &component.UpdatedAt,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan component: %w", err)
 	}
 
-	if version.Valid {
-		component.Version = version.String
-	}
+	applyNullableFields(&component, version, message, name, createdBy, workerSelector)
 
-	if message.Valid {
-		component.Message = message.String
-	}
-
-	if len(endpointsJSON) > 0 {
-		var endpoints []map[string]any
-		if err := json.Unmarshal(endpointsJSON, &endpoints); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal endpoints: %w", err)
-		}
-		component.Endpoints = endpoints
-	}
-
-	if len(metadataJSON) > 0 {
-		var metadata map[string]any
-		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
-		}
-		component.Metadata = metadata
+	if err := unmarshalJSONFields(&component, endpointsJSON, metadataJSON); err != nil {
+		return nil, err
 	}
 
 	return &component, nil
 }
 
+// applyNullableFields copies nullable SQL values onto a component struct.
+func applyNullableFields(c *models.Component, version, message, name, createdBy, workerSelector sql.NullString) {
+	if version.Valid {
+		c.Version = version.String
+	}
+	if message.Valid {
+		c.Message = message.String
+	}
+	if name.Valid {
+		c.Name = &name.String
+	}
+	if createdBy.Valid {
+		c.CreatedBy = &createdBy.String
+	}
+	if workerSelector.Valid {
+		c.WorkerSelector = &workerSelector.String
+	}
+}
+
+// unmarshalJSONFields unmarshals the endpoints and metadata JSONB columns.
+func unmarshalJSONFields(c *models.Component, endpointsJSON, metadataJSON []byte) error {
+	if len(endpointsJSON) > 0 {
+		if err := json.Unmarshal(endpointsJSON, &c.Endpoints); err != nil {
+			return fmt.Errorf("failed to unmarshal endpoints: %w", err)
+		}
+	}
+	if len(metadataJSON) > 0 {
+		if err := json.Unmarshal(metadataJSON, &c.Metadata); err != nil {
+			return fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
+	}
+	return nil
+}
+
+const selectComponentColumns = `
+	SELECT id, type, provider, status, message, endpoints, version, metadata,
+	       name, created_by, worker_selector, created_at, updated_at
+	FROM components
+`
+
 // GetAll retrieves all components from the database.
 func (r *componentRepo) GetAll(ctx context.Context) ([]models.Component, error) {
-	query := `
-		SELECT id, type, provider, status, message, endpoints, version, metadata, created_at, updated_at
-		FROM components
-		ORDER BY created_at DESC
-	`
+	query := selectComponentColumns + `ORDER BY created_at DESC`
 
 	rows, err := r.pool.Query(ctx, query)
 	if err != nil {
@@ -217,30 +251,12 @@ func (r *componentRepo) GetAll(ctx context.Context) ([]models.Component, error) 
 	}
 	defer rows.Close()
 
-	var components []models.Component
-	for rows.Next() {
-		component, err := scanComponent(rows)
-		if err != nil {
-			return nil, err
-		}
-		components = append(components, *component)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating components: %w", err)
-	}
-
-	return components, nil
+	return collectComponents(rows)
 }
 
 // GetByType retrieves all components of a specific type.
 func (r *componentRepo) GetByType(ctx context.Context, componentType string) ([]models.Component, error) {
-	query := `
-		SELECT id, type, provider, status, message, endpoints, version, metadata, created_at, updated_at
-		FROM components
-		WHERE type = $1
-		ORDER BY created_at DESC
-	`
+	query := selectComponentColumns + `WHERE type = $1 ORDER BY created_at DESC`
 
 	rows, err := r.pool.Query(ctx, query, componentType)
 	if err != nil {
@@ -248,20 +264,100 @@ func (r *componentRepo) GetByType(ctx context.Context, componentType string) ([]
 	}
 	defer rows.Close()
 
-	var components []models.Component
+	return collectComponents(rows)
+}
+
+// ListManaged returns all managed components (created_by IS NOT NULL), optionally filtered
+// by type. Returns the total row count for pagination alongside the page slice.
+func (r *componentRepo) ListManaged(ctx context.Context, componentType string, offset, limit int) ([]models.Component, int, error) {
+	var (
+		rows    pgx.Rows
+		err     error
+		total   int
+		cntArgs []any
+		selArgs []any
+	)
+
+	cntQuery := `SELECT COUNT(*) FROM components WHERE created_by IS NOT NULL`
+	selQuery := selectComponentColumns + `WHERE created_by IS NOT NULL`
+
+	if componentType != "" {
+		cntQuery += ` AND type = $1`
+		selQuery += ` AND type = $1`
+		cntArgs = append(cntArgs, componentType)
+		selArgs = append(selArgs, componentType)
+	}
+
+	selQuery += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(selArgs)+1, len(selArgs)+2)
+	selArgs = append(selArgs, limit, offset)
+
+	if err = r.pool.QueryRow(ctx, cntQuery, cntArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count managed components: %w", err)
+	}
+
+	rows, err = r.pool.Query(ctx, selQuery, selArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query managed components: %w", err)
+	}
+	defer rows.Close()
+
+	components, err := collectComponents(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return components, total, nil
+}
+
+// ExistsByTypeAndActiveStatus reports whether a managed component with the given type is
+// already in Running or Deploying status.
+func (r *componentRepo) ExistsByTypeAndActiveStatus(ctx context.Context, componentType string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM components
+			WHERE type        = $1
+			  AND created_by IS NOT NULL
+			  AND status     IN ('Running', 'Deploying')
+		)`,
+		componentType,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check active component existence: %w", err)
+	}
+	return exists, nil
+}
+
+// GetApplicationsByComponentID returns the list of applications linked to a component
+// via service_dependencies (dependency_type = 'component').
+func (r *componentRepo) GetApplicationsByComponentID(ctx context.Context, componentID uuid.UUID) ([]ApplicationRef, error) {
+	query := `
+		SELECT DISTINCT a.id, a.name
+		FROM service_dependencies sd
+		JOIN services s ON s.id = sd.service_id
+		JOIN applications a ON a.id = s.app_id
+		WHERE sd.dependency_id   = $1
+		  AND sd.dependency_type = 'component'
+	`
+
+	rows, err := r.pool.Query(ctx, query, componentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query applications for component: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []ApplicationRef
 	for rows.Next() {
-		component, err := scanComponent(rows)
-		if err != nil {
-			return nil, err
+		var ref ApplicationRef
+		if err := rows.Scan(&ref.ID, &ref.Name); err != nil {
+			return nil, fmt.Errorf("failed to scan application ref: %w", err)
 		}
-		components = append(components, *component)
+		refs = append(refs, ref)
 	}
-
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating components: %w", err)
+		return nil, fmt.Errorf("error iterating application refs: %w", err)
 	}
-
-	return components, nil
+	return refs, nil
 }
 
 // Update updates a component in the database.
@@ -377,6 +473,22 @@ func (r *componentRepo) ExistsByTypeAndProvider(ctx context.Context, componentTy
 	}
 
 	return exists, nil
+}
+
+// collectComponents iterates rows and returns a slice of components.
+func collectComponents(rows pgx.Rows) ([]models.Component, error) {
+	var components []models.Component
+	for rows.Next() {
+		component, err := scanComponent(rows)
+		if err != nil {
+			return nil, err
+		}
+		components = append(components, *component)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating components: %w", err)
+	}
+	return components, nil
 }
 
 // Made with Bob
