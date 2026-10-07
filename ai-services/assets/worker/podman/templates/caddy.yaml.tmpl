@@ -14,7 +14,7 @@ metadata:
     ai-services.io/volume: "caddy-worker,caddy-cert-secret,worker-tls"
     ai-services.io/volume-skip-cleanup: "true"
   annotations:
-    ai-services.io/ports: "127.0.0.1:{{ .Values.caddy.adminPort }}:2019, {{ .Values.caddy.httpsPort }}:443, {{ default "8443" .Values.caddy.mtlsPort }}:8443, 127.0.0.1:{{ default "8080" .Values.caddy.egressPort }}:8080"
+    ai-services.io/ports: "127.0.0.1:{{ .Values.caddy.adminPort }}:2019, {{ .Values.caddy.httpsPort }}:443, 8443:8443, 127.0.0.1:8080:8080"
 spec:
   restartPolicy: always
   initContainers:
