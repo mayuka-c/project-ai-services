@@ -41,3 +41,18 @@ caddy:
   sslCertContent: ""
   # Populated from the private key content specified via '--ssl-key' during catalog configuration
   sslKeyContent: ""
+
+litellm:
+  image: "icr.io/ai-services-private/litellm-test:v1.89.3-1"
+  # @generate:password length=32, special=false
+  masterKey: ""
+  # @generate:hex length=64
+  saltKey: ""
+  port: "4000"
+  dbConnectionRetries: "20"
+  db:
+    image: icr.io/ai-services-cicd/postgres:18-6
+    database: "litellm"
+    user: "llmproxy"
+    # @generate:password length=32, special=false
+    password: ""
