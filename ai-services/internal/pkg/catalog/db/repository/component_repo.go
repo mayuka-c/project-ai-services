@@ -33,8 +33,8 @@ type ComponentRepository interface {
 	// ExistsByTypeAndProvider reports whether any row in the components table has the given type and provider.
 	ExistsByTypeAndProvider(ctx context.Context, componentType, provider string) (bool, error)
 
-	// ListManaged returns all managed local-model components (created_by IS NOT NULL).
-	// When componentType is non-empty, results are filtered to that type.
+	// ListManaged returns all managed model components (created_by IS NOT NULL, type IN llm/embedding/reranker).
+	// When componentType is non-empty, results are further filtered to that single type.
 	// Results are paginated: offset = (page-1)*pageSize.
 	ListManaged(ctx context.Context, componentType string, offset, limit int) ([]models.Component, int, error)
 	// ExistsByTypeAndActiveStatus reports whether a managed component with the given type
@@ -267,8 +267,13 @@ func (r *componentRepo) GetByType(ctx context.Context, componentType string) ([]
 	return collectComponents(rows)
 }
 
-// ListManaged returns all managed components (created_by IS NOT NULL), optionally filtered
-// by type. Returns the total row count for pagination alongside the page slice.
+// managedModelTypes is the fixed set of component types exposed by the model management API.
+// Shared infrastructure types (e.g. vector_db) live in the same table but must not appear
+// in model list/get responses.
+var managedModelTypes = []string{"llm", "embedding", "reranker"}
+
+// ListManaged returns all managed model components (created_by IS NOT NULL, type IN llm/embedding/reranker),
+// optionally filtered to a single type. Returns the total row count for pagination alongside the page slice.
 func (r *componentRepo) ListManaged(ctx context.Context, componentType string, offset, limit int) ([]models.Component, int, error) {
 	var (
 		rows    pgx.Rows
@@ -278,12 +283,16 @@ func (r *componentRepo) ListManaged(ctx context.Context, componentType string, o
 		selArgs []any
 	)
 
-	cntQuery := `SELECT COUNT(*) FROM components WHERE created_by IS NOT NULL`
-	selQuery := selectComponentColumns + `WHERE created_by IS NOT NULL`
+	// Always scope to model types — prevents vector_db and other infrastructure
+	// components from leaking into model management responses.
+	cntQuery := `SELECT COUNT(*) FROM components WHERE created_by IS NOT NULL AND type = ANY($1)`
+	selQuery := selectComponentColumns + `WHERE created_by IS NOT NULL AND type = ANY($1)`
+	cntArgs = append(cntArgs, managedModelTypes)
+	selArgs = append(selArgs, managedModelTypes)
 
 	if componentType != "" {
-		cntQuery += ` AND type = $1`
-		selQuery += ` AND type = $1`
+		cntQuery += ` AND type = $2`
+		selQuery += ` AND type = $2`
 		cntArgs = append(cntArgs, componentType)
 		selArgs = append(selArgs, componentType)
 	}
