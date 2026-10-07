@@ -676,7 +676,7 @@ func (s *ModelService) ListModels(ctx context.Context, req apimodels.ListModelsR
 
 	items := make([]apimodels.ModelListItem, 0, len(components))
 	for _, c := range components {
-		items = append(items, s.toModelListItem(c))
+		items = append(items, s.toModelListItem(ctx, c))
 	}
 
 	totalPages := int(math.Ceil(float64(total) / float64(req.PageSize)))
@@ -714,17 +714,7 @@ func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*apimodels.G
 	}
 
 	// Resolve worker info.
-	var workerInfo *apimodels.ModelWorkerInfo
-	if c.WorkerSelector != nil && *c.WorkerSelector != "" {
-		worker, wErr := s.workerRepo.GetByName(ctx, *c.WorkerSelector)
-		if wErr == nil && worker != nil {
-			workerInfo = &apimodels.ModelWorkerInfo{
-				ID:          worker.Name,
-				RuntimeType: string(worker.RuntimeType),
-				Status:      string(worker.Status),
-			}
-		}
-	}
+	workerInfo := s.resolveWorkerInfo(ctx, c.WorkerSelector)
 
 	// Collect linked applications.
 	appRefs, err := s.componentRepo.GetApplicationsByComponentID(ctx, id)
@@ -876,16 +866,30 @@ func (s *ModelService) GetModelKey(ctx context.Context, componentID uuid.UUID) (
 	}, nil
 }
 
+// resolveWorkerInfo returns the worker info for a component's WorkerSelector.
+// When WorkerSelector is nil/empty (control-plane deploy) it returns a synthetic
+// "Local" entry. For remote workers it looks up the full record from the workers table.
+func (s *ModelService) resolveWorkerInfo(ctx context.Context, workerSelector *string) *apimodels.ModelWorkerInfo {
+	if workerSelector == nil || *workerSelector == "" {
+		return &apimodels.ModelWorkerInfo{ID: workerconstants.LocalWorkerName}
+	}
+	worker, err := s.workerRepo.GetByName(ctx, *workerSelector)
+	if err != nil || worker == nil {
+		// Worker not found in DB — return the selector ID as-is.
+		return &apimodels.ModelWorkerInfo{ID: *workerSelector}
+	}
+	return &apimodels.ModelWorkerInfo{
+		ID:          worker.Name,
+		RuntimeType: string(worker.RuntimeType),
+		Status:      string(worker.Status),
+	}
+}
+
 // toModelListItem converts a DB component to a ModelListItem.
-func (s *ModelService) toModelListItem(c dbmodels.Component) apimodels.ModelListItem {
+func (s *ModelService) toModelListItem(ctx context.Context, c dbmodels.Component) apimodels.ModelListItem {
 	providerName := c.Provider
 	if catalogComp, err := s.catalogProvider.LoadComponent(c.Type, c.Provider); err == nil {
 		providerName = catalogComp.Name
-	}
-
-	var workerInfo *apimodels.ModelWorkerInfo
-	if c.WorkerSelector != nil && *c.WorkerSelector != "" {
-		workerInfo = &apimodels.ModelWorkerInfo{ID: *c.WorkerSelector}
 	}
 
 	name := ""
@@ -901,7 +905,7 @@ func (s *ModelService) toModelListItem(c dbmodels.Component) apimodels.ModelList
 			ID:   c.Provider,
 			Name: providerName,
 		},
-		Worker:    workerInfo,
+		Worker:    s.resolveWorkerInfo(ctx, c.WorkerSelector),
 		Metadata:  c.Metadata,
 		Status:    string(c.Status),
 		CreatedAt: c.CreatedAt,

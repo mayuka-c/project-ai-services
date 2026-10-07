@@ -202,7 +202,7 @@ VALUES ('<components.id>', 'sk-...', 'granite-3.3-8b-instruct--vllm-spyre');
 
 | Consumer | How it receives the key |
 |---|---|
-| **Internal consumer services** (chatbot, digitize, similarity, summarize) | Service pod calls `GET /api/v1/keys/:component_id` at startup via its worker Caddy → control-plane Caddy → Catalog API, and sets the returned value as `OPENAI_API_KEY` / `LITELLM_API_KEY` — no Podman secret mount required |
+| **Internal consumer services** (chatbot, digitize, similarity, summarize) | Service pod calls `GET /api/v1/models/keys?instance_id=<component_id>` at startup via its worker Caddy → control-plane Caddy → Catalog API, and sets the returned value as `OPENAI_API_KEY` / `LITELLM_API_KEY` — no Podman secret mount required |
 | **External callers** (developers, CI pipelines) | Retrieved via `ai-services component litellm key [model-name] --runtime podman` CLI command (see §14) — never printed to logs |
 
 **Key revocation at undeploy:**
@@ -241,7 +241,7 @@ Authorization: Bearer <virtual-key>
 }
 ```
 
-Each consumer service fetches only the key(s) for the model(s) it uses via `GET /api/v1/keys/:component_id`. A service using granite does not fetch the key for an embedding model — principle of least privilege. The virtual key is the **only credential** needed for model access, regardless of whether the backing provider is a local vLLM pod or an external WatsonX connector.
+Each consumer service fetches only the key(s) for the model(s) it uses via `GET /api/v1/models/keys?instance_id=<component_id>`. A service using granite does not fetch the key for an embedding model — principle of least privilege. The virtual key is the **only credential** needed for model access, regardless of whether the backing provider is a local vLLM pod or an external WatsonX connector.
 
 ### Probe Check
 
@@ -337,7 +337,7 @@ A **Model** is an inference backend for a specific role (`llm`, `embedding`, `re
 
 | Kind | Storage table | Example providers | Pod? | Credentials location |
 |---|---|---|---|---|
-| Local | `components` | `vllm-cpu`, `vllm-spyre` | ✅ Yes | `keys` table (virtual key served via `GET /api/v1/keys`) |
+| Local | `components` | `vllm-cpu`, `vllm-spyre` | ✅ Yes | `keys` table (virtual key served via `GET /api/v1/models/keys`) |
 | Remote (connector) | `connectors` | `watsonx`, `openai-compatible` | ❌ No | LiteLLM Gateway DB |
 
 Both kinds are registered as a route in the **LiteLLM Gateway** pod. Consumer services only ever talk to the LiteLLM gateway — they have no knowledge of which table is behind it.
@@ -403,7 +403,7 @@ ALTER TABLE components
 | `created_by` | VARCHAR(100) | Yes | User who triggered `POST /api/v1/models`. NULL for components created by the application pipeline |
 | `worker_selector` | VARCHAR(100) | Yes | Target Worker LPAR ID (e.g. `"lpar-1"`). NULL when the model is deployed on the control-plane Podman socket. References `workers.worker_id` but is not a hard FK to allow row deletion without cascading |
 
-> **No credentials column.** Local virtual keys (the `sk-...` bearer tokens used to call LiteLLM) are stored in the `keys` table and served via `GET /api/v1/keys/:component_id`. They are never stored in a Podman secret or in the `components` row itself.
+> **No credentials column.** Local virtual keys (the `sk-...` bearer tokens used to call LiteLLM) are stored in the `keys` table and served via `GET /api/v1/models/keys?instance_id=<component_id>`. They are never stored in a Podman secret or in the `components` row itself.
 
 #### Extended `component_status` enum
 
@@ -567,7 +567,7 @@ CREATE TABLE keys (
 CREATE INDEX idx_keys_component_id ON keys (component_id);
 ```
 
-> The `virtual_key` column stores the raw `sk-...` bearer token. Access is scoped to the Catalog API process — it is never returned in list responses or logs. Consumer services retrieve it only via the authenticated `GET /api/v1/keys/:component_id` endpoint.
+> The `virtual_key` column stores the raw `sk-...` bearer token. Access is scoped to the Catalog API process — it is never returned in list responses or logs. Consumer services retrieve it only via the authenticated `GET /api/v1/models/keys?instance_id=<component_id>` endpoint.
 
 ---
 
@@ -681,7 +681,7 @@ erDiagram
     }
 ```
 
-> **No credentials column.** `name` and `worker_selector` are dedicated top-level columns on `components`. Local credentials (virtual keys) are stored in the `keys` table and served via `GET /api/v1/keys`. Remote credentials are passed directly to LiteLLM and never touch the Catalog DB.
+> **No credentials column.** `name` and `worker_selector` are dedicated top-level columns on `components`. Local credentials (virtual keys) are stored in the `keys` table and served via `GET /api/v1/models/keys`. Remote credentials are passed directly to LiteLLM and never touch the Catalog DB.
 
 ---
 
@@ -734,7 +734,7 @@ The same provider schema endpoints used by datasource connectors are reused for 
 
 | Method | Path | Description | Response |
 |---|---|---|---|
-| `GET` | `/api/v1/keys/:component_id` | Retrieve the LiteLLM virtual key for a deployed local model (used by consumer service pods at startup) | `200 OK` |
+| `GET` | `/api/v1/models/keys?instance_id=<component_id>` | Retrieve the LiteLLM virtual key for a deployed local model (used by consumer service pods at startup) | `200 OK` |
 
 ### 6.6 Extensions to Existing Endpoints
 
@@ -1358,15 +1358,15 @@ WHERE sd.dependency_id   = :id
 
 ### 7.11 Get Virtual Key
 
-**Endpoint:** `GET /api/v1/keys/:component_id`
+**Endpoint:** `GET /api/v1/models/keys`
 
 **Description:** Returns the LiteLLM virtual key (`sk-...`) for the specified local model component. This endpoint is called by **consumer service pods at startup** to obtain the bearer token they need to call LiteLLM — they do not mount Podman secrets. The key is scoped exclusively to the model's LiteLLM route.
 
-**Path Parameters:**
+**Query Parameters:**
 
 | Parameter | Description |
 |---|---|
-| `:component_id` | UUID of the local model `components` row |
+| `instance_id` | UUID of the local model `components` row |
 
 **Response `200 OK`:**
 
@@ -1604,7 +1604,7 @@ Local pod models live in `components`; remote model connectors live in the share
 
 ### 2. Credentials Never Enter the Catalog DB
 
-Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/keys/:component_id` to consumer service pods at startup. Remote credentials are passed directly to the LiteLLM Gateway at route-registration time and never stored in `connectors.metadata` — only `auth.type` is persisted. At delete time, local removes the `keys` row and calls `DELETE /model/delete` on LiteLLM; remote also calls `DELETE /model/delete`.
+Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/models/keys?instance_id=<component_id>` to consumer service pods at startup. Remote credentials are passed directly to the LiteLLM Gateway at route-registration time and never stored in `connectors.metadata` — only `auth.type` is persisted. At delete time, local removes the `keys` row and calls `DELETE /model/delete` on LiteLLM; remote also calls `DELETE /model/delete`.
 
 ### 3. Table Is the Only Branch Point
 
@@ -1979,7 +1979,7 @@ ai-services connector delete prod-watsonx -y --runtime podman
 
 #### Retrieve the virtual key for a model
 
-Fetches the per-model LiteLLM virtual key from `GET /api/v1/keys/:component_id`. Use this to authenticate calls to `POST /chat/completions`, `POST /embeddings`, and other inference endpoints from external clients or scripts. The model name argument must match the deployed model name (as shown by `ai-services model list`).
+Fetches the per-model LiteLLM virtual key from `GET /api/v1/models/keys?instance_id=<component_id>`. Use this to authenticate calls to `POST /chat/completions`, `POST /embeddings`, and other inference endpoints from external clients or scripts. The model name argument must match the deployed model name (as shown by `ai-services model list`).
 
 ```
 ai-services model litellm key [model-name] --runtime podman
@@ -1996,7 +1996,7 @@ curl -s http://litellm:4000/chat/completions \
   -d '{"model":"granite-3.3-8b-instruct--vllm-spyre","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-> The key is fetched from `GET /api/v1/keys/:component_id` and is **never logged** by the CLI. Only local models have a key retrievable this way — connector keys are managed internally by LiteLLM.
+> The key is fetched from `GET /api/v1/models/keys?instance_id=<component_id>` and is **never logged** by the CLI. Only local models have a key retrievable this way — connector keys are managed internally by LiteLLM.
 
 ---
 
@@ -2013,4 +2013,4 @@ curl -s http://litellm:4000/chat/completions \
 | `ai-services connector info [name]` | `GET /api/v1/connectors/models/:id` | Get full details of a connector |
 | `ai-services connector update [name]` | `PUT /api/v1/connectors/models/:id` | Update connector credentials |
 | `ai-services connector delete [name]` | `DELETE /api/v1/connectors/models/:id` | Delete connector, deregister LiteLLM route |
-| `ai-services model litellm key [model-name]` | `GET /api/v1/keys/:component_id` | Print the per-model LiteLLM virtual key (local models only) |
+| `ai-services model litellm key [model-name]` | `GET /api/v1/models/keys?instance_id=<component_id>` | Print the per-model LiteLLM virtual key (local models only) |

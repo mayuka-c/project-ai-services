@@ -139,20 +139,15 @@ func registerWorkerRoutes(v1 *gin.RouterGroup, h *handlers.WorkerHandler, authMw
 
 func registerModelRoutes(v1 *gin.RouterGroup, h *handlers.ModelHandler, authMw gin.HandlerFunc) {
 	// Model routes — POST/GET /api/v1/models, GET/DELETE /api/v1/models/:id
+	// GET /api/v1/models/keys?instance_id=<uuid>
 	models := v1.Group("models")
 	models.Use(authMw)
 	{
 		models.POST("", h.DeployModel)
 		models.GET("", h.ListModels)
+		models.GET("/keys", h.GetModelKey)
 		models.GET("/:id", h.GetModel)
 		models.DELETE("/:id", h.UndeployModel)
-	}
-
-	// Virtual key endpoint — GET /api/v1/keys/:component_id
-	keys := v1.Group("keys")
-	keys.Use(authMw)
-	{
-		keys.GET("/:component_id", h.GetModelKey)
 	}
 }
 

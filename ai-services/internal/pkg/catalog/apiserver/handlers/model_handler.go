@@ -230,18 +230,27 @@ func (h *ModelHandler) UndeployModel(c *gin.Context) {
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			component_id	path		string						true	"Model component UUID"
-//	@Success		200				{object}	models.GetModelKeyResponse	"Virtual key"
-//	@Failure		400				{object}	ErrorResponse				"Invalid UUID format"
-//	@Failure		401				{object}	ErrorResponse				"Unauthorized"
-//	@Failure		404				{object}	ErrorResponse				"Model or key not found"
-//	@Failure		500				{object}	ErrorResponse				"Internal Server Error"
-//	@Router			/keys/{component_id} [get]
+//	@Param			instance_id	query		string						true	"Model component UUID"
+//	@Success		200			{object}	models.GetModelKeyResponse	"Virtual key"
+//	@Failure		400			{object}	ErrorResponse				"Missing or invalid instance_id"
+//	@Failure		401			{object}	ErrorResponse				"Unauthorized"
+//	@Failure		404			{object}	ErrorResponse				"Model or key not found"
+//	@Failure		500			{object}	ErrorResponse				"Internal Server Error"
+//	@Router			/models/keys [get]
 func (h *ModelHandler) GetModelKey(c *gin.Context) {
-	componentID, err := uuid.Parse(c.Param("component_id"))
+	raw := c.Query("instance_id")
+	if raw == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "instance_id query parameter is required",
+		})
+
+		return
+	}
+
+	componentID, err := uuid.Parse(raw)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("Invalid component ID format: %v", err),
+			Error: fmt.Sprintf("Invalid instance_id format: %v", err),
 		})
 
 		return
