@@ -153,7 +153,8 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 		return nil, err
 	}
 
-	// 4. Validate worker_selector if provided.
+	// 4. Validate worker_selector if provided, and capture its UUID for storage.
+	var workerID *uuid.UUID
 	if req.WorkerSelector != "" {
 		worker, err := s.workerRepo.GetByName(ctx, req.WorkerSelector)
 		if err != nil {
@@ -170,6 +171,16 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 				Code:    http.StatusUnprocessableEntity,
 				Message: fmt.Sprintf("worker %q is not ready (status: %s)", req.WorkerSelector, worker.Status),
 			}
+		}
+		workerID = &worker.ID
+	} else {
+		// Control-plane deploy: look up the Local worker and store its UUID.
+		localWorker, err := s.workerRepo.GetByName(ctx, workerconstants.LocalWorkerName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up local worker: %w", err)
+		}
+		if localWorker != nil {
+			workerID = &localWorker.ID
 		}
 	}
 
@@ -189,20 +200,15 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 	modelName, _ := req.Params["model"].(string)
 	name := req.Name
 	createdBy := req.CreatedBy
-	var workerSelector *string
-	if req.WorkerSelector != "" {
-		ws := req.WorkerSelector
-		workerSelector = &ws
-	}
 
 	component := &dbmodels.Component{
-		Type:           req.Type,
-		Provider:       req.ProviderID,
-		Status:         dbmodels.ComponentStatusDeploying,
-		Metadata:       map[string]any{"model": modelName},
-		Name:           &name,
-		CreatedBy:      &createdBy,
-		WorkerSelector: workerSelector,
+		Type:      req.Type,
+		Provider:  req.ProviderID,
+		Status:    dbmodels.ComponentStatusDeploying,
+		Metadata:  map[string]any{"model": modelName},
+		Name:      &name,
+		CreatedBy: &createdBy,
+		WorkerID:  workerID,
 	}
 
 	if err := s.componentRepo.Insert(ctx, component); err != nil {
@@ -210,7 +216,7 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 	}
 
 	// 7. Kick off async deployment.
-	go s.deployAsync(context.Background(), component.ID, req, comp)
+	go s.deployAsync(context.Background(), component.ID, workerID, req, comp)
 
 	return &apimodels.DeployModelResponse{ID: component.ID}, nil
 }
@@ -233,7 +239,7 @@ func validateModelParams(params map[string]any) error {
 //  4. Register the LiteLLM route once the pod is reachable
 //  5. Generate and persist a per-model virtual key
 //  6. Mark the component Running
-func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, req apimodels.DeployModelRequest, _ *catalogtypes.Component) {
+func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, workerID *uuid.UUID, req apimodels.DeployModelRequest, _ *catalogtypes.Component) {
 	log := func(msg string, args ...any) {
 		logger.InfofCtx(ctx, "[modelmanager] component %s: "+msg, append([]any{componentID}, args...)...)
 	}
@@ -246,7 +252,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 	routeID := buildRouteID(modelName, req.ProviderID)
 
 	// Build the runtime once — reused for image pull, model download, and pod creation.
-	rt, err := s.buildRuntime(req.WorkerSelector)
+	rt, err := s.buildRuntime(ctx, workerID)
 	if err != nil {
 		fail(fmt.Sprintf("failed to build runtime: %v", err))
 		return
@@ -271,7 +277,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 	// ── Step 3: deploy the model pod ──────────────────────────────────────────
 	log("deploying pod for provider %q model %q", req.ProviderID, modelName)
 
-	podHost, err := s.deployModelPod(ctx, componentID, req, rt)
+	podHost, err := s.deployModelPod(ctx, componentID, workerID, req, rt)
 	if err != nil {
 		fail(fmt.Sprintf("pod creation failed: %v", err))
 		return
@@ -280,6 +286,9 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 	// ── Step 2: determine the LiteLLM api_base ────────────────────────────────
 	// For a worker-targeted deploy we route via the worker Caddy to avoid
 	// requiring the catalog API to have direct connectivity to the worker pod.
+	//
+	// Retrieve the component row to get the stored worker_id — DeployModel passed
+	// workerID but deployAsync only receives it indirectly through req.WorkerSelector.
 	var apiBase string
 	if req.WorkerSelector != "" {
 		worker, err := s.workerRepo.GetByName(ctx, req.WorkerSelector)
@@ -333,23 +342,30 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 	}
 }
 
-// buildRuntime constructs the appropriate Runtime for a given worker selector.
+// buildRuntime constructs the appropriate Runtime for a given worker UUID.
 //
-// For a named remote worker — RemoteRuntime over the gRPC stream to that worker daemon.
-// For the local control-plane — RemoteRuntime pointing at LocalWorkerName (same as the
-// DeploymentPlanner) so that Spyre-card discovery works; falls back to runtimeFactory
-// when the local worker daemon is not connected (non-Spyre providers only).
-func (s *ModelService) buildRuntime(workerSelector string) (runtime.Runtime, error) {
-	if workerSelector != "" {
-		runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(workerSelector)
-		if !ok {
-			return nil, fmt.Errorf("worker %q is not connected", workerSelector)
+// When workerID is non-nil the name and runtime-type are resolved via the registry
+// (WorkerInfoByID checks the live in-memory registry, falling back to the DB so that
+// offline workers are still handled). The resolved name is used to obtain the gRPC
+// command channel via remoteruntime.New.
+//
+// When workerID is nil (or cannot be resolved) the function falls back to the Local
+// worker, which matches the DeploymentPlanner behaviour for control-plane deploys.
+func (s *ModelService) buildRuntime(ctx context.Context, workerID *uuid.UUID) (runtime.Runtime, error) {
+	// Resolve worker name from UUID (if a non-local worker is specified).
+	workerName := workerconstants.LocalWorkerName
+	if workerID != nil {
+		name, _ := s.workerRegistry.WorkerInfoByID(ctx, *workerID)
+		if name != "" {
+			workerName = name
 		}
-		return remoteruntime.New(workerSelector, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry), nil
 	}
 
-	runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(workerconstants.LocalWorkerName)
+	runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(workerName)
 	if !ok {
+		if workerName != workerconstants.LocalWorkerName {
+			return nil, fmt.Errorf("worker %q (id=%s) is not connected", workerName, workerID)
+		}
 		// Local worker daemon not connected — fall back to direct runtime creation.
 		// Spyre card discovery will not be available; non-Spyre providers (vllm-cpu) still work.
 		if s.runtimeFactory == nil {
@@ -362,7 +378,7 @@ func (s *ModelService) buildRuntime(workerSelector string) (runtime.Runtime, err
 		return rt, nil
 	}
 
-	return remoteruntime.New(workerconstants.LocalWorkerName, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry), nil
+	return remoteruntime.New(workerName, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry), nil
 }
 
 // pullProviderImage pulls the container image declared in the provider's values.yaml.
@@ -413,7 +429,7 @@ func (s *ModelService) downloadModel(ctx context.Context, rt runtime.Runtime, mo
 // the provided runtime (local Podman or remote worker over gRPC).
 // It returns the pod hostname (podSpec.Name from the rendered template) which the caller
 // uses to construct the LiteLLM api_base for control-plane deploys.
-func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, req apimodels.DeployModelRequest, rt runtime.Runtime) (string, error) {
+func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, workerID *uuid.UUID, req apimodels.DeployModelRequest, rt runtime.Runtime) (string, error) {
 	modelName, _ := req.Params["model"].(string)
 
 	// Load catalog values for this provider so the templates render correctly.
@@ -446,9 +462,12 @@ func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID
 
 	// Minimal DeploymentPlan — only the WorkerName is used by getEnvParamsForComponent
 	// when deciding how to allocate Spyre cards.
+	// Resolve the worker name from the UUID stored at deploy time.
 	workerName := workerconstants.LocalWorkerName
-	if req.WorkerSelector != "" {
-		workerName = req.WorkerSelector
+	if workerID != nil {
+		if name, _ := s.workerRegistry.WorkerInfoByID(ctx, *workerID); name != "" {
+			workerName = name
+		}
 	}
 	plan := &deploymenttypes.DeploymentPlan{
 		WorkerName:  workerName,
@@ -715,7 +734,7 @@ func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*apimodels.G
 	}
 
 	// Resolve worker info.
-	workerInfo := s.resolveWorkerInfo(ctx, c.WorkerSelector)
+	workerInfo := s.resolveWorkerInfo(ctx, c.WorkerID)
 
 	// Collect linked applications.
 	appRefs, err := s.componentRepo.GetApplicationsByComponentID(ctx, id)
@@ -844,12 +863,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 	// label stamped at deploy time, mirrors the application deletion path exactly.
 	log("deleting pod resources (keepData=%v)", keepData)
 
-	workerSelector := ""
-	if c.WorkerSelector != nil {
-		workerSelector = *c.WorkerSelector
-	}
-
-	rt, err := s.buildRuntime(workerSelector)
+	rt, err := s.buildRuntime(ctx, c.WorkerID)
 	if err != nil {
 		logger.ErrorfCtx(ctx, "[modelmanager] component %s: failed to build runtime for deletion: %v", c.ID, err)
 		// Fall back to DB-only cleanup so the row is not left dangling.
@@ -888,17 +902,17 @@ func (s *ModelService) GetModelKey(ctx context.Context, componentID uuid.UUID) (
 	}, nil
 }
 
-// resolveWorkerInfo returns the worker info for a component's WorkerSelector.
-// When WorkerSelector is nil/empty (control-plane deploy) it returns a synthetic
-// "Local" entry. For remote workers it looks up the full record from the workers table.
-func (s *ModelService) resolveWorkerInfo(ctx context.Context, workerSelector *string) *apimodels.ModelWorkerInfo {
-	if workerSelector == nil || *workerSelector == "" {
+// resolveWorkerInfo returns the worker info for a component's WorkerID UUID.
+// When WorkerID is nil (legacy row or unknown worker) it returns a synthetic "Local" entry.
+// For known workers it looks up the full record from the workers table via GetByID.
+func (s *ModelService) resolveWorkerInfo(ctx context.Context, workerID *uuid.UUID) *apimodels.ModelWorkerInfo {
+	if workerID == nil {
 		return &apimodels.ModelWorkerInfo{ID: workerconstants.LocalWorkerName}
 	}
-	worker, err := s.workerRepo.GetByName(ctx, *workerSelector)
+	worker, err := s.workerRepo.GetByID(ctx, *workerID)
 	if err != nil || worker == nil {
-		// Worker not found in DB — return the selector ID as-is.
-		return &apimodels.ModelWorkerInfo{ID: *workerSelector}
+		// Worker not found in DB — return the UUID as the display ID.
+		return &apimodels.ModelWorkerInfo{ID: workerID.String()}
 	}
 	return &apimodels.ModelWorkerInfo{
 		ID:          worker.Name,
@@ -927,7 +941,7 @@ func (s *ModelService) toModelListItem(ctx context.Context, c dbmodels.Component
 			ID:   c.Provider,
 			Name: providerName,
 		},
-		Worker:    s.resolveWorkerInfo(ctx, c.WorkerSelector),
+		Worker:    s.resolveWorkerInfo(ctx, c.WorkerID),
 		Metadata:  c.Metadata,
 		Status:    string(c.Status),
 		CreatedAt: c.CreatedAt,

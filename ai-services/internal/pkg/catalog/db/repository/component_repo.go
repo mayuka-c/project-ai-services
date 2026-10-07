@@ -64,7 +64,7 @@ func NewComponentRepository(pool *pgxpool.Pool) ComponentRepository {
 // Insert creates a new component in the database.
 func (r *componentRepo) Insert(ctx context.Context, component *models.Component) error {
 	query := `
-		INSERT INTO components (id, type, provider, status, message, endpoints, version, metadata, name, created_by, worker_selector)
+		INSERT INTO components (id, type, provider, status, message, endpoints, version, metadata, name, created_by, worker_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING created_at, updated_at
 	`
@@ -106,7 +106,7 @@ func (r *componentRepo) Insert(ctx context.Context, component *models.Component)
 		metadataJSON,
 		component.Name,
 		component.CreatedBy,
-		component.WorkerSelector,
+		component.WorkerID,
 	).Scan(&component.CreatedAt, &component.UpdatedAt)
 
 	if err != nil {
@@ -120,20 +120,20 @@ func (r *componentRepo) Insert(ctx context.Context, component *models.Component)
 func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Component, error) {
 	query := `
 		SELECT id, type, provider, status, message, endpoints, version, metadata,
-		       name, created_by, worker_selector, created_at, updated_at
+		       name, created_by, worker_id, created_at, updated_at
 		FROM components
 		WHERE id = $1
 	`
 
 	var (
-		component      models.Component
-		endpointsJSON  []byte
-		metadataJSON   []byte
-		version        sql.NullString
-		message        sql.NullString
-		name           sql.NullString
-		createdBy      sql.NullString
-		workerSelector sql.NullString
+		component     models.Component
+		endpointsJSON []byte
+		metadataJSON  []byte
+		version       sql.NullString
+		message       sql.NullString
+		name          sql.NullString
+		createdBy     sql.NullString
+		workerID      uuid.NullUUID
 	)
 
 	err := r.pool.QueryRow(ctx, query, id).Scan(
@@ -147,7 +147,7 @@ func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Comp
 		&metadataJSON,
 		&name,
 		&createdBy,
-		&workerSelector,
+		&workerID,
 		&component.CreatedAt,
 		&component.UpdatedAt,
 	)
@@ -160,7 +160,7 @@ func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Comp
 		return nil, fmt.Errorf("failed to get component: %w", err)
 	}
 
-	applyNullableFields(&component, version, message, name, createdBy, workerSelector)
+	applyNullableFields(&component, version, message, name, createdBy, workerID)
 
 	if err := unmarshalJSONFields(&component, endpointsJSON, metadataJSON); err != nil {
 		return nil, err
@@ -172,27 +172,27 @@ func (r *componentRepo) GetByID(ctx context.Context, id uuid.UUID) (*models.Comp
 // scanComponent scans a component row and unmarshals JSON fields.
 func scanComponent(rows pgx.Rows) (*models.Component, error) {
 	var (
-		component      models.Component
-		endpointsJSON  []byte
-		metadataJSON   []byte
-		version        sql.NullString
-		message        sql.NullString
-		name           sql.NullString
-		createdBy      sql.NullString
-		workerSelector sql.NullString
+		component     models.Component
+		endpointsJSON []byte
+		metadataJSON  []byte
+		version       sql.NullString
+		message       sql.NullString
+		name          sql.NullString
+		createdBy     sql.NullString
+		workerID      uuid.NullUUID
 	)
 
 	err := rows.Scan(
 		&component.ID, &component.Type, &component.Provider, &component.Status, &message,
 		&endpointsJSON, &version, &metadataJSON,
-		&name, &createdBy, &workerSelector,
+		&name, &createdBy, &workerID,
 		&component.CreatedAt, &component.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan component: %w", err)
 	}
 
-	applyNullableFields(&component, version, message, name, createdBy, workerSelector)
+	applyNullableFields(&component, version, message, name, createdBy, workerID)
 
 	if err := unmarshalJSONFields(&component, endpointsJSON, metadataJSON); err != nil {
 		return nil, err
@@ -202,7 +202,7 @@ func scanComponent(rows pgx.Rows) (*models.Component, error) {
 }
 
 // applyNullableFields copies nullable SQL values onto a component struct.
-func applyNullableFields(c *models.Component, version, message, name, createdBy, workerSelector sql.NullString) {
+func applyNullableFields(c *models.Component, version, message, name, createdBy sql.NullString, workerID uuid.NullUUID) {
 	if version.Valid {
 		c.Version = version.String
 	}
@@ -215,8 +215,8 @@ func applyNullableFields(c *models.Component, version, message, name, createdBy,
 	if createdBy.Valid {
 		c.CreatedBy = &createdBy.String
 	}
-	if workerSelector.Valid {
-		c.WorkerSelector = &workerSelector.String
+	if workerID.Valid {
+		c.WorkerID = &workerID.UUID
 	}
 }
 
@@ -237,7 +237,7 @@ func unmarshalJSONFields(c *models.Component, endpointsJSON, metadataJSON []byte
 
 const selectComponentColumns = `
 	SELECT id, type, provider, status, message, endpoints, version, metadata,
-	       name, created_by, worker_selector, created_at, updated_at
+	       name, created_by, worker_id, created_at, updated_at
 	FROM components
 `
 

@@ -79,7 +79,7 @@ This proposal extends the existing Catalog Service with two new capabilities:
 | Local pod | `components` | ✅ | `keys` table (virtual key served via API) | vLLM (cpu, spyre) |
 | Remote connector | `connectors` | ❌ | LiteLLM Gateway DB | WatsonX, OpenAI-compatible, HuggingFace |
 
-Three new columns on `components` (`name`, `created_by`, `worker_selector`), a new `workers` table, and a new `keys` table are the complete schema delta. Remote model connectors reuse the shared `connectors` table (same as datasource connectors). Credentials never touch the Catalog database directly.
+Three new columns on `components` (`name`, `created_by`, `worker_id`), a new `workers` table, and a new `keys` table are the complete schema delta. Remote model connectors reuse the shared `connectors` table (same as datasource connectors). Credentials never touch the Catalog database directly.
 
 ---
 
@@ -392,16 +392,16 @@ No existing columns are changed or removed. **Three** new columns are added; `co
 
 ```sql
 ALTER TABLE components
-    ADD COLUMN name            VARCHAR(100),  -- human-readable label supplied by the user at deploy time
-    ADD COLUMN created_by      VARCHAR(100),  -- NULL for app-pipeline infra
-    ADD COLUMN worker_selector VARCHAR(100);  -- NULL for control-plane deploys; LPAR ID for remote worker deploys
+    ADD COLUMN name       VARCHAR(100),  -- human-readable label supplied by the user at deploy time
+    ADD COLUMN created_by VARCHAR(100),  -- NULL for app-pipeline infra
+    ADD COLUMN worker_id  UUID REFERENCES workers(id) ON DELETE SET NULL;  -- NULL = control-plane Podman deploy
 ```
 
 | Column | Data Type | Nullable | Description |
 |---|---|---|---|
 | `name` | VARCHAR(100) | Yes | Human-readable label for this deployed instance (3–100 chars, slug-safe), e.g. `"granite-llm"`. NULL for components created by the application pipeline |
 | `created_by` | VARCHAR(100) | Yes | User who triggered `POST /api/v1/models`. NULL for components created by the application pipeline |
-| `worker_selector` | VARCHAR(100) | Yes | Target Worker LPAR ID (e.g. `"lpar-1"`). NULL when the model is deployed on the control-plane Podman socket. References `workers.worker_id` but is not a hard FK to allow row deletion without cascading |
+| `worker_id` | UUID | Yes | FK to `workers.id`. NULL when the model is deployed on the control-plane Podman socket. Set to NULL automatically when the referenced worker row is deleted (`ON DELETE SET NULL`) |
 
 > **No credentials column.** Local virtual keys (the `sk-...` bearer tokens used to call LiteLLM) are stored in the `keys` table and served via `GET /api/v1/models/keys?instance_id=<component_id>`. They are never stored in a Podman secret or in the `components` row itself.
 
@@ -522,7 +522,7 @@ Model connectors reuse the existing `connector_status` enum defined in the datas
 
 ### 5.6 New `workers` Table
 
-The `workers` table stores the registered Worker LPARs that the `modelmanager` package can target for remote pod deployment via the WorkerGateway gRPC stream. It is referenced by `components.worker_selector`.
+The `workers` table stores the registered Worker LPARs that the `modelmanager` package can target for remote pod deployment via the WorkerGateway gRPC stream. It is referenced by `components.worker_id`.
 
 ```sql
 CREATE TYPE worker_status AS ENUM ('ready', 'disconnected');
@@ -577,7 +577,7 @@ Model management adds the following goose migration files, numbered after the cu
 
 | File | Purpose |
 |---|---|
-| `20260430094509_alter_components_model_columns.sql` | Adds `name`, `created_by`, `worker_selector` columns to `components`; adds `'Deploying'` to `component_status` enum |
+| `20260430094510_alter_components_model_columns.sql` | Adds `name`, `created_by`, `worker_id` (UUID FK) columns to `components`; adds `'Deploying'` to `component_status` enum |
 | `20260430094510_create_workers_table.sql` | Creates `worker_status` enum and `workers` table with index |
 | `20260430094511_create_keys_table.sql` | Creates `keys` table with FK to `components` and index |
 
@@ -625,7 +625,7 @@ erDiagram
         VARCHAR name
         VARCHAR type
         VARCHAR provider
-        VARCHAR worker_selector
+        UUID worker_id FK
         component_status status
         TEXT message
         JSONB endpoints
@@ -681,7 +681,7 @@ erDiagram
     }
 ```
 
-> **No credentials column.** `name` and `worker_selector` are dedicated top-level columns on `components`. Local credentials (virtual keys) are stored in the `keys` table and served via `GET /api/v1/models/keys`. Remote credentials are passed directly to LiteLLM and never touch the Catalog DB.
+> **No credentials column.** `name` and `worker_id` are dedicated top-level columns on `components`. Local credentials (virtual keys) are stored in the `keys` table and served via `GET /api/v1/models/keys`. Remote credentials are passed directly to LiteLLM and never touch the Catalog DB.
 
 ---
 
@@ -766,7 +766,7 @@ Content-Type: application/json
   "type": "llm",
   "name": "granite-llm",
   "provider_id": "vllm-spyre",
-  "worker_selector": "lpar-1",
+  "worker_selector": "lpar-1",   // user-facing name; stored as worker_id UUID internally
   "params": {
     "model": "ibm-granite/granite-3.3-8b-instruct"
   }
@@ -780,7 +780,7 @@ Content-Type: application/json
 | `type` | string | Yes | Component type: `llm`, `embedding`, `reranker` |
 | `name` | string | Yes | Human-readable label for this deployed instance (3–100 chars, slug-safe) |
 | `provider_id` | string | Yes | Local backend: `vllm-cpu`, `vllm-spyre` |
-| `worker_selector` | string | No | Target Worker LPAR ID (e.g. `"lpar-1"`). Omit to deploy on the control-plane Podman socket |
+| `worker_selector` | string | No | Target worker name (e.g. `"lpar-1"`). Resolved to `workers.id` UUID before storage. Omit to deploy on the control-plane Podman socket |
 | `params` | object | Yes | Model and provider config — polymorphic on `provider_id` |
 
 **Polymorphic `params` — required fields per `provider_id`:**
@@ -805,7 +805,7 @@ The `modelmanager` package validates `params` against the `params` block in `ass
 |---|---|
 | `400 Bad Request` | Missing required fields, unknown `type`, or unknown `provider_id` |
 | `401 Unauthorized` | Invalid or missing access token |
-| `404 Not Found` | `worker_selector` refers to an unknown worker ID |
+| `404 Not Found` | `worker_selector` refers to an unknown worker name |
 | `409 Conflict` | A component with the same `type` is already `Running` or `Deploying` |
 | `422 Unprocessable Entity` | Pre-flight resource check failed |
 | `500 Internal Server Error` | Pod start failure |
@@ -854,7 +854,7 @@ The `modelmanager` package validates `params` against the `params` block in `ass
 }
 ```
 
-> `worker` is `null` when the model was deployed on the control-plane Podman socket (`worker_selector` is NULL).
+> `worker` is `null` when the model was deployed on the control-plane Podman socket (`worker_id` is NULL).
 
 ---
 
@@ -1474,13 +1474,13 @@ POST /api/v1/models
   params: {model: "ibm-granite/granite-3.3-8b-instruct"} }
 
   Read assets/components/llm/vllm-spyre/metadata.yaml → deployment_strategy: pod
-  worker_selector absent → use LocalRuntime (control-plane Podman)
+  worker_selector absent → look up Local worker UUID → use LocalRuntime (control-plane Podman)
 
   1. Validate request fields
   2. Pre-flight check via LocalRuntime.GetSystemInfo → 422 if insufficient
   3. INSERT into components (type=llm, provider=vllm-spyre,
                              status='Deploying', name='granite-llm', created_by=<user>,
-                             worker_selector=NULL,
+                             worker_id=<local-worker-uuid>,
                              metadata={model: "ibm-granite/granite-3.3-8b-instruct"})
   4. Return 202 { id: components.id }
   5. [async] LocalRuntime.CreatePod → Render vllm-server.yaml.tmpl → podman kube play
@@ -1504,8 +1504,8 @@ POST /api/v1/models
   params: {model: "ibm-granite/granite-3.3-8b-instruct"} }
 
   Read assets/components/llm/vllm-spyre/metadata.yaml → deployment_strategy: pod
-  worker_selector = "lpar-1" → use RemoteRuntime
-  Registry.SelectWorker("lpar-1") → WorkerEntry{address: "https://worker-caddy-lpar-1:443"}
+  worker_selector = "lpar-1" → workerRepo.GetByName("lpar-1") → worker.ID (UUID) → use RemoteRuntime
+  Registry.WorkerInfoByID(worker.ID) → name="lpar-1", address="https://worker-caddy-lpar-1:443"
 
   1. Validate request fields; verify lpar-1 exists in workers table and status='ready'
   2. Pre-flight check via RemoteRuntime.GetSystemInfo:
@@ -1514,7 +1514,7 @@ POST /api/v1/models
        → 422 if insufficient
   3. INSERT into components (type=llm, provider=vllm-spyre,
                              status='Deploying', name='granite-llm', created_by=<user>,
-                             worker_selector='lpar-1',
+                             worker_id=<lpar-1-uuid>,
                              metadata={model: "ibm-granite/granite-3.3-8b-instruct"})
   4. Return 202 { id: components.id }
   5. [async] RemoteRuntime.CreatePod:
@@ -1563,7 +1563,7 @@ DELETE /api/v1/models/:id
 
   Server loads components row by id
   route_id = "{sanitised model_name}-{provider}"  (derived from components.metadata)
-  worker_selector = components.worker_selector  (NULL = control-plane; "lpar-1" = remote)
+  worker_id = components.worker_id  (NULL = control-plane; else workerRegistry.WorkerInfoByID → name)
 
   1. Verify created_by=user
   2. Return 202
