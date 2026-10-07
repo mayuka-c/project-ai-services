@@ -10,6 +10,8 @@ metadata:
     ai-services.io/secret-skip-cleanup: "true"
     ai-services.io/volume: "litellm-secret,litellm-db-secret,litellm-db-data"
     ai-services.io/volume-skip-cleanup: "true"
+  annotations:
+    ai-services.io/routes: "4000:litellm-api:api"
 spec:
   restartPolicy: always
   containers:
@@ -18,16 +20,16 @@ spec:
     # ----------------------------------------------------
     - name: litellm-db
       image: "{{ .Values.litellm.db.image }}"
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          export POSTGRES_PASSWORD=$(cat /etc/secret/litellm-db-secret/db-password)
+          exec docker-entrypoint.sh postgres
       env:
         - name: POSTGRES_DB
           value: "{{ .Values.litellm.db.database }}"
         - name: POSTGRES_USER
           value: "{{ .Values.litellm.db.user }}"
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: litellm-db-secret
-              key: db-password
       livenessProbe:
         exec:
           command:
@@ -71,20 +73,15 @@ spec:
           export LITELLM_MASTER_KEY=$(cat /etc/secret/litellm-secret/master-key)
           export LITELLM_SALT_KEY=$(cat /etc/secret/litellm-secret/salt-key)
           export DB_PASSWORD=$(cat /etc/secret/litellm-db-secret/db-password)
-          exec litellm \
-            --config /app/config.yaml \
-            --port 4000 \
-            --debug
+          export DATABASE_URL="postgresql://{{ .Values.litellm.db.user }}:${DB_PASSWORD}@localhost:5432/{{ .Values.litellm.db.database }}"
+          exec litellm --port 4000
       env:
-        - name: DATABASE_URL
-          value: "postgresql://{{ .Values.litellm.db.user }}:$(DB_PASSWORD)@localhost:5432/{{ .Values.litellm.db.database }}"
         - name: STORE_MODEL_IN_DB
           value: "True"
         - name: LITELLM_DATABASE_CONNECTION_RETRIES
           value: "{{ .Values.litellm.dbConnectionRetries }}"
       ports:
         - containerPort: 4000
-          hostPort: {{ .Values.litellm.port }}
           protocol: TCP
       livenessProbe:
         httpGet:
