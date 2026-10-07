@@ -429,7 +429,7 @@ The `components` table already has a `metadata JSONB` column (no migration neede
 `local` model rows (`vllm-spyre`) — value stored in `components.metadata`:
 ```json
 {
-  "model_name": "ibm-granite/granite-3.3-8b-instruct"
+  "model": "ibm-granite/granite-3.3-8b-instruct"
 }
 ```
 
@@ -768,7 +768,7 @@ Content-Type: application/json
   "provider_id": "vllm-spyre",
   "worker_selector": "lpar-1",
   "params": {
-    "model_name": "ibm-granite/granite-3.3-8b-instruct"
+    "model": "ibm-granite/granite-3.3-8b-instruct"
   }
 }
 ```
@@ -837,7 +837,7 @@ The `modelmanager` package validates `params` against the `params` block in `ass
       "type": "llm",
       "provider": { "id": "vllm-spyre", "name": "vLLM (Spyre)" },
       "worker": { "id": "lpar-1", "runtime_type": "spyre", "status": "ready" },
-      "metadata": { "model_name": "ibm-granite/granite-3.3-8b-instruct" },
+      "metadata": { "model": "ibm-granite/granite-3.3-8b-instruct" },
       "status": "Running",
       "created_at": "2026-07-01T10:00:00Z",
       "updated_at": "2026-07-01T10:05:00Z"
@@ -873,7 +873,7 @@ The `modelmanager` package validates `params` against the `params` block in `ass
   "type": "llm",
   "provider": { "id": "vllm-spyre", "name": "vLLM (Spyre)" },
   "worker": { "id": "lpar-1", "runtime_type": "spyre", "status": "ready" },
-  "metadata": { "model_name": "ibm-granite/granite-3.3-8b-instruct" },
+  "metadata": { "model": "ibm-granite/granite-3.3-8b-instruct" },
   "status": "Running",
   "message": "Model running",
   "endpoints": [
@@ -1471,7 +1471,7 @@ catalog configure  (same command that starts postgres, caddy, catalog API)
 ```
 POST /api/v1/models
 { type: "llm", name: "granite-llm", provider_id: "vllm-spyre",
-  params: {model_name: "ibm-granite/granite-3.3-8b-instruct"} }
+  params: {model: "ibm-granite/granite-3.3-8b-instruct"} }
 
   Read assets/components/llm/vllm-spyre/metadata.yaml → deployment_strategy: pod
   worker_selector absent → use LocalRuntime (control-plane Podman)
@@ -1481,7 +1481,7 @@ POST /api/v1/models
   3. INSERT into components (type=llm, provider=vllm-spyre,
                              status='Deploying', name='granite-llm', created_by=<user>,
                              worker_selector=NULL,
-                             metadata={model_name: "ibm-granite/granite-3.3-8b-instruct"})
+                             metadata={model: "ibm-granite/granite-3.3-8b-instruct"})
   4. Return 202 { id: components.id }
   5. [async] LocalRuntime.CreatePod → Render vllm-server.yaml.tmpl → podman kube play
   6. [async] Poll InspectPod until liveness probe passes
@@ -1501,7 +1501,7 @@ POST /api/v1/models
 POST /api/v1/models
 { type: "llm", name: "granite-llm", provider_id: "vllm-spyre",
   worker_selector: "lpar-1",
-  params: {model_name: "ibm-granite/granite-3.3-8b-instruct"} }
+  params: {model: "ibm-granite/granite-3.3-8b-instruct"} }
 
   Read assets/components/llm/vllm-spyre/metadata.yaml → deployment_strategy: pod
   worker_selector = "lpar-1" → use RemoteRuntime
@@ -1515,7 +1515,7 @@ POST /api/v1/models
   3. INSERT into components (type=llm, provider=vllm-spyre,
                              status='Deploying', name='granite-llm', created_by=<user>,
                              worker_selector='lpar-1',
-                             metadata={model_name: "ibm-granite/granite-3.3-8b-instruct"})
+                             metadata={model: "ibm-granite/granite-3.3-8b-instruct"})
   4. Return 202 { id: components.id }
   5. [async] RemoteRuntime.CreatePod:
        WorkerGateway sends COMMAND_TYPE_CREATE_POD over gRPC stream to Worker Daemon
@@ -1647,7 +1647,7 @@ The pre-flight response always includes every constraint result (satisfied or no
 SELECT
     id, name, type, provider, status,
     endpoints,
-    metadata->>'model_name' AS model_name
+    metadata->>'model' AS model_name
 FROM components
 WHERE created_by IS NOT NULL
   AND type IN ('llm', 'embedding', 'reranker')
@@ -1674,7 +1674,7 @@ SELECT
     s.id AS service_id, s.catalog_id AS service_type,
     c.id AS model_id, 'local' AS model_source,
     c.type AS model_role, c.provider, c.status AS model_status,
-    c.metadata->>'model_name' AS model_name
+    c.metadata->>'model' AS model_name
 FROM applications a
 LEFT JOIN services s ON s.app_id = a.id
 LEFT JOIN service_dependencies sd ON sd.service_id = s.id AND sd.dependency_type = 'component'
@@ -1775,21 +1775,21 @@ ai-services model deploy [name] --type <type> --provider <provider> --runtime po
 |---|---|---|---|
 | `--type` | `-t` | Yes | Component type: `llm`, `embedding`, `reranker` |
 | `--provider` | `-p` | Yes | Backend provider: `vllm-cpu`, `vllm-spyre` |
-| `--params` | | No | Inline key=value pairs for `params` (e.g. `model_name=ibm-granite/granite-3.3-8b-instruct`) |
+| `--params` | | No | Inline key=value pairs for `params` (e.g. `model=ibm-granite/granite-3.3-8b-instruct`) |
 
 ```bash
 # Deploy a vLLM-Spyre LLM model
 ai-services model deploy granite-llm \
   --type llm \
   --provider vllm-spyre \
-  --params model_name=ibm-granite/granite-3.3-8b-instruct \
+  --params model=ibm-granite/granite-3.3-8b-instruct \
   --runtime podman
 
 # Deploy a vLLM-CPU embedding model
 ai-services model deploy granite-embed \
   --type embedding \
   --provider vllm-cpu \
-  --params model_name=ibm-granite/granite-embedding-125m-english \
+  --params model=ibm-granite/granite-embedding-125m-english \
   --runtime podman
 ```
 

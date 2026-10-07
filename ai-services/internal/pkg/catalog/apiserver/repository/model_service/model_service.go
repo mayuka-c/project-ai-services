@@ -142,7 +142,7 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 		}
 	}
 
-	// 3. Validate required params (model_name must be present for supported providers).
+	// 3. Validate required params (model must be present for supported providers).
 	if err := validateModelParams(req.Params); err != nil {
 		return nil, err
 	}
@@ -180,7 +180,7 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 	}
 
 	// 6. Insert component row in Deploying state.
-	modelName, _ := req.Params["model_name"].(string)
+	modelName, _ := req.Params["model"].(string)
 	name := req.Name
 	createdBy := req.CreatedBy
 	var workerSelector *string
@@ -193,7 +193,7 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 		Type:           req.Type,
 		Provider:       req.ProviderID,
 		Status:         dbmodels.ComponentStatusDeploying,
-		Metadata:       map[string]any{"model_name": modelName},
+		Metadata:       map[string]any{"model": modelName},
 		Name:           &name,
 		CreatedBy:      &createdBy,
 		WorkerSelector: workerSelector,
@@ -211,10 +211,10 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 
 // validateModelParams checks that mandatory fields are present in params.
 func validateModelParams(params map[string]any) error {
-	if modelName, _ := params["model_name"].(string); modelName == "" {
+	if modelName, _ := params["model"].(string); modelName == "" {
 		return &ValidationError{
 			Code:    http.StatusBadRequest,
-			Message: `params.model_name is required`,
+			Message: `params.model is required`,
 		}
 	}
 	return nil
@@ -234,7 +234,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 		_ = s.componentRepo.UpdateStatus(ctx, componentID, dbmodels.ComponentStatusError, msg)
 	}
 
-	modelName, _ := req.Params["model_name"].(string)
+	modelName, _ := req.Params["model"].(string)
 	routeID := buildRouteID(modelName, req.ProviderID)
 
 	// ── Step 1: deploy the model pod ──────────────────────────────────────────
@@ -307,7 +307,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 // It returns the pod hostname (podSpec.Name from the rendered template) which the caller
 // uses to construct the LiteLLM api_base for control-plane deploys.
 func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, req apimodels.DeployModelRequest) (string, error) {
-	modelName, _ := req.Params["model_name"].(string)
+	modelName, _ := req.Params["model"].(string)
 
 	// Choose runtime: remote worker or local control-plane.
 	//
@@ -343,8 +343,7 @@ func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID
 	}
 
 	// Load catalog values for this provider so the templates render correctly.
-	// Merge request params as string overrides (matching the param key names
-	// used by LoadComponentValues, e.g. "model_name").
+	// Params.model maps directly to the "model" key in values.yaml — no remapping needed.
 	paramOverrides := make(map[string]string, len(req.Params))
 	for k, v := range req.Params {
 		if sv, ok := v.(string); ok {
@@ -742,7 +741,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 		logger.InfofCtx(ctx, "[modelmanager] component %s: undeploy: "+msg, append([]any{c.ID}, args...)...)
 	}
 
-	modelName, _ := c.Metadata["model_name"].(string)
+	modelName, _ := c.Metadata["model"].(string)
 	routeID := buildRouteID(modelName, c.Provider)
 
 	// Step 1: deregister LiteLLM route.

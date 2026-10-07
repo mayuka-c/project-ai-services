@@ -19,7 +19,7 @@ type DeployModelRequest struct {
 	// WorkerSelector is an optional Worker LPAR ID (e.g. "lpar-1").
 	// Omit to deploy on the control-plane Podman socket.
 	WorkerSelector string `json:"worker_selector,omitempty"`
-	// Params holds provider-specific configuration (e.g. model_name).
+	// Params holds provider-specific configuration (e.g. model).
 	Params map[string]any `json:"params" binding:"required"`
 	// CreatedBy is set from the auth context; never from the request body.
 	CreatedBy string `json:"-"`
