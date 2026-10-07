@@ -53,6 +53,52 @@ func (r *RemoteProxyManager) RegisterRoute(ctx context.Context, route Route) (st
 	return registered.ExternalURL, nil
 }
 
+// RegisterMTLSRoute implements ProxyManager. It forwards the mTLS registration to the
+// remote worker and reads the ExternalURL back from the CommandResult.
+func (r *RemoteProxyManager) RegisterMTLSRoute(ctx context.Context, route Route) (string, error) {
+	res, err := r.send(ctx, payload.ProxyRoute{
+		Op:       payload.ProxyRouteOpRegisterMTLS,
+		ID:       route.ID,
+		Domain:   route.Domain,
+		Upstream: route.Upstream,
+		Terminal: route.Terminal,
+		Type:     route.Type,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	if len(res.GetData()) == 0 {
+		return "", nil
+	}
+
+	var registered payload.Route
+	if err := json.Unmarshal(res.GetData(), &registered); err != nil {
+		return "", fmt.Errorf("remote proxy manager: unmarshal registered mTLS route: %w", err)
+	}
+
+	return registered.ExternalURL, nil
+}
+
+// RegisterMTLSPathRoute implements ProxyManager. It forwards the path-based mTLS
+// ingress registration to the remote worker via gRPC.
+func (r *RemoteProxyManager) RegisterMTLSPathRoute(ctx context.Context, route Route) error {
+	_, err := r.send(ctx, payload.ProxyRoute{
+		Op:         payload.ProxyRouteOpRegisterMTLSPath,
+		ID:         route.ID,
+		PathPrefix: route.PathPrefix,
+		Upstream:   route.Upstream,
+		Terminal:   route.Terminal,
+	})
+
+	return err
+}
+
+// RegisterEgressRoute implements ProxyManager for remote workers.
+func (r *RemoteProxyManager) RegisterEgressRoute(ctx context.Context, route EgressRoute) error {
+	return fmt.Errorf("RegisterEgressRoute not implemented on remote proxy manager")
+}
+
 // UnregisterRoute implements ProxyManager.
 func (r *RemoteProxyManager) UnregisterRoute(ctx context.Context, routeID string) error {
 	_, err := r.send(ctx, payload.ProxyRoute{

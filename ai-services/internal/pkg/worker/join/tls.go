@@ -29,7 +29,25 @@ const (
 	tlsCertFile = "tls.crt"
 	tlsKeyFile  = "tls.key"
 	caCertFile  = "ca.crt"
+
+	// tlsKeyPlaintextFile is the filename of the decrypted worker private key
+	// written alongside the encrypted tls.key so Caddy can read it directly.
+	// The worker process writes this at every startup before Caddy's :8443
+	// listener comes up.
+	tlsKeyPlaintextFile = "tls.key.pem"
 )
+
+// writePlaintextTLSKey writes the plaintext PEM of the worker private key to
+// dir/tlsKeyPlaintextFile so Caddy can load it directly on :8443.
+// Called after every key acquisition (first join and every reconnect that
+// re-decrypts from disk) so the file is always present before Caddy starts.
+func writePlaintextTLSKey(dir string, keyPEM []byte) error {
+	if err := os.WriteFile(filepath.Join(dir, tlsKeyPlaintextFile), keyPEM, keyPerm); err != nil {
+		return fmt.Errorf("write %s: %w", tlsKeyPlaintextFile, err)
+	}
+
+	return nil
+}
 
 func generateKeyAndCSR() (keyPEM, csrPEM []byte, err error) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -78,6 +96,11 @@ func loadClientCert(tlsDir string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("load mTLS credentials: decrypt %s: %w", tlsKeyFile, err)
 	}
 	keyPEM := []byte(keyPEMStr)
+
+	// Refresh the plaintext key on disk so Caddy always has an up-to-date copy.
+	if err := writePlaintextTLSKey(tlsDir, keyPEM); err != nil {
+		return tls.Certificate{}, fmt.Errorf("load mTLS credentials: %w", err)
+	}
 
 	cert, err := tls.X509KeyPair(certPEMBytes, keyPEM)
 	if err != nil {
@@ -169,6 +192,11 @@ func writeTLSMaterial(dir string, certPEM, keyPEM, caCertPEM []byte) error {
 		if err := os.WriteFile(filepath.Join(dir, caCertFile), caCertPEM, certPerm); err != nil {
 			return fmt.Errorf("write %s: %w", caCertFile, err)
 		}
+	}
+
+	// Write the plaintext key alongside the encrypted one so Caddy can read it.
+	if err := writePlaintextTLSKey(dir, keyPEM); err != nil {
+		return err
 	}
 
 	return nil

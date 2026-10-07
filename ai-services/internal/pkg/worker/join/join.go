@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -141,11 +142,17 @@ func register(ctx context.Context, opts workertypes.GrpcStreamOptions, rt types.
 	defer func() { _ = conn.Close() }()
 
 	// 3. Call Register with token + CSR.
+	// Include the worker's own DOMAIN_SUFFIX in metadata so the control plane
+	// can build correct dial addresses for cross-VM mTLS route registration.
+	meta := map[string]string{
+		workerconstants.MetaKeyDomainSuffix: os.Getenv("DOMAIN_SUFFIX"),
+	}
 	logger.InfolnCtx(ctx, "worker join: registering with catalog control plane...")
 	resp, err := workerpb.NewWorkerGatewayClient(conn).Register(ctx, &workerpb.RegisterRequest{
 		PreSharedToken: opts.Token,
 		RuntimeType:    rt.String(),
 		CsrPem:         csrPEM,
+		Metadata:       meta,
 	})
 	if err != nil {
 		return "", fmt.Errorf("worker join: register RPC: %w", err)

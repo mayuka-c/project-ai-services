@@ -23,7 +23,9 @@ const (
 	DSCIKind          = "DSCInitialization"
 	SMTLevel          = 2
 	ErrSecretNotFound = "no secret with name or id"
-	CaddyServerName   = "ai_services" // Caddy server name used for route registration
+	CaddyServerName            = "ai_services"            // Caddy server name used for route registration
+	CaddyMTLSServerName        = "private_mtls_ingress"   // Caddy server name used for mTLS ingress route registration
+	CaddyEgressServerName      = "private_mtls_egress"    // Caddy server name used for mTLS egress route registration
 )
 
 const (

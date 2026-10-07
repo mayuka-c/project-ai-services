@@ -37,8 +37,12 @@ func signWorkerCSR(csrPEM []byte, workerName string, caCert *x509.Certificate, c
 		Subject:      pkix.Name{CommonName: workerName, Organization: csr.Subject.Organization},
 		NotBefore:    time.Now(),
 		NotAfter:     notAfter,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		KeyUsage:     x509.KeyUsageDigitalSignature,
+		// ClientAuth: worker presents this cert as a client when its Caddy egress
+		//             dials the CP Caddy :8443.
+		// ServerAuth: worker Caddy also serves this cert on its own :8443 ingress;
+		//             some TLS stacks reject a server cert lacking this EKU.
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		KeyUsage:    x509.KeyUsageDigitalSignature,
 	}
 	signedDER, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, csr.PublicKey, caKey)
 	if err != nil {

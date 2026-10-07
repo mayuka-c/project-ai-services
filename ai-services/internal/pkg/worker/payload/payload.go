@@ -80,29 +80,36 @@ type ListRoutes struct {
 type ProxyRouteOp string
 
 const (
-	ProxyRouteOpRegister    ProxyRouteOp = "register"
-	ProxyRouteOpUnregister  ProxyRouteOp = "unregister"
-	ProxyRouteOpGet         ProxyRouteOp = "get"
-	ProxyRouteOpHealthCheck ProxyRouteOp = "health_check"
+	ProxyRouteOpRegister         ProxyRouteOp = "register"
+	ProxyRouteOpRegisterMTLS     ProxyRouteOp = "register_mtls"
+	// ProxyRouteOpRegisterMTLSPath registers a path-based mTLS ingress route on
+	// the worker Caddy :8443. The route matches on PathPrefix, strips it, and
+	// proxies to Upstream — no virtual hostname involved, no OverrideHost needed.
+	ProxyRouteOpRegisterMTLSPath ProxyRouteOp = "register_mtls_path"
+	ProxyRouteOpUnregister       ProxyRouteOp = "unregister"
+	ProxyRouteOpGet              ProxyRouteOp = "get"
+	ProxyRouteOpHealthCheck      ProxyRouteOp = "health_check"
 )
 
 // ProxyRoute is the unified payload for COMMAND_TYPE_PROXY_ROUTE.
 // Op selects the operation; the remaining fields are populated as needed by
-// each op (register uses all route fields; unregister/get use only ID;
+// each op (register/register_mtls use all route fields; unregister/get use only ID;
 // health_check uses none).
 type ProxyRoute struct {
-	Op       ProxyRouteOp `json:"op"`
-	ID       string       `json:"id,omitempty"`
-	Domain   string       `json:"domain,omitempty"`
-	Upstream string       `json:"upstream,omitempty"`
-	Terminal bool         `json:"terminal,omitempty"`
-	Type     string       `json:"type,omitempty"`
+	Op         ProxyRouteOp `json:"op"`
+	ID         string       `json:"id,omitempty"`
+	Domain     string       `json:"domain,omitempty"`
+	PathPrefix string       `json:"path_prefix,omitempty"`
+	Upstream   string       `json:"upstream,omitempty"`
+	Terminal   bool         `json:"terminal,omitempty"`
+	Type       string       `json:"type,omitempty"`
 }
 
 // Route represents a Caddy reverse-proxy route on a worker node.
 type Route struct {
 	ID          string // unique route identifier used as @id in Caddy config
-	Domain      string // hostname to match (e.g. "service.example.com")
+	Domain      string // hostname to match for host-based routes (e.g. "service.example.com")
+	PathPrefix  string // URL path prefix to match for path-based routes (e.g. "/worker/w1/models/m1")
 	Upstream    string // backend address (e.g. "10.88.0.5:8080")
 	Terminal    bool   // stop route matching after this route
 	Type        string // endpoint type label (e.g. "ui", "api")

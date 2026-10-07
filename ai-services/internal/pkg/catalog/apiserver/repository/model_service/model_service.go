@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -26,6 +27,8 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/cli/helpers"
 	"github.com/project-ai-services/ai-services/internal/pkg/image"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
+	gatewaypkg "github.com/project-ai-services/ai-services/internal/pkg/worker/gateway"
+	"github.com/project-ai-services/ai-services/internal/pkg/proxy"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime"
 	remoteruntime "github.com/project-ai-services/ai-services/internal/pkg/runtime/remote"
 	runtimetypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
@@ -283,28 +286,98 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		return
 	}
 
-	// ── Step 2: determine the LiteLLM api_base ────────────────────────────────
-	// For a worker-targeted deploy we route via the worker Caddy to avoid
-	// requiring the catalog API to have direct connectivity to the worker pod.
+	// ── Step 3b: route registration for cross-VM mTLS ─────────────────────────
 	//
-	// Retrieve the component row to get the stored worker_id — DeployModel passed
-	// workerID but deployAsync only receives it indirectly through req.WorkerSelector.
+	// Remote worker path:
+	//   LiteLLM (CP) → http → CP Caddy :8080 egress → mTLS → Worker Caddy :8443 → http → vLLM:8000
+	//
+	//   LiteLLM cannot present a client certificate itself, so it calls the CP
+	//   Caddy egress proxy on :8080 over plain HTTP.  CP Caddy attaches
+	//   server.crt as the mTLS client cert and forwards to the worker.
+	//   Worker Caddy :8443 verifies the CP cert and proxies to the vLLM pod.
+	//
+	//   Two registrations are therefore required:
+	//     1. Worker Caddy :8443  — mTLS ingress  (via gRPC to remote worker)
+	//     2. CP Caddy    :8080  — mTLS egress    (via local Caddy Admin API)
+	//
+	// Local worker path:
+	//   LiteLLM reaches the vLLM pod directly via pod DNS name on plain HTTP.
 	var apiBase string
-	if req.WorkerSelector != "" {
-		worker, err := s.workerRepo.GetByName(ctx, req.WorkerSelector)
-		if err != nil || worker == nil {
-			fail(fmt.Sprintf("failed to resolve worker %q after pod creation: %v", req.WorkerSelector, err))
+	if workerID != nil {
+		remoteRT, ok := rt.(*remoteruntime.RemoteRuntime)
+		if !ok {
+			fail(fmt.Sprintf("expected RemoteRuntime for remote worker, got %T", rt))
 			return
 		}
-		if addr, ok := worker.Metadata["address"].(string); ok && addr != "" {
-			apiBase = strings.TrimRight(addr, "/") + "/v1"
-		} else {
-			fail(fmt.Sprintf("worker %q has no address registered", req.WorkerSelector))
+
+		// Resolve the worker name and its own domain suffix from the registry.
+		// The worker sends MetaKeyDomainSuffix at Register time so we can build
+		// correct dial addresses without knowing the worker's IP on the CP side.
+		workerName := remoteRT.Sender.WorkerName()
+		workerMeta, _ := s.workerRegistry.WorkerMetadata(workerName)
+		workerDomainSuffix := workerMeta[workerconstants.MetaKeyDomainSuffix]
+		if workerDomainSuffix == "" {
+			fail(fmt.Sprintf("worker %q did not send %s at registration — cannot build mTLS routes",
+				workerName, workerconstants.MetaKeyDomainSuffix))
 			return
 		}
+
+		// 1. Register mTLS ingress on worker Caddy :8443 — catch-all.
+		//    Matches "/*" and reverse-proxies directly to the vLLM pod.
+		//    No path rewriting here: the CP egress strips the namespace prefix
+		//    before the request arrives, so the worker already sees /v1/...
+		remotePM := proxy.NewRemoteProxyManager(remoteRT.Sender)
+		mtlsRoute := proxy.Route{
+			ID:       routeID + "--mtls",
+			Upstream: podHost + ":8000",
+			Terminal: true,
+		}
+		log("registering mTLS catch-all ingress route %q on worker Caddy :8443", mtlsRoute.ID)
+		if err := remotePM.RegisterMTLSPathRoute(ctx, mtlsRoute); err != nil {
+			fail(fmt.Sprintf("worker mTLS ingress route registration failed: %v", err))
+			return
+		}
+
+		// 2. Register mTLS egress on CP Caddy :8080.
+		//    Path:   /worker/<workerName>/models/<routeID>/*
+		//    Rewrite: strip the prefix  → vLLM receives /v1/...
+		//    Dial:   <workerName>.<workerDomainSuffix>:8443  (mTLS)
+		ingressPathPrefix := fmt.Sprintf("/worker/%s/models/%s", workerName, routeID)
+		localPM, err := proxy.GetCaddyProxyManager()
+		if err != nil {
+			fail(fmt.Sprintf("CP Caddy proxy manager unavailable: %v", err))
+			return
+		}
+
+		workerDialAddr := fmt.Sprintf("%s.%s:%s", workerName, workerDomainSuffix, proxy.DefaultMTLSPort)
+		egressRoute := proxy.EgressRoute{
+			ID:                routeID + "--egress",
+			PathPrefix:        ingressPathPrefix,
+			DialUpstream:      workerDialAddr,
+			ClientCertPath:    workerconstants.GatewayPKIDir + "/server.crt",
+			ClientKeyPath:     workerconstants.GatewayPKIDir + "/" + gatewaypkg.ServerKeyPlaintextFile,
+			TrustedCACertPath: workerconstants.GatewayPKIDir + "/ca.crt",
+		}
+		log("registering mTLS egress route %q on CP Caddy :8080 → %s", egressRoute.ID, workerDialAddr)
+		if err := localPM.RegisterEgressRoute(ctx, egressRoute); err != nil {
+			fail(fmt.Sprintf("CP Caddy egress route registration failed: %v", err))
+			return
+		}
+
+		// LiteLLM api_base: plain HTTP to local CP Caddy egress.
+		// CP Caddy strips the prefix, sets Host, upgrades to mTLS, and forwards.
+		// The /v1 suffix is appended because LiteLLM appends the endpoint path
+		// (/chat/completions etc.) to api_base directly.
+		caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
+		caddyHost := "ai-services--caddy"
+		if caddyAdminURL != "" {
+			if u, err := url.Parse(caddyAdminURL); err == nil && u.Hostname() != "" {
+				caddyHost = u.Hostname()
+			}
+		}
+		apiBase = fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix)
 	} else {
-		// Control-plane: LiteLLM reaches the pod directly using the pod DNS name
-		// returned by deployModelPod (host = podSpec.Name from the rendered template).
+		// Local deploy: LiteLLM reaches the vLLM pod directly via pod DNS name.
 		apiBase = fmt.Sprintf("http://%s:8000/v1", podHost)
 	}
 

@@ -4,6 +4,14 @@
 	servers :443 {
 		name ai_services
 	}
+
+	servers :8443 {
+		name private_mtls_ingress
+	}
+
+	servers :8080 {
+		name private_mtls_egress
+	}
 }
 
 :443 {
@@ -16,9 +24,26 @@
 	tls internal
 }
 
-# Internal health check endpoint used by the liveness probe (plain HTTP).
+:8443 {
+	handle /internal/health {
+		# @id internal-mtls-health
+		respond "OK" 200
+	}
+
+	tls /data/worker-tls/tls.crt /data/worker-tls/tls.key.pem {
+		client_auth {
+			mode require_and_verify
+			trusted_ca_cert_file /data/worker-tls/ca.crt
+		}
+	}
+}
+
+# Internal health check and egress endpoint
 :8080 {
-	respond /health "OK" 200
+	handle /health {
+		# @id internal-health-probe
+		respond "OK" 200
+	}
 }
 
 # Routes for deployed service pods are registered dynamically by the worker daemon

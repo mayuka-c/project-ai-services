@@ -11,10 +11,10 @@ metadata:
     ai-services.io/secret: "caddy-cert-secret"
     ai-services.io/secret-skip-cleanup: "true"
     {{- end }}
-    ai-services.io/volume: "caddy-worker,caddy-cert-secret"
+    ai-services.io/volume: "caddy-worker,caddy-cert-secret,worker-tls"
     ai-services.io/volume-skip-cleanup: "true"
   annotations:
-    ai-services.io/ports: "127.0.0.1:{{ .Values.caddy.adminPort }}:2019, {{ .Values.caddy.httpsPort }}:443"
+    ai-services.io/ports: "127.0.0.1:{{ .Values.caddy.adminPort }}:2019, {{ .Values.caddy.httpsPort }}:443, {{ default "8443" .Values.caddy.mtlsPort }}:8443, 127.0.0.1:{{ default "8080" .Values.caddy.egressPort }}:8080"
 spec:
   restartPolicy: always
   initContainers:
@@ -50,6 +50,9 @@ spec:
           mountPath: /data:z
         - name: caddy-data
           mountPath: /config:z
+        - name: worker-tls
+          mountPath: /data/worker-tls
+          readOnly: true
         {{- if and .Values.caddy.sslCertContent .Values.caddy.sslKeyContent }}
         - name: caddy-certs
           mountPath: /etc/secret/ssl
@@ -73,6 +76,9 @@ spec:
     - name: caddy-data
       persistentVolumeClaim:
         claimName: "caddy-worker"
+    - name: worker-tls
+      persistentVolumeClaim:
+        claimName: "worker-tls"
     {{- if and .Values.caddy.sslCertContent .Values.caddy.sslKeyContent }}
     - name: caddy-certs
       secret:

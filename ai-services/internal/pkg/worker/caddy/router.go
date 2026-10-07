@@ -33,11 +33,12 @@ func NewProxyRouter(ctx context.Context) (*ProxyRouter, error) {
 // ManageProxyRoute dispatches a Caddy proxy operation to the local Caddy instance.
 func (pr *ProxyRouter) ManageProxyRoute(ctx context.Context, op payload.ProxyRouteOp, route payload.Route) (*payload.Route, error) {
 	r := proxy.Route{
-		ID:       route.ID,
-		Domain:   route.Domain,
-		Upstream: route.Upstream,
-		Terminal: route.Terminal,
-		Type:     route.Type,
+		ID:         route.ID,
+		Domain:     route.Domain,
+		PathPrefix: route.PathPrefix,
+		Upstream:   route.Upstream,
+		Terminal:   route.Terminal,
+		Type:       route.Type,
 	}
 
 	switch op {
@@ -57,6 +58,30 @@ func (pr *ProxyRouter) ManageProxyRoute(ctx context.Context, op payload.ProxyRou
 			Type:        r.Type,
 			ExternalURL: externalURL,
 		}, nil
+
+	case payload.ProxyRouteOpRegisterMTLS:
+		externalURL, err := pr.pm.RegisterMTLSRoute(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+
+		return &payload.Route{
+			ID:          r.ID,
+			Domain:      r.Domain,
+			Upstream:    r.Upstream,
+			Terminal:    r.Terminal,
+			Type:        r.Type,
+			ExternalURL: externalURL,
+		}, nil
+
+	case payload.ProxyRouteOpRegisterMTLSPath:
+		// Path-based mTLS ingress: match on PathPrefix, strip prefix, forward to Upstream.
+		// No virtual hostname — no ExternalURL returned.
+		if err := pr.pm.RegisterMTLSPathRoute(ctx, r); err != nil {
+			return nil, err
+		}
+
+		return &payload.Route{ID: r.ID}, nil
 
 	case payload.ProxyRouteOpUnregister:
 		return nil, pr.pm.UnregisterRoute(ctx, route.ID)

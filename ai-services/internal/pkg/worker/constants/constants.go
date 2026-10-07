@@ -55,6 +55,12 @@ const (
 	// MetaKeyBaseDir is the worker metadata key sent during Register and stored in worker.metadata JSON.
 	MetaKeyBaseDir = "baseDir"
 
+	// MetaKeyDomainSuffix is the worker metadata key for the worker's own DOMAIN_SUFFIX.
+	// Sent at Register time so the control plane can build correct dial addresses and
+	// virtual hostnames for cross-VM mTLS route registration without knowing the
+	// worker's IP in advance.
+	MetaKeyDomainSuffix = "domainSuffix"
+
 	// WorkerGatewayPort is the default port used by the catalog gRPC worker gateway.
 	WorkerGatewayPort = 9191
 

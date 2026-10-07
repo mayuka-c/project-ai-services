@@ -36,6 +36,13 @@ const (
 	dirPerm       = 0o700
 	certPerm      = 0o644
 	keyPerm       = 0o600
+
+	// ServerKeyPlaintextFile is the name of the decrypted server private key
+	// written alongside the encrypted server.key so Caddy can read it directly.
+	// The catalog process writes this at every startup before Caddy's :8443
+	// listener comes up. The encrypted server.key is kept for the gateway's own
+	// use; this file is the plaintext copy for Caddy only.
+	ServerKeyPlaintextFile = "server.key.pem"
 )
 
 // pkiResult groups the four pieces of PKI material the gateway needs.
@@ -151,6 +158,20 @@ func writePKIFiles(pkiDir string, caKeyPEM, caCertDER, srvKeyPEM, srvCertDER []b
 	return nil
 }
 
+// writePlaintextServerKey writes the plaintext PEM of the server private key to
+// pkiDir/ServerKeyPlaintextFile so Caddy can load it without needing to know
+// about the AES-256-GCM encryption used for the server.key file.
+// It is called every time PKI material is loaded or generated — Caddy reads the
+// file at startup, so it must be present and up-to-date before Caddy starts.
+func writePlaintextServerKey(pkiDir string, srvKeyPEM []byte) error {
+	path := filepath.Join(pkiDir, ServerKeyPlaintextFile)
+	if err := os.WriteFile(path, srvKeyPEM, keyPerm); err != nil {
+		return fmt.Errorf("write %s: %w", ServerKeyPlaintextFile, err)
+	}
+
+	return nil
+}
+
 // generateAndPersistPKI creates a new ECDSA P-256 root CA and signs a server
 // certificate, then writes all four PEM files to pkiDir.
 //
@@ -172,9 +193,15 @@ func serverCertDNSNames(ctx context.Context, runtimeType types.RuntimeType) ([]s
 			return nil, fmt.Errorf("DOMAIN_SUFFIX environment variable not set — cannot generate gateway server cert")
 		}
 
+		// SANs needed on the CP server cert:
+		//   - WorkerGatewayName.domainSuffix  → workers dialing the gRPC gateway (port 9191)
+		//   - PodmanGatewayPodName            → pod-local DNS name inside the Podman network
+		//   - domainSuffix                    → worker Caddy egress dials CP Caddy :8443
+		//                                       at the bare domain (e.g. 10.x.x.x.nip.io)
 		return []string{
 			workerconstants.WorkerGatewayName + "." + domainSuffix,
 			workerconstants.PodmanGatewayPodName,
+			domainSuffix,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported runtime type %q for gateway PKI generation", runtimeType)
@@ -217,6 +244,11 @@ func generateAndPersistPKI(ctx context.Context, pkiDir string, runtimeType types
 	srvKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: srvKeyDER})
 
 	if err := writePKIFiles(pkiDir, caKeyPEM, caCertDER, srvKeyPEM, srvCertDER, secret); err != nil {
+		return empty, err
+	}
+
+	// Write the plaintext server key so Caddy can load it directly on :8443.
+	if err := writePlaintextServerKey(pkiDir, srvKeyPEM); err != nil {
 		return empty, err
 	}
 
@@ -307,6 +339,12 @@ func loadPKI(caCrtPath, caKeyPath, srvCrtPath, srvKeyPath string) (pkiResult, er
 
 	srvKeyPEM, err := loadServerKeyPEM(srvKeyPath, secret)
 	if err != nil {
+		return empty, err
+	}
+
+	// Refresh the plaintext server key on disk for Caddy each time PKI is loaded.
+	pkiDir := filepath.Dir(srvKeyPath)
+	if err := writePlaintextServerKey(pkiDir, srvKeyPEM); err != nil {
 		return empty, err
 	}
 
