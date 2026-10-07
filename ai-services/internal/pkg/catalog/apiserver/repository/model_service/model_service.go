@@ -22,11 +22,16 @@ import (
 	dbrepo "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/repository"
 	catalogtypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/validators"
+	"github.com/project-ai-services/ai-services/internal/pkg/cli/helpers"
+	"github.com/project-ai-services/ai-services/internal/pkg/image"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime"
 	remoteruntime "github.com/project-ai-services/ai-services/internal/pkg/runtime/remote"
 	runtimetypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
+	"github.com/project-ai-services/ai-services/internal/pkg/utils"
 	workerconstants "github.com/project-ai-services/ai-services/internal/pkg/worker/constants"
+	"github.com/project-ai-services/ai-services/internal/pkg/worker/payload"
+	workerpb "github.com/project-ai-services/ai-services/internal/pkg/worker/proto"
 	"github.com/project-ai-services/ai-services/internal/pkg/worker/stream"
 )
 
@@ -221,10 +226,12 @@ func validateModelParams(params map[string]any) error {
 }
 
 // deployAsync is the background goroutine that drives the full deployment sequence:
-//  1. Create the model pod (control-plane Podman or remote worker via gRPC)
-//  2. Register the LiteLLM route once the pod is reachable
-//  3. Generate and persist a per-model virtual key
-//  4. Mark the component Running
+//  1. Pull the provider container image (skip if already present)
+//  2. Download model weights to the local models directory
+//  3. Create the model pod (control-plane Podman or remote worker via gRPC)
+//  4. Register the LiteLLM route once the pod is reachable
+//  5. Generate and persist a per-model virtual key
+//  6. Mark the component Running
 func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, req apimodels.DeployModelRequest, _ *catalogtypes.Component) {
 	log := func(msg string, args ...any) {
 		logger.InfofCtx(ctx, "[modelmanager] component %s: "+msg, append([]any{componentID}, args...)...)
@@ -237,10 +244,33 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 	modelName, _ := req.Params["model"].(string)
 	routeID := buildRouteID(modelName, req.ProviderID)
 
-	// ── Step 1: deploy the model pod ──────────────────────────────────────────
+	// Build the runtime once — reused for image pull, model download, and pod creation.
+	rt, err := s.buildRuntime(req.WorkerSelector)
+	if err != nil {
+		fail(fmt.Sprintf("failed to build runtime: %v", err))
+		return
+	}
+
+	// ── Step 1: pull container image ──────────────────────────────────────────
+	log("pulling container image for provider %q", req.ProviderID)
+
+	if err := s.pullProviderImage(ctx, rt, req.Type, req.ProviderID); err != nil {
+		fail(fmt.Sprintf("image pull failed: %v", err))
+		return
+	}
+
+	// ── Step 2: download model weights ────────────────────────────────────────
+	log("downloading model weights %q", modelName)
+
+	if err := s.downloadModel(ctx, rt, modelName); err != nil {
+		fail(fmt.Sprintf("model download failed: %v", err))
+		return
+	}
+
+	// ── Step 3: deploy the model pod ──────────────────────────────────────────
 	log("deploying pod for provider %q model %q", req.ProviderID, modelName)
 
-	podHost, err := s.deployModelPod(ctx, componentID, req)
+	podHost, err := s.deployModelPod(ctx, componentID, req, rt)
 	if err != nil {
 		fail(fmt.Sprintf("pod creation failed: %v", err))
 		return
@@ -268,7 +298,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 		apiBase = fmt.Sprintf("http://%s:8000/v1", podHost)
 	}
 
-	// ── Step 3: register the LiteLLM route ────────────────────────────────────
+	// ── Step 4: register the LiteLLM route ────────────────────────────────────
 	log("registering LiteLLM route %q api_base=%s", routeID, apiBase)
 
 	if err := s.registerLiteLLMRoute(ctx, routeID, modelName, apiBase); err != nil {
@@ -276,7 +306,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 		return
 	}
 
-	// ── Step 4: generate and persist the per-model virtual key ────────────────
+	// ── Step 5: generate and persist the per-model virtual key ────────────────
 	log("generating virtual key for route %q", routeID)
 
 	virtualKey, err := s.generateVirtualKey(ctx, routeID)
@@ -294,7 +324,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 		return
 	}
 
-	// ── Step 5: mark Running ──────────────────────────────────────────────────
+	// ── Step 6: mark Running ──────────────────────────────────────────────────
 	log("deployment complete; setting status Running")
 
 	if err := s.componentRepo.UpdateStatus(ctx, componentID, dbmodels.ComponentStatusRunning, "Model running"); err != nil {
@@ -302,52 +332,100 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, r
 	}
 }
 
+// buildRuntime constructs the appropriate Runtime for a given worker selector.
+//
+// For a named remote worker — RemoteRuntime over the gRPC stream to that worker daemon.
+// For the local control-plane — RemoteRuntime pointing at LocalWorkerName (same as the
+// DeploymentPlanner) so that Spyre-card discovery works; falls back to runtimeFactory
+// when the local worker daemon is not connected (non-Spyre providers only).
+func (s *ModelService) buildRuntime(workerSelector string) (runtime.Runtime, error) {
+	if workerSelector != "" {
+		runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(workerSelector)
+		if !ok {
+			return nil, fmt.Errorf("worker %q is not connected", workerSelector)
+		}
+		return remoteruntime.New(workerSelector, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry), nil
+	}
+
+	runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(workerconstants.LocalWorkerName)
+	if !ok {
+		// Local worker daemon not connected — fall back to direct runtime creation.
+		// Spyre card discovery will not be available; non-Spyre providers (vllm-cpu) still work.
+		if s.runtimeFactory == nil {
+			return nil, fmt.Errorf("local runtime factory not configured")
+		}
+		rt, err := s.runtimeFactory.Create("")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create local runtime: %w", err)
+		}
+		return rt, nil
+	}
+
+	return remoteruntime.New(workerconstants.LocalWorkerName, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry), nil
+}
+
+// pullProviderImage pulls the container image declared in the provider's values.yaml.
+// Mirrors pullImagesForDeployment in the application deploy path.
+func (s *ModelService) pullProviderImage(ctx context.Context, rt runtime.Runtime, componentType, providerID string) error {
+	values, err := s.catalogProvider.LoadComponentValues(componentType, providerID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load component values: %w", err)
+	}
+
+	img, _ := values["image"].(string)
+	if img == "" {
+		logger.InfofCtx(ctx, "[modelmanager] no image declared for %s/%s, skipping pull", componentType, providerID)
+		return nil
+	}
+
+	imgHelper := &image.Images{Runtime: rt}
+	if err := imgHelper.IfNotPresent(ctx, []string{img}); err != nil {
+		return fmt.Errorf("failed to pull image %q: %w", img, err)
+	}
+
+	return nil
+}
+
+// downloadModel downloads the model weights to the host models directory.
+// Mirrors downloadModels in the application deploy path:
+// - Remote worker: forwards COMMAND_TYPE_DOWNLOAD_MODEL over the gRPC stream.
+// - Local control-plane: calls helpers.DownloadModelContainer directly.
+func (s *ModelService) downloadModel(ctx context.Context, rt runtime.Runtime, modelName string) error {
+	if remoteRT, ok := rt.(*remoteruntime.RemoteRuntime); ok {
+		_, err := remoteRT.Send(ctx, workerpb.CommandType_COMMAND_TYPE_DOWNLOAD_MODEL, payload.DownloadModel{
+			Model: modelName,
+		})
+		if err != nil {
+			return fmt.Errorf("remote model download failed: %w", err)
+		}
+		return nil
+	}
+
+	if err := helpers.DownloadModelContainer(ctx, modelName, utils.GetModelsPath()); err != nil {
+		return fmt.Errorf("local model download failed: %w", err)
+	}
+
+	return nil
+}
+
 // deployModelPod renders the catalog templates for the component and creates the pod via
-// the appropriate runtime (local Podman or remote worker over gRPC).
+// the provided runtime (local Podman or remote worker over gRPC).
 // It returns the pod hostname (podSpec.Name from the rendered template) which the caller
 // uses to construct the LiteLLM api_base for control-plane deploys.
-func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, req apimodels.DeployModelRequest) (string, error) {
+func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, req apimodels.DeployModelRequest, rt runtime.Runtime) (string, error) {
 	modelName, _ := req.Params["model"].(string)
-
-	// Choose runtime: remote worker or local control-plane.
-	//
-	// For remote workers we always use RemoteRuntime (gRPC stream to the worker daemon).
-	// For the local control-plane we also use RemoteRuntime pointing at LocalWorkerName —
-	// this is the same pattern the DeploymentPlanner uses so that FindFreeSpyreCards
-	// (which probes /dev/vfio) is always routed through the worker daemon rather than
-	// called directly from the catalog API process.
-	var rt runtime.Runtime
-	if req.WorkerSelector != "" {
-		runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(req.WorkerSelector)
-		if !ok {
-			return "", fmt.Errorf("worker %q is not connected", req.WorkerSelector)
-		}
-		rt = remoteruntime.New(req.WorkerSelector, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry)
-	} else {
-		runtimeTypeStr, ok := s.workerRegistry.WorkerRuntimeType(workerconstants.LocalWorkerName)
-		if !ok {
-			// Local worker not connected — fall back to creating the runtime directly.
-			// Spyre card discovery will not be available in this case; non-Spyre
-			// providers (vllm-cpu) can still deploy successfully.
-			if s.runtimeFactory == nil {
-				return "", fmt.Errorf("local runtime factory not configured")
-			}
-			var err error
-			rt, err = s.runtimeFactory.Create("")
-			if err != nil {
-				return "", fmt.Errorf("failed to create local runtime: %w", err)
-			}
-		} else {
-			rt = remoteruntime.New(workerconstants.LocalWorkerName, runtimetypes.RuntimeType(runtimeTypeStr), s.workerRegistry)
-		}
-	}
 
 	// Load catalog values for this provider so the templates render correctly.
 	// Params.model maps directly to the "model" key in values.yaml — no remapping needed.
+	// All scalar param types are stringified so numeric overrides (e.g. maxModelLen)
+	// are applied correctly — matching the FlattenMapWithValues behaviour in the app path.
 	paramOverrides := make(map[string]string, len(req.Params))
 	for k, v := range req.Params {
-		if sv, ok := v.(string); ok {
+		switch sv := v.(type) {
+		case string:
 			paramOverrides[k] = sv
+		case bool, int, int64, float64:
+			paramOverrides[k] = fmt.Sprintf("%v", sv)
 		}
 	}
 
@@ -735,7 +813,7 @@ func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID s
 	}, nil
 }
 
-// undeployAsync drives the full LiteLLM-deregister → key-revoke → DB-cleanup sequence.
+// undeployAsync drives the LiteLLM-deregister → key-revoke → DB-cleanup sequence.
 func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component) {
 	log := func(msg string, args ...any) {
 		logger.InfofCtx(ctx, "[modelmanager] component %s: undeploy: "+msg, append([]any{c.ID}, args...)...)
@@ -766,7 +844,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 		}
 	}
 
-	// Step 4 & 5: delete component row (cascade deletes keys row if still present).
+	// Step 4: delete component row (cascade deletes keys row if still present).
 	log("deleting component row")
 	if err := s.componentRepo.Delete(ctx, c.ID); err != nil {
 		logger.ErrorfCtx(ctx, "[modelmanager] component %s: failed to delete component row: %v", c.ID, err)
