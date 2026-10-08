@@ -185,14 +185,11 @@ func connectAndStream(ctx context.Context, rt runtime.Runtime, pr *workercaddy.P
 		return fmt.Errorf("worker join: %w", err)
 	}
 
-	// Register a static LiteLLM egress route on worker Caddy :8080 so that
-	// service pods on this worker can reach LiteLLM on the CP via mTLS.
-	// Route: /litellm/* → mTLS → CP Caddy :8443 → litellm:4000
-	// The path is forwarded as-is; CP Caddy :8443 strips /litellm and dials litellm:4000.
-	if err := registerLiteLLMEgressRoute(ctx, gatewayAddr, tlsDir); err != nil {
-		// Non-fatal — log and continue.
-		logger.WarningfCtx(ctx, "worker join: failed to register LiteLLM egress route on worker Caddy :8080: %v", err)
-	}
+	// Register the LiteLLM egress route on worker Caddy :8080 in a background
+	// goroutine with retries. Worker Caddy starts in a later layer than the
+	// worker process (metadata.yaml layer 3 vs layer 2), so the Admin API is
+	// not available yet when connectAndStream is first called.
+	go retryRegisterLiteLLMEgressRoute(ctx, gatewayAddr, tlsDir)
 
 	tlsCfg, err := buildTLSConfig(gatewayAddr, tlsDir, &cert)
 	if err != nil {

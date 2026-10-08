@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"time"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/proxy"
 	workerconstants "github.com/project-ai-services/ai-services/internal/pkg/worker/constants"
@@ -24,6 +25,23 @@ const (
 // to reach LiteLLM. It points at the worker's local Caddy egress (:8080) which
 // tunnels the request over mTLS to CP Caddy :8443 → litellm:4000.
 const LiteLLMEgressURL = "http://" + workerconstants.WorkerCaddyPodName + ":8080" + liteLLMPathPrefix
+
+// retryRegisterLiteLLMEgressRoute retries registerLiteLLMEgressRoute every 10s
+// until it succeeds or ctx is cancelled. Worker Caddy starts in a later deploy
+// layer than the worker process so the Admin API is not immediately available.
+func retryRegisterLiteLLMEgressRoute(ctx context.Context, gatewayAddr, tlsDir string) {
+	const retryInterval = 10 * time.Second
+	for {
+		if err := registerLiteLLMEgressRoute(ctx, gatewayAddr, tlsDir); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryInterval):
+		}
+	}
+}
 
 // registerLiteLLMEgressRoute registers a static egress route on worker Caddy :8080:
 //

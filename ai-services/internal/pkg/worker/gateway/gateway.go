@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
@@ -55,30 +56,19 @@ type Gateway struct {
 }
 
 // New creates a Gateway backed by the given registry.
-// After PKI is ready it registers a static LiteLLM ingress route on the CP
-// Caddy :8443 mTLS ingress server so worker-side services can reach LiteLLM
-// via the reverse tunnel: worker Caddy :8080 → (mTLS) → CP Caddy :8443 → litellm:4000.
 func New(ctx context.Context, reg *registry.Registry, runtimeType types.RuntimeType) (*Gateway, error) {
 	pki, err := loadOrGeneratePKI(ctx, workerconstants.GatewayPKIDir, runtimeType)
 	if err != nil {
 		return nil, fmt.Errorf("worker gateway: PKI init failed: %w", err)
 	}
 
-	gw := &Gateway{
+	return &Gateway{
 		registry:   reg,
 		caCert:     pki.caCert,
 		caKey:      pki.caKey,
 		serverCert: pki.serverCert,
 		caCertPool: pki.caCertPool,
-	}
-
-	if err := gw.registerLiteLLMIngressRoute(ctx); err != nil {
-		// Non-fatal: log and continue — the route can be registered later
-		// once Caddy is healthy.
-		logger.WarningfCtx(ctx, "worker gateway: failed to register LiteLLM ingress route on CP Caddy :8443 (will retry): %v", err)
-	}
-
-	return gw, nil
+	}, nil
 }
 
 // registerLiteLLMIngressRoute registers a static path-based route on the CP
@@ -97,12 +87,36 @@ func (g *Gateway) registerLiteLLMIngressRoute(ctx context.Context) error {
 		return fmt.Errorf("CP Caddy not reachable: %w", err)
 	}
 
+	// Derive the LiteLLM upstream dial address from LITELLM_URL env var so the
+	// pod name (e.g. "ai-services--litellm") doesn't need to be hardcoded here.
+	// Strip the scheme: "http://ai-services--litellm:4000" → "ai-services--litellm:4000"
+	litellmUpstream := liteLLMUpstream()
+	logger.InfofCtx(ctx, "worker gateway: registering LiteLLM CP ingress route → %s", litellmUpstream)
+
 	return pm.RegisterMTLSPathRoute(ctx, proxy.Route{
 		ID:         "litellm--cp-ingress",
 		PathPrefix: "/litellm",
-		Upstream:   "litellm:4000",
+		Upstream:   litellmUpstream,
 		Terminal:   true,
 	})
+}
+
+// liteLLMUpstream returns the host:port dial address for the LiteLLM pod,
+// derived from the LITELLM_URL env var (e.g. "http://ai-services--litellm:4000"
+// → "ai-services--litellm:4000"). Falls back to "ai-services--litellm:4000".
+func liteLLMUpstream() string {
+	const fallback = "ai-services--litellm:4000"
+	raw := os.Getenv("LITELLM_URL")
+	if raw == "" {
+		return fallback
+	}
+	// Strip scheme prefix.
+	for _, prefix := range []string{"https://", "http://"} {
+		if len(raw) > len(prefix) && raw[:len(prefix)] == prefix {
+			return raw[len(prefix):]
+		}
+	}
+	return raw
 }
 
 // Start begins listening on addr (e.g. ":9191") and serves gRPC in a background goroutine.
@@ -147,6 +161,12 @@ func (g *Gateway) Start(ctx context.Context, cancel context.CancelCauseFunc, add
 
 	go g.runSweeper(ctx)
 
+	// Register the LiteLLM ingress route on CP Caddy :8443 in a background
+	// goroutine with retries. Caddy may not be ready yet when Start is called
+	// (separate pod, startup race), so we keep retrying until it succeeds or
+	// the context is cancelled.
+	go g.retryRegisterLiteLLMIngressRoute(ctx)
+
 	go func() {
 		<-ctx.Done()
 		logger.InfolnCtx(ctx, "WorkerGateway shutting down")
@@ -154,6 +174,24 @@ func (g *Gateway) Start(ctx context.Context, cancel context.CancelCauseFunc, add
 	}()
 
 	return nil
+}
+
+// retryRegisterLiteLLMIngressRoute retries registerLiteLLMIngressRoute every
+// 10 seconds until it succeeds or ctx is cancelled. This handles the startup
+// race where CP Caddy is not yet healthy when the catalog process starts.
+func (g *Gateway) retryRegisterLiteLLMIngressRoute(ctx context.Context) {
+	const retryInterval = 10 * time.Second
+	for {
+		if err := g.registerLiteLLMIngressRoute(ctx); err == nil {
+			logger.InfofCtx(ctx, "worker gateway: LiteLLM CP ingress route registered on :8443")
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryInterval):
+		}
+	}
 }
 
 // runSweeper periodically asks the registry to mark stale workers disconnected.
