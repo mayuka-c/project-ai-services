@@ -13,6 +13,11 @@ spec:
     - name: opensearch-secret
       secret:
         secretName: "opensearch-secret-{{ .Values.vector_store.instanceSlug }}"
+    {{- if .Values.litellm.key }}
+    - name: litellm-secret
+      secret:
+        secretName: "litellm-secret-{{ .InstanceSlug }}"
+    {{- end }}
   containers:
     - name: ui
       image: "{{ .Values.ui.image }}"
@@ -56,6 +61,9 @@ spec:
         - |
           export OPENSEARCH_USERNAME=$(cat /etc/secret/opensearch-secret/username)
           export OPENSEARCH_PASSWORD=$(cat /etc/secret/opensearch-secret/password)
+          {{- if .Values.litellm.key }}
+          export LLM_API_KEY=$(cat /etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY)
+          {{- end }}
           exec /var/venv/bin/python -m uvicorn app:app \
             --host 0.0.0.0 \
             --port 5000 \
@@ -63,13 +71,13 @@ spec:
             --http httptools
       env:
         - name: EMB_ENDPOINT
-          value: "http://{{ .Values.embedding.host }}:{{ .Values.embedding.port }}"
+          value: "http://{{ .Values.embedding.host }}:{{ .Values.embedding.port }}{{ .Values.embedding.prefixPath }}"
         - name: EMB_MODEL
           value: "{{ .Values.embedding.model }}"
         - name: EMB_MAX_MODEL_LEN
           value: "{{ .Values.embedding.maxModelLen }}"
         - name: LLM_ENDPOINT
-          value: "http://{{ .Values.llm.host }}:{{ .Values.llm.port }}"
+          value: "http://{{ .Values.llm.host }}:{{ .Values.llm.port }}{{ .Values.llm.prefixPath }}"
         - name: LLM_MODEL
           value: "{{ .Values.llm.model }}"
         - name: LLM_MAX_MODEL_LEN
@@ -122,6 +130,11 @@ spec:
         - mountPath: /etc/secret/opensearch-secret
           name: opensearch-secret
           readOnly: true
+        {{- if .Values.litellm.key }}
+        - mountPath: /etc/secret/litellm-secret
+          name: litellm-secret
+          readOnly: true
+        {{- end }}
     - name: mcp-sidecar
       image: "{{ .Values.mcp.image }}"
       args:

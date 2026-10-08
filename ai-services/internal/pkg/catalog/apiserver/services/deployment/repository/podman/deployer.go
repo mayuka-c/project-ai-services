@@ -115,6 +115,17 @@ func (d *PodmanDeployer) ExecuteDeployment(
 		}
 	}
 
+	// Step 2b: Post-component hook — runs after all component pods are up but
+	// before service pods start. Used by the app-create flow to register LiteLLM
+	// routes for newly deployed models and inject virtual keys into service Values.
+	if plan.PostComponentHook != nil {
+		if err := plan.PostComponentHook(ctx); err != nil {
+			catalogutils.HandleDeploymentStepError(ctx, d.appRepo, plan.ApplicationID, "Post-component hook failed", err)
+
+			return fmt.Errorf("post-component hook failed: %w", err)
+		}
+	}
+
 	// Step 3: Deploy services if any
 	if len(plan.Services) > 0 {
 		if err := d.deployServices(ctx, plan); err != nil {
@@ -418,8 +429,17 @@ func (d *PodmanDeployer) deployComponentsConcurrently(ctx context.Context, compo
 }
 
 // deployComponent deploys a single component and updates its endpoint in the database.
+// When comp.PreDeployed is true a running managed model already provides this component;
+// pod creation is skipped and the pre-populated Endpoints are merged into services directly.
 func (d *PodmanDeployer) deployComponent(ctx context.Context, hash string, comp *ComponentPlan, plan *DeploymentPlan, mu *sync.Mutex) error {
 	logger.InfofCtx(ctx, "Deploying component %s (%s/%s)...\n", comp.ComponentType, comp.ProviderID, hash)
+
+	if comp.PreDeployed {
+		logger.InfofCtx(ctx, "Component %s is pre-deployed (managed model reuse); skipping pod creation\n", comp.ComponentType)
+		// Endpoints were already populated by resolveModelComponent — just merge them.
+		d.mergeComponentEndpoints(ctx, comp, plan, mu)
+		return nil
+	}
 
 	component, metadata, tmpls, err := d.loadComponentResources(comp)
 	if err != nil {

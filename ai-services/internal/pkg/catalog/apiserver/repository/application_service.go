@@ -53,6 +53,7 @@ func NewApplicationService(
 	reg stream.WorkerRegistry,
 	connectorRepo dbrepo.ConnectorRepository,
 	datasourceSvc appservice.DatasourceConnector,
+	keyRepo dbrepo.KeyRepository,
 ) ApplicationServiceInterface {
 	if runtimeType != runtimeTypes.RuntimeTypePodman && runtimeType != runtimeTypes.RuntimeTypeOpenShift {
 		panic(fmt.Sprintf("unsupported runtime type %q", runtimeType))
@@ -76,5 +77,6 @@ func NewApplicationService(
 		DeploymentRegistry:    appservice.NewDeploymentRegistry(),
 		WorkerRegistry:        reg,
 		DatasourceService:     datasourceSvc,
+		KeyRepo:               keyRepo,
 	}
 }

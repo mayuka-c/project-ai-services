@@ -43,6 +43,9 @@ type ComponentRepository interface {
 	// GetApplicationsByComponentID returns the list of applications linked to a component
 	// via service_dependencies (dependency_type = 'component').
 	GetApplicationsByComponentID(ctx context.Context, componentID uuid.UUID) ([]ApplicationRef, error)
+	// GetRunningByTypeAndProvider returns the first managed component (created_by IS NOT NULL)
+	// that has the given type and provider and is in Running status, or (nil, nil) if none exists.
+	GetRunningByTypeAndProvider(ctx context.Context, componentType, provider string) (*models.Component, error)
 }
 
 // ApplicationRef is a lightweight struct for applications linked to a component.
@@ -498,6 +501,34 @@ func collectComponents(rows pgx.Rows) ([]models.Component, error) {
 		return nil, fmt.Errorf("error iterating components: %w", err)
 	}
 	return components, nil
+}
+
+// GetRunningByTypeAndProvider returns the first managed component with the given type and
+// provider that is currently in Running status, or (nil, nil) when none exists.
+// "Managed" means created_by IS NOT NULL — i.e. deployed via the model-manager API.
+func (r *componentRepo) GetRunningByTypeAndProvider(ctx context.Context, componentType, provider string) (*models.Component, error) {
+	query := selectComponentColumns + `
+		WHERE type       = $1
+		  AND provider   = $2
+		  AND status     = 'Running'
+		  AND created_by IS NOT NULL
+		ORDER BY created_at DESC
+		LIMIT 1`
+
+	rows, err := r.pool.Query(ctx, query, componentType, provider)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query running component for %s/%s: %w", componentType, provider, err)
+	}
+	defer rows.Close()
+
+	components, err := collectComponents(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(components) == 0 {
+		return nil, nil
+	}
+	return &components[0], nil
 }
 
 // Made with Bob

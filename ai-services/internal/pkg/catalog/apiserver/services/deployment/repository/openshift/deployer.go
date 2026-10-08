@@ -97,6 +97,16 @@ func (d *OpenShiftDeployer) ExecuteDeployment(
 		return err
 	}
 
+	// Phase 1b: Post-component hook — runs after all component pods are up but
+	// before service pods start (mirrors the Podman deployer).
+	if plan.PostComponentHook != nil {
+		if err := plan.PostComponentHook(ctx); err != nil {
+			catalogutils.HandleDeploymentStepError(ctx, d.appRepo, plan.ApplicationID, "Post-component hook failed", err)
+
+			return err
+		}
+	}
+
 	// Phase 2: Deploy services concurrently via Helm.
 	if err := d.deployServicesConcurrently(ctx, plan); err != nil {
 		catalogutils.HandleDeploymentStepError(ctx, d.appRepo, plan.ApplicationID, "Service deployment failed", err)
@@ -170,7 +180,14 @@ func (d *OpenShiftDeployer) deployComponentsConcurrently(ctx context.Context, pl
 
 // deployComponent installs or upgrades the Helm chart for a single component,
 // then registers the deterministic KServe predictor endpoint in the database.
+// When comp.PreDeployed is true a running managed model already provides this component;
+// Helm installation is skipped and the existing endpoint stays in place.
 func (d *OpenShiftDeployer) deployComponent(ctx context.Context, plan *DeploymentPlan, comp *ComponentPlan) error {
+	if comp.PreDeployed {
+		logger.InfofCtx(ctx, "Component %s is pre-deployed (managed model reuse); skipping Helm install\n", comp.ComponentType)
+		return nil
+	}
+
 	componentKey := fmt.Sprintf("%s/%s", comp.ComponentType, comp.ProviderID)
 
 	fsys, err := d.catalogProvider.GetItemFS(componentKey)

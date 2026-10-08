@@ -1,10 +1,14 @@
 package applicationservice
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -12,6 +16,7 @@ import (
 	apimodels "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/models"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/deletion"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/deployment"
+	deploymenttypes "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/services/deployment/types"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/constants"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/db/models"
 	dbrepo "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/repository"
@@ -25,8 +30,129 @@ import (
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime/common"
 	runtimeTypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
 	workerconstants "github.com/project-ai-services/ai-services/internal/pkg/worker/constants"
+	"github.com/project-ai-services/ai-services/internal/pkg/worker/join"
 	"github.com/project-ai-services/ai-services/internal/pkg/worker/stream"
 )
+
+const (
+	// litellmURLEnvApp and litellmMasterKeyEnvApp read the same env vars as model_service
+	// so both paths talk to the same LiteLLM instance.
+	litellmURLEnvApp        = "LITELLM_URL"
+	litellmMasterKeyEnvApp  = "LITELLM_MASTER_KEY"
+	defaultLiteLLMURLApp    = "http://litellm:4000"
+	allowedRouteCharsApp    = `[^a-zA-Z0-9-]`
+
+	// managedModelTypesSet is the set of component types that may be pre-deployed
+	// by the model-manager API and therefore eligible for reuse.
+)
+
+// managedModelTypes lists the component roles that are managed via the model-manager
+// API (POST /api/v1/models) and may therefore already be running when an application
+// is created.
+var managedModelTypes = map[string]bool{
+	"llm":       true,
+	"embedding": true,
+	"reranker":  true,
+}
+
+// litellmURLApp returns the LiteLLM base URL from the environment.
+func litellmURLApp() string {
+	if v := os.Getenv(litellmURLEnvApp); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return defaultLiteLLMURLApp
+}
+
+// litellmMasterKeyApp returns the LiteLLM admin key from the environment.
+func litellmMasterKeyApp() string {
+	return os.Getenv(litellmMasterKeyEnvApp)
+}
+
+// sanitiseRouteSegmentApp mirrors the sanitiseRouteSegment helper in model_service.
+func sanitiseRouteSegmentApp(s string) string {
+	re := regexp.MustCompile(allowedRouteCharsApp)
+	s = re.ReplaceAllString(s, "-")
+	triple := regexp.MustCompile(`-{3,}`)
+	s = triple.ReplaceAllString(s, "-")
+	return strings.Trim(s, "-")
+}
+
+// buildAppRouteID returns the LiteLLM route ID for a model component.
+// Convention: {sanitised_model_name}--{provider_id}
+func buildAppRouteID(modelName, providerID string) string {
+	return sanitiseRouteSegmentApp(modelName) + "--" + sanitiseRouteSegmentApp(providerID)
+}
+
+// litellmPostApp POSTs a JSON payload to the LiteLLM Admin API.
+func litellmPostApp(ctx context.Context, path string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload for %s: %w", path, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, litellmURLApp()+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request for %s: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+litellmMasterKeyApp())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP request to %s failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s returned HTTP %d", path, resp.StatusCode)
+	}
+
+	return nil
+}
+
+// generateAppVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns
+// a virtual key scoped to the given routeID.
+func generateAppVirtualKey(ctx context.Context, appRouteKeyName, routeID string) (string, error) {
+	payload := map[string]any{
+		"key_name": appRouteKeyName,
+		"models":   []string{routeID},
+		"duration": nil,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal key/generate payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, litellmURLApp()+"/key/generate", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create key/generate request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+litellmMasterKeyApp())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("key/generate HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("key/generate returned HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode key/generate response: %w", err)
+	}
+	if result.Key == "" {
+		return "", fmt.Errorf("key/generate response contained no key")
+	}
+
+	return result.Key, nil
+}
 
 // DatasourceConnector is the minimal interface used by ApplicationServiceBase for
 // post-deploy connector attachment. It exposes only ConnectDatasourcesToApplication,
@@ -112,6 +238,11 @@ type ApplicationServiceBase struct {
 
 	// WorkerRegistry is used to resolve a remote runtime for worker-hosted applications.
 	WorkerRegistry stream.WorkerRegistry
+
+	// KeyRepo is optional. When set, it is used during the application create flow to
+	// check whether a running managed model already has a LiteLLM key (i.e. was
+	// already registered), so the route is not registered twice.
+	KeyRepo dbrepo.KeyRepository
 }
 
 // createRuntime returns the runtime.Runtime appropriate for app.
@@ -570,6 +701,10 @@ func (s *ApplicationServiceBase) insertApplicationRecord(
 }
 
 // insertComponentRecords inserts component records and returns a map of component hashes to UUIDs.
+// For managed-model component types (llm/embedding/reranker), it first checks whether a
+// running managed component already exists for the same type+provider. When one is found the
+// existing row is reused: comp.PreDeployed is set to true, comp.DatabaseID is set to the
+// existing UUID, and no new DB row is inserted.
 func (s *ApplicationServiceBase) insertComponentRecords(
 	ctx context.Context,
 	plan *deployment.DeploymentPlan,
@@ -581,6 +716,21 @@ func (s *ApplicationServiceBase) insertComponentRecords(
 	}
 
 	for hash, comp := range plan.Components {
+		// For managed-model types, check whether a running instance already exists.
+		if managedModelTypes[comp.ComponentType] {
+			existing, lookupErr := s.ComponentRepo.GetRunningByTypeAndProvider(ctx, comp.ComponentType, comp.ProviderID)
+			if lookupErr != nil {
+				return nil, fmt.Errorf("failed to look up running component for %s/%s: %w", comp.ComponentType, comp.ProviderID, lookupErr)
+			}
+			if existing != nil {
+				// Reuse the existing component — no new DB row needed.
+				comp.PreDeployed = true
+				comp.DatabaseID = existing.ID
+				componentIDMap[hash] = existing.ID
+				continue
+			}
+		}
+
 		instanceUUID := uuid.New()
 
 		// Filter metadata to exclude sensitive data based on schema
@@ -837,6 +987,31 @@ func (s *ApplicationServiceBase) executeDeploymentAsync(deployCtx context.Contex
 		}
 	}()
 
+	// ── Pre-deploy: handle components that are already running (PreDeployed=true) ──
+	//
+	// insertComponentRecords marked managed-model components as PreDeployed when a
+	// running managed instance was found.  For those components:
+	//   • Endpoints from the DB are copied into the ComponentPlan.
+	//   • The LiteLLM route is registered if missing (first-time for this component).
+	//   • A fresh per-application virtual key is generated and injected into every
+	//     dependent service's Values so the pod Secret template renders the key.
+	//
+	// For components that are NOT PreDeployed (new deploy), a PostComponentHook is
+	// registered on the plan.  The deployer calls it after all component pods are
+	// running but before services start.  The hook does the same LiteLLM + key
+	// work using the endpoint that the deployer populated in ComponentPlan.Endpoints.
+	if err := s.resolveModelsAndPrepareKeys(ctx, plan); err != nil {
+		logger.ErrorfCtx(ctx, "Model resolve / LiteLLM prep failed for application %s: %v", plan.ApplicationName, err)
+		if updateErr := catalogutils.UpdateApplicationStatus(ctx, s.AppRepo, plan.ApplicationID.String(), models.ApplicationStatusError, err.Error()); updateErr != nil {
+			logger.ErrorfCtx(ctx, "Failed to update application status to Error: %v", updateErr)
+		}
+		return
+	}
+
+	// Register the post-component hook for newly deployed managed-model components.
+	// The hook is a no-op when KeyRepo is nil or when all model components are PreDeployed.
+	plan.PostComponentHook = s.buildPostComponentHook(plan)
+
 	err := s.DeploymentExecutor.ExecuteWithPlan(ctx, plan, req)
 	if err != nil {
 		// Context cancelled — deletion is in charge of status, exit silently.
@@ -863,6 +1038,380 @@ func (s *ApplicationServiceBase) executeDeploymentAsync(deployCtx context.Contex
 	// the connector attachment is partial. Errors are logged for operator visibility.
 	s.attachConnectorsPostDeploy(ctx, plan.ApplicationID, req.Services)
 	logger.InfolnCtx(ctx, fmt.Sprintf("Post-deploy connector attachment completed for application %s", plan.ApplicationName))
+}
+
+// resolveModelsAndPrepareKeys iterates over all managed-model components in the plan
+// (type = llm / embedding / reranker), checks whether a running managed component
+// already exists for that type+provider, and:
+//
+//   - If a running component exists → marks it PreDeployed, copies its endpoint(s),
+//     and registers the LiteLLM route only when no key row exists yet (first-time path).
+//   - If no running component exists → leaves the component for normal pod deployment;
+//     does NOT register the route (model_service does that after the pod is healthy).
+//
+// In both cases a fresh per-application virtual key is generated via LiteLLM and
+// stored in every service Values map under "litellm" so catalog templates can render
+// a pod Secret with the key.
+//
+// When KeyRepo is nil (e.g. test environments) the function skips the DB lookup and
+// the LiteLLM calls gracefully, logging a warning.
+func (s *ApplicationServiceBase) resolveModelsAndPrepareKeys(ctx context.Context, plan *deployment.DeploymentPlan) error {
+	if s.KeyRepo == nil {
+		logger.WarningfCtx(ctx, "[app-deploy] KeyRepo not configured; skipping model reuse and LiteLLM key generation")
+		return nil
+	}
+
+	for _, comp := range plan.Components {
+		if !managedModelTypes[comp.ComponentType] {
+			continue
+		}
+
+		litellmInfo, err := s.resolveModelComponent(ctx, comp)
+		if err != nil {
+			return fmt.Errorf("failed to resolve model component %s/%s: %w", comp.ComponentType, comp.ProviderID, err)
+		}
+
+		if litellmInfo == nil {
+			// No running managed component found — normal deploy path, no LiteLLM prep needed here.
+			logger.InfofCtx(ctx, "[app-deploy] no running managed component for %s/%s; will deploy normally", comp.ComponentType, comp.ProviderID)
+			continue
+		}
+
+		// Inject model name + endpoint into service Values so templates have access.
+		s.injectLiteLLMIntoServices(ctx, plan, comp, litellmInfo)
+
+		logger.InfofCtx(ctx, "[app-deploy] component %s/%s: LiteLLM route=%s firstReg=%v",
+			comp.ComponentType, comp.ProviderID, litellmInfo.RouteID, litellmInfo.FirstRegistration)
+	}
+
+	return nil
+}
+
+// resolveModelComponent handles the LiteLLM prep for a managed-model component that was
+// already marked PreDeployed=true by insertComponentRecords (comp.DatabaseID is the
+// existing running component's UUID).  It:
+//  1. Fetches the existing component to get its endpoints and model metadata.
+//  2. Copies endpoints into ComponentPlan so mergeComponentEndpoints works normally.
+//  3. Checks whether a LiteLLM key already exists; if not, registers the route.
+//  4. Generates and returns a fresh per-application virtual key.
+//
+// Returns nil when comp.PreDeployed is false (normal new-deploy path).
+func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, comp *deploymenttypes.ComponentPlan) (*deploymenttypes.LiteLLMInfo, error) {
+	if !comp.PreDeployed {
+		return nil, nil
+	}
+
+	existing, err := s.ComponentRepo.GetByID(ctx, comp.DatabaseID)
+	if err != nil {
+		return nil, fmt.Errorf("DB lookup failed: %w", err)
+	}
+	if existing == nil {
+		return nil, nil
+	}
+
+	// Copy endpoints from DB record into ComponentPlan so mergeComponentEndpoints works normally.
+	for _, ep := range existing.Endpoints {
+		epType, _ := ep["type"].(string)
+		epURL, _ := ep["url"].(string)
+		if epType == "" || epURL == "" {
+			continue
+		}
+		// Translate the stored "service" endpoint to the host/port map that
+		// mergeEndpointIntoService expects: {"host": "<dns>", "port": "<port>"}.
+		if comp.Endpoints == nil {
+			comp.Endpoints = make(map[string]any)
+		}
+		comp.Endpoints[comp.ComponentType] = map[string]any{
+			"host": epURL,
+			"port": "8080",
+		}
+		break // first endpoint is sufficient
+	}
+
+	// Extract model name from component metadata.
+	modelName, _ := existing.Metadata["model"].(string)
+	comp.ModelName = modelName
+
+	routeID := buildAppRouteID(modelName, comp.ProviderID)
+
+	// Check whether this component already has a LiteLLM key → was already registered.
+	existingKey, err := s.KeyRepo.GetByComponentID(ctx, existing.ID)
+	if err != nil {
+		return nil, fmt.Errorf("key lookup failed for component %s: %w", existing.ID, err)
+	}
+
+	firstRegistration := existingKey == nil
+	if firstRegistration {
+		// No existing key → the route has not been registered with LiteLLM yet.
+		// Determine api_base from the first "service" endpoint.
+		apiBase := ""
+		for _, ep := range existing.Endpoints {
+			epType, _ := ep["type"].(string)
+			if epType == "service" {
+				epURL, _ := ep["url"].(string)
+				apiBase = epURL + "/v1"
+				break
+			}
+		}
+		if apiBase == "" {
+			logger.WarningfCtx(ctx, "[app-deploy] component %s has no service endpoint; skipping LiteLLM route registration", existing.ID)
+		} else {
+			logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for pre-deployed component %s", routeID, existing.ID)
+			if regErr := litellmPostApp(ctx, "/model/new", map[string]any{
+				"model_name": routeID,
+				"litellm_params": map[string]any{
+					"model":    "hosted_vllm/" + modelName,
+					"api_base": apiBase,
+				},
+			}); regErr != nil {
+				// Non-fatal: log but continue — the key can still be generated.
+				logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
+			}
+		}
+	}
+
+	// Generate a fresh per-application virtual key scoped to this LiteLLM route.
+	// The key name encodes the application ID so it is identifiable in LiteLLM's UI.
+	appKeyName := routeID + "--app-" + comp.DatabaseID.String()[:8]
+	virtualKey, err := generateAppVirtualKey(ctx, appKeyName, routeID)
+	if err != nil {
+		return nil, fmt.Errorf("virtual key generation failed for route %q: %w", routeID, err)
+	}
+
+	return &deploymenttypes.LiteLLMInfo{
+		RouteID:           routeID,
+		ModelName:         modelName,
+		VirtualKey:        virtualKey,
+		FirstRegistration: firstRegistration,
+	}, nil
+}
+
+// injectLiteLLMIntoServices merges LiteLLM connection details into the Values of every
+// service that depends on the given component.
+//
+// It sets two things in the service Values:
+//
+//  1. Values["litellm"] — the virtual key and route metadata so the
+//     litellm-secret.yaml.tmpl can render the pod Secret.
+//
+//  2. Values[componentType] overrides for host/port/model/apiKey — so the
+//     existing env vars in service templates (LLM_ENDPOINT, LLM_MODEL, etc.)
+//     automatically point at LiteLLM instead of the direct vLLM pod:
+//     • host  → LiteLLM host reachable from the pod's network
+//     • port  → corresponding port
+//     • model → LiteLLM route ID (e.g. "granite-3-3-8b--vllm-cpu")
+//     • apiKey → non-empty sentinel so templates render the secret-mount branch
+//
+// Endpoint resolution depends on where the application pods run:
+//   - Local worker: pods share the control-plane Podman network, so they reach
+//     LiteLLM directly via the pod DNS name from LITELLM_URL
+//     (e.g. "http://ai-services--litellm:4000").
+//   - Remote worker: pods are on a different host; they must go through the
+//     worker-side Caddy egress (LiteLLMEgressURL =
+//     "http://ai-services--caddy:8080/litellm") which tunnels over mTLS back
+//     to the control-plane Caddy and on to litellm:4000.
+func (s *ApplicationServiceBase) injectLiteLLMIntoServices(
+	ctx context.Context,
+	plan *deployment.DeploymentPlan,
+	comp *deploymenttypes.ComponentPlan,
+	info *deploymenttypes.LiteLLMInfo,
+) {
+	// Choose the endpoint reachable by pods running on the target worker.
+	var litellmEndpoint string
+	if plan.WorkerName == workerconstants.LocalWorkerName {
+		// Local worker: same Podman network as the LiteLLM pod — use direct URL.
+		litellmEndpoint = litellmURLApp()
+	} else {
+		// Remote worker: pods must tunnel through the worker Caddy egress.
+		litellmEndpoint = join.LiteLLMEgressURL
+	}
+
+	// Parse host, port and path prefix from the LiteLLM URL.
+	litellmHost, litellmPort, litellmPath := parseLiteLLMURL(litellmEndpoint)
+
+	for _, serviceID := range comp.UsedByServices {
+		svc, ok := plan.Services[serviceID]
+		if !ok {
+			continue
+		}
+		if svc.Values == nil {
+			svc.Values = make(map[string]any)
+		}
+
+		// 1. Set Values["litellm"] so the secret template renders.
+		svc.Values["litellm"] = map[string]any{
+			"key":      info.VirtualKey,
+			"modelName": info.ModelName,
+			"routeID":   info.RouteID,
+			"endpoint":  litellmEndpoint,
+		}
+
+		// 2. Override the component-type values so existing env var references
+		// (LLM_ENDPOINT, LLM_MODEL, EMB_ENDPOINT, EMB_MODEL, etc.) point at
+		// LiteLLM. Merge into any existing map so other fields (maxModelLen, etc.)
+		// are preserved.
+		compValues, _ := svc.Values[comp.ComponentType].(map[string]any)
+		if compValues == nil {
+			compValues = make(map[string]any)
+		}
+		compValues["host"] = litellmHost
+		compValues["port"] = litellmPort
+		// prefixPath is "/litellm" for remote-worker deployments (empty for local).
+		// Templates append it between the host:port and any API path so the worker
+		// Caddy egress route matches correctly:
+		//   local:  LLM_ENDPOINT = http://ai-services--litellm:4000
+		//   remote: LLM_ENDPOINT = http://ai-services--caddy:8080/litellm
+		compValues["prefixPath"] = litellmPath
+		compValues["model"] = info.RouteID
+		svc.Values[comp.ComponentType] = compValues
+
+		logger.InfofCtx(ctx, "[app-deploy] injected LiteLLM info into service %s (route=%s endpoint=%s:%s%s)",
+			serviceID, info.RouteID, litellmHost, litellmPort, litellmPath)
+	}
+}
+
+// parseLiteLLMURL splits a LiteLLM base URL into host, port, and path prefix.
+//
+//	"http://ai-services--litellm:4000"       → ("ai-services--litellm", "4000", "")
+//	"http://ai-services--caddy:8080/litellm" → ("ai-services--caddy",   "8080", "/litellm")
+func parseLiteLLMURL(rawURL string) (host, port, path string) {
+	s := rawURL
+	// Strip scheme.
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	// Split off path prefix.
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		path = s[idx:] // e.g. "/litellm"
+		s = s[:idx]
+	}
+	// Split host:port.
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		return s[:idx], s[idx+1:], path
+	}
+	return s, "4000", path
+}
+
+// buildPostComponentHook returns a closure that the deployer calls after all component pods
+// are running but before service pods are started.  It handles newly deployed managed-model
+// components (PreDeployed=false) by:
+//  1. Extracting the pod endpoint from comp.Endpoints (populated by the deployer).
+//  2. Registering the LiteLLM route (POST /model/new).
+//  3. Generating a virtual key and persisting it in the DB keys table.
+//  4. Generating a separate per-application virtual key and injecting it into
+//     every dependent service's Values under "litellm" so the Secret template
+//     renders it correctly.
+//
+// The hook is a no-op when KeyRepo is nil.
+func (s *ApplicationServiceBase) buildPostComponentHook(plan *deployment.DeploymentPlan) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if s.KeyRepo == nil {
+			return nil
+		}
+
+		for _, comp := range plan.Components {
+			if !managedModelTypes[comp.ComponentType] || comp.PreDeployed {
+				// Either not a managed-model type, or already handled in the pre-deploy path.
+				continue
+			}
+
+			if err := s.handleNewlyDeployedModel(ctx, plan, comp); err != nil {
+				// Log but do not abort — the pod is already running; LiteLLM reg is best-effort.
+				logger.ErrorfCtx(ctx, "[app-deploy] post-component hook failed for %s/%s: %v", comp.ComponentType, comp.ProviderID, err)
+			}
+		}
+
+		return nil
+	}
+}
+
+// handleNewlyDeployedModel performs LiteLLM registration, DB key persistence, and per-app
+// virtual key injection for a freshly deployed managed-model component.
+func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, plan *deployment.DeploymentPlan, comp *deploymenttypes.ComponentPlan) error {
+	// Extract model name from the component params (set by the planner from the request).
+	modelName, _ := comp.Params["model"].(string)
+	if modelName == "" {
+		// Fall back to Values (loaded from catalog values.yaml + overrides).
+		modelName, _ = comp.Values["model"].(string)
+	}
+
+	routeID := buildAppRouteID(modelName, comp.ProviderID)
+
+	// Derive api_base from the endpoint the deployer populated.
+	apiBase := ""
+	if ep, ok := comp.Endpoints[comp.ComponentType]; ok {
+		if epMap, ok := ep.(map[string]any); ok {
+			host, _ := epMap["host"].(string)
+			port, _ := epMap["port"].(string)
+			if host != "" {
+				if port == "" {
+					port = "8000"
+				}
+				apiBase = fmt.Sprintf("http://%s:%s/v1", host, port)
+			}
+		}
+	}
+
+	if apiBase == "" {
+		return fmt.Errorf("no endpoint found for component %s after deployment; skipping LiteLLM registration", comp.ComponentType)
+	}
+
+	// 1. Register the LiteLLM route.
+	logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for new component %s api_base=%s", routeID, comp.DatabaseID, apiBase)
+	if err := litellmPostApp(ctx, "/model/new", map[string]any{
+		"model_name": routeID,
+		"litellm_params": map[string]any{
+			"model":    "hosted_vllm/" + modelName,
+			"api_base": apiBase,
+		},
+	}); err != nil {
+		return fmt.Errorf("LiteLLM route registration failed: %w", err)
+	}
+
+	// 2. Generate and persist the per-model virtual key in the DB (same as model_service).
+	// Guard against duplicate inserts: if a key row already exists for this component
+	// (e.g. a retry after a partial failure) reuse the stored key rather than minting
+	// another one in LiteLLM and leaving the old one orphaned.
+	existingKey, err := s.KeyRepo.GetByComponentID(ctx, comp.DatabaseID)
+	if err != nil {
+		return fmt.Errorf("key lookup for component %s failed: %w", comp.DatabaseID, err)
+	}
+	if existingKey == nil {
+		modelVirtualKey, err := generateAppVirtualKey(ctx, routeID, routeID)
+		if err != nil {
+			return fmt.Errorf("model virtual key generation failed: %w", err)
+		}
+		if err := s.KeyRepo.Insert(ctx, &models.Key{
+			ComponentID: comp.DatabaseID,
+			VirtualKey:  modelVirtualKey,
+			RouteID:     routeID,
+		}); err != nil {
+			return fmt.Errorf("failed to persist model virtual key: %w", err)
+		}
+		logger.InfofCtx(ctx, "[app-deploy] model key persisted for component %s route=%s", comp.DatabaseID, routeID)
+	} else {
+		logger.InfofCtx(ctx, "[app-deploy] model key already exists for component %s route=%s; skipping insert", comp.DatabaseID, routeID)
+	}
+
+	// 3. Generate a fresh per-application virtual key and inject into service Values.
+	appKeyName := routeID + "--app-" + plan.ApplicationID.String()[:8]
+	appVirtualKey, err := generateAppVirtualKey(ctx, appKeyName, routeID)
+	if err != nil {
+		return fmt.Errorf("app virtual key generation failed: %w", err)
+	}
+
+	litellmInfo := &deploymenttypes.LiteLLMInfo{
+		RouteID:           routeID,
+		ModelName:         modelName,
+		VirtualKey:        appVirtualKey,
+		FirstRegistration: true,
+	}
+	s.injectLiteLLMIntoServices(ctx, plan, comp, litellmInfo)
+
+	logger.InfofCtx(ctx, "[app-deploy] new component %s/%s: LiteLLM route=%s key persisted, app key injected",
+		comp.ComponentType, comp.ProviderID, routeID)
+
+	return nil
 }
 
 // attachConnectorsPostDeploy calls ConnectDatasourcesToApplication with all unique connector

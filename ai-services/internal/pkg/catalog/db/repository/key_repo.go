@@ -17,6 +17,10 @@ type KeyRepository interface {
 	Insert(ctx context.Context, key *models.Key) error
 	// GetByComponentID returns the key for a given component, or (nil, nil) if not found.
 	GetByComponentID(ctx context.Context, componentID uuid.UUID) (*models.Key, error)
+	// GetByRouteID returns the key with the given route_id, or (nil, nil) if not found.
+	// Used to look up per-application virtual keys whose route_id encodes both the
+	// model route and the application UUID.
+	GetByRouteID(ctx context.Context, routeID string) (*models.Key, error)
 	// DeleteByComponentID removes the key row for the given component.
 	// It is a no-op (returns nil) when no row matches.
 	DeleteByComponentID(ctx context.Context, componentID uuid.UUID) error
@@ -66,6 +70,28 @@ func (r *keyRepo) GetByComponentID(ctx context.Context, componentID uuid.UUID) (
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get key for component %s: %w", componentID, err)
+	}
+
+	return &k, nil
+}
+
+// GetByRouteID returns the key with the given route_id, or (nil, nil) if not found.
+func (r *keyRepo) GetByRouteID(ctx context.Context, routeID string) (*models.Key, error) {
+	query := `
+		SELECT id, component_id, virtual_key, route_id, created_at
+		FROM keys
+		WHERE route_id = $1
+	`
+
+	var k models.Key
+	err := r.pool.QueryRow(ctx, query, routeID).Scan(
+		&k.ID, &k.ComponentID, &k.VirtualKey, &k.RouteID, &k.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get key for route_id %s: %w", routeID, err)
 	}
 
 	return &k, nil

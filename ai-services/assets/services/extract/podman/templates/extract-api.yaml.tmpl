@@ -13,10 +13,10 @@ spec:
     - name: extract-db-secret
       secret:
         secretName: "extract-db-secret-{{ .InstanceSlug }}"
-    {{- if .Values.llm.apiKey }}
-    - name: vllm-secret
+    {{- if .Values.litellm.key }}
+    - name: litellm-secret
       secret:
-        secretName: "vllm-secret-{{ .Values.llm.instanceSlug }}"
+        secretName: "litellm-secret-{{ .InstanceSlug }}"
     {{- end }}
   initContainers:
     - name: extract-db-init
@@ -50,8 +50,8 @@ spec:
         - |
           export POSTGRES_USER=$(cat /etc/secret/extract-db-secret/username)
           export POSTGRES_PASSWORD=$(cat /etc/secret/extract-db-secret/password)
-          {{- if .Values.llm.apiKey }}
-          export LLM_API_KEY=$(cat /etc/secret/vllm-secret/apiKey)
+          {{- if .Values.litellm.key }}
+          export LLM_API_KEY=$(cat /etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY)
           {{- end }}
           exec /var/venv/bin/python -m uvicorn extract.app:app \
             --host 0.0.0.0 \
@@ -72,7 +72,7 @@ spec:
         - name: PORT
           value: "9500"
         - name: LLM_ENDPOINT
-          value: "http://{{ .Values.llm.host }}:{{ .Values.llm.port }}"
+          value: "http://{{ .Values.llm.host }}:{{ .Values.llm.port }}{{ .Values.llm.prefixPath }}"
         - name: LLM_MODEL
           value: "{{ .Values.llm.model }}"
         - name: LLM_MAX_MODEL_LEN
@@ -101,8 +101,8 @@ spec:
         - mountPath: /etc/secret/extract-db-secret
           name: extract-db-secret
           readOnly: true
-        {{- if .Values.llm.apiKey }}
-        - mountPath: /etc/secret/vllm-secret
-          name: vllm-secret
+        {{- if .Values.litellm.key }}
+        - mountPath: /etc/secret/litellm-secret
+          name: litellm-secret
           readOnly: true
         {{- end }}
