@@ -116,8 +116,12 @@ func generateServerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, dnsNa
 		DNSNames:     dnsNames,
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(serverCertTTL),
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		KeyUsage:     x509.KeyUsageDigitalSignature,
+		// ServerAuth: CP serves this cert on its own :8443 mTLS ingress.
+		// ClientAuth: CP also presents this cert as a client cert when its Caddy
+		//             egress dials a worker's :8443 ingress. Go TLS rejects client
+		//             certs that lack ExtKeyUsageClientAuth with "bad certificate".
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		KeyUsage:    x509.KeyUsageDigitalSignature,
 	}
 	srvCertDER, err := x509.CreateCertificate(rand.Reader, srvTemplate, caCert, &srvKey.PublicKey, caKey)
 	if err != nil {
