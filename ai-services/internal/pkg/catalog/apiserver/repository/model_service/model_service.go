@@ -187,19 +187,7 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 		}
 	}
 
-	// 5. Conflict check — reject if a managed component of this type is already running or deploying.
-	active, err := s.componentRepo.ExistsByTypeAndActiveStatus(ctx, req.Type)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check for existing deployments: %w", err)
-	}
-	if active {
-		return nil, &ValidationError{
-			Code:    http.StatusConflict,
-			Message: fmt.Sprintf("a %s component is already Running or Deploying", req.Type),
-		}
-	}
-
-	// 6. Insert component row in Deploying state.
+	// 5. Insert component row in Deploying state.
 	modelName, _ := req.Params["model"].(string)
 	name := req.Name
 	createdBy := req.CreatedBy
@@ -253,6 +241,12 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 
 	modelName, _ := req.Params["model"].(string)
 	routeID := buildRouteID(modelName, req.ProviderID)
+
+	// Caddy @id values must be unique across all deployments — two workers (or
+	// two deploys of the same model) must not share a Caddy route ID.
+	// Append the component UUID short prefix to disambiguate while keeping the
+	// ID human-readable. The routeID itself (used for LiteLLM) stays unchanged.
+	caddyRouteID := routeID + "--" + componentID.String()[:8]
 
 	// Build the runtime once — reused for image pull, model download, and pod creation.
 	rt, err := s.buildRuntime(ctx, workerID)
@@ -329,12 +323,14 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		//   Worker ingress :8443  match /worker/<w>/models/<r>/*  → strip → pod :8000
 		//
 		// The prefix is stripped on both hops so vLLM always receives /v1/...
-		ingressPathPrefix := fmt.Sprintf("/worker/%s/models/%s", workerName, routeID)
+		// Path prefix uses caddyRouteID (includes component UUID short prefix) so
+		// two deployments of the same model on different workers never collide in Caddy.
+		ingressPathPrefix := fmt.Sprintf("/worker/%s/models/%s", workerName, caddyRouteID)
 
 		// 1. Register mTLS ingress on worker Caddy :8443 — path-based.
 		remotePM := proxy.NewRemoteProxyManager(remoteRT.Sender)
 		mtlsRoute := proxy.Route{
-			ID:         routeID + "--mtls",
+			ID:         caddyRouteID + "--mtls",
 			PathPrefix: ingressPathPrefix,
 			Upstream:   podHost + ":8000",
 			Terminal:   true,
@@ -354,7 +350,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 
 		workerDialAddr := fmt.Sprintf("%s.%s:%s", workerName, workerDomainSuffix, proxy.DefaultMTLSPort)
 		egressRoute := proxy.EgressRoute{
-			ID:                routeID + "--egress",
+			ID:                caddyRouteID + "--egress",
 			PathPrefix:        ingressPathPrefix,
 			DialUpstream:      workerDialAddr,
 			ClientCertPath:    workerconstants.GatewayPKIDir + "/server.crt",
@@ -912,8 +908,33 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 
 	modelName, _ := c.Metadata["model"].(string)
 	routeID := buildRouteID(modelName, c.Provider)
+	// Reconstruct the Caddy route ID using the same formula as deployAsync.
+	caddyRouteID := routeID + "--" + c.ID.String()[:8]
 
-	// Step 1: deregister LiteLLM route.
+	// Step 1: deregister Caddy routes (worker ingress + CP egress) for remote deploys.
+	if c.WorkerID != nil {
+		if workerName, ok := s.workerRegistry.WorkerNameByID(*c.WorkerID); ok && workerName != "" {
+			// Unregister worker ingress route.
+			if rt, err := s.buildRuntime(ctx, c.WorkerID); err == nil {
+				if remoteRT, ok := rt.(*remoteruntime.RemoteRuntime); ok {
+					remotePM := proxy.NewRemoteProxyManager(remoteRT.Sender)
+					log("unregistering mTLS ingress route %q from worker Caddy :8443", caddyRouteID+"--mtls")
+					if err := remotePM.UnregisterRoute(ctx, caddyRouteID+"--mtls"); err != nil {
+						logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to unregister worker ingress route (continuing): %v", c.ID, err)
+					}
+				}
+			}
+			// Unregister CP egress route.
+			if localPM, err := proxy.GetCaddyProxyManager(); err == nil {
+				log("unregistering mTLS egress route %q from CP Caddy :8080", caddyRouteID+"--egress")
+				if err := localPM.UnregisterRoute(ctx, caddyRouteID+"--egress"); err != nil {
+					logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to unregister CP egress route (continuing): %v", c.ID, err)
+				}
+			}
+		}
+	}
+
+	// Step 2: deregister LiteLLM route.
 	log("deregistering LiteLLM route %q", routeID)
 	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
 		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to deregister route %q (continuing): %v", c.ID, routeID, err)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
+	"github.com/project-ai-services/ai-services/internal/pkg/proxy"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
 	workerconstants "github.com/project-ai-services/ai-services/internal/pkg/worker/constants"
 	workerpb "github.com/project-ai-services/ai-services/internal/pkg/worker/proto"
@@ -54,19 +55,54 @@ type Gateway struct {
 }
 
 // New creates a Gateway backed by the given registry.
+// After PKI is ready it registers a static LiteLLM ingress route on the CP
+// Caddy :8443 mTLS ingress server so worker-side services can reach LiteLLM
+// via the reverse tunnel: worker Caddy :8080 → (mTLS) → CP Caddy :8443 → litellm:4000.
 func New(ctx context.Context, reg *registry.Registry, runtimeType types.RuntimeType) (*Gateway, error) {
 	pki, err := loadOrGeneratePKI(ctx, workerconstants.GatewayPKIDir, runtimeType)
 	if err != nil {
 		return nil, fmt.Errorf("worker gateway: PKI init failed: %w", err)
 	}
 
-	return &Gateway{
+	gw := &Gateway{
 		registry:   reg,
 		caCert:     pki.caCert,
 		caKey:      pki.caKey,
 		serverCert: pki.serverCert,
 		caCertPool: pki.caCertPool,
-	}, nil
+	}
+
+	if err := gw.registerLiteLLMIngressRoute(ctx); err != nil {
+		// Non-fatal: log and continue — the route can be registered later
+		// once Caddy is healthy.
+		logger.WarningfCtx(ctx, "worker gateway: failed to register LiteLLM ingress route on CP Caddy :8443 (will retry): %v", err)
+	}
+
+	return gw, nil
+}
+
+// registerLiteLLMIngressRoute registers a static path-based route on the CP
+// Caddy :8443 mTLS ingress server:
+//
+//	match:  /litellm/*
+//	strip:  /litellm
+//	dial:   litellm:4000  (plain HTTP to the LiteLLM pod)
+//
+// Workers egress through their own Caddy :8080 with mTLS to reach this route,
+// so service pods on the worker only need to call plain HTTP to their local
+// Caddy egress — they never see the mTLS layer.
+func (g *Gateway) registerLiteLLMIngressRoute(ctx context.Context) error {
+	pm, err := proxy.GetCaddyProxyManager()
+	if err != nil {
+		return fmt.Errorf("CP Caddy not reachable: %w", err)
+	}
+
+	return pm.RegisterMTLSPathRoute(ctx, proxy.Route{
+		ID:         "litellm--cp-ingress",
+		PathPrefix: "/litellm",
+		Upstream:   "litellm:4000",
+		Terminal:   true,
+	})
 }
 
 // Start begins listening on addr (e.g. ":9191") and serves gRPC in a background goroutine.
