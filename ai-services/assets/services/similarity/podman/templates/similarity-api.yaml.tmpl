@@ -28,9 +28,9 @@ spec:
         - |
           export OPENSEARCH_USERNAME=$(cat /etc/secret/opensearch-secret/username)
           export OPENSEARCH_PASSWORD=$(cat /etc/secret/opensearch-secret/password)
-          {{- if .Values.litellm.key }}
+          {{ if .Values.litellm.key }}
           export EMB_API_KEY=$(cat /etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY)
-          {{- end }}
+          {{ end }}
           exec /var/venv/bin/python -m uvicorn app:app \
             --host 0.0.0.0 \
             --port 7000 \

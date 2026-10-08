@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -26,9 +27,13 @@ import (
 	clitemplates "github.com/project-ai-services/ai-services/internal/pkg/cli/templates"
 	consts "github.com/project-ai-services/ai-services/internal/pkg/constants"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
+	"github.com/project-ai-services/ai-services/internal/pkg/proxy"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime/common"
+	remoteruntime "github.com/project-ai-services/ai-services/internal/pkg/runtime/remote"
 	runtimeTypes "github.com/project-ai-services/ai-services/internal/pkg/runtime/types"
+	"github.com/project-ai-services/ai-services/internal/pkg/utils"
+	gatewaypkg "github.com/project-ai-services/ai-services/internal/pkg/worker/gateway"
 	workerconstants "github.com/project-ai-services/ai-services/internal/pkg/worker/constants"
 	"github.com/project-ai-services/ai-services/internal/pkg/worker/join"
 	"github.com/project-ai-services/ai-services/internal/pkg/worker/stream"
@@ -649,7 +654,7 @@ func (s *ApplicationServiceBase) InsertDeploymentRecords(
 	}
 
 	// 2. Insert component records
-	componentIDMap, err := s.insertComponentRecords(ctx, plan)
+	componentIDMap, err := s.insertComponentRecords(ctx, plan, createdBy)
 	if err != nil {
 		return err
 	}
@@ -708,11 +713,19 @@ func (s *ApplicationServiceBase) insertApplicationRecord(
 func (s *ApplicationServiceBase) insertComponentRecords(
 	ctx context.Context,
 	plan *deployment.DeploymentPlan,
+	createdBy string,
 ) (map[string]uuid.UUID, error) {
 	componentIDMap := make(map[string]uuid.UUID)
 	scopedProvider, err := s.Provider.WithRuntime(plan.RuntimeType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scope catalog provider for runtime %q: %w", plan.RuntimeType, err)
+	}
+
+	// Resolve worker DB UUID once — used for managed-model components so they
+	// appear in ListManaged (which filters on created_by IS NOT NULL).
+	var workerDBID *uuid.UUID
+	if dbID, ok := s.DeploymentPlanner.WorkerDBID(plan.WorkerName); ok {
+		workerDBID = &dbID
 	}
 
 	for hash, comp := range plan.Components {
@@ -746,6 +759,24 @@ func (s *ApplicationServiceBase) insertComponentRecords(
 			Status:   models.ComponentStatusInitializing,
 			Version:  comp.Version,
 			Metadata: metadata,
+		}
+
+		// For managed-model types (llm/embedding/reranker), populate the fields that
+		// model_service sets — created_by, worker_id, and a human-readable name derived
+		// from the model param. Without these, ListManaged (which filters created_by IS NOT NULL)
+		// would not return this component, making it invisible to GET /api/v1/models.
+		if managedModelTypes[comp.ComponentType] {
+			component.CreatedBy = &createdBy
+			component.WorkerID = workerDBID
+			// Build a name from model param (same convention used by model_service).
+			modelName, _ := comp.Params["model"].(string)
+			if modelName == "" {
+				modelName, _ = comp.Values["model"].(string)
+			}
+			if modelName != "" {
+				name := modelName
+				component.Name = &name
+			}
 		}
 
 		if err := s.ComponentRepo.Insert(ctx, component); err != nil {
@@ -1066,7 +1097,7 @@ func (s *ApplicationServiceBase) resolveModelsAndPrepareKeys(ctx context.Context
 			continue
 		}
 
-		litellmInfo, err := s.resolveModelComponent(ctx, comp)
+		litellmInfo, err := s.resolveModelComponent(ctx, plan, comp)
 		if err != nil {
 			return fmt.Errorf("failed to resolve model component %s/%s: %w", comp.ComponentType, comp.ProviderID, err)
 		}
@@ -1096,7 +1127,7 @@ func (s *ApplicationServiceBase) resolveModelsAndPrepareKeys(ctx context.Context
 //  4. Generates and returns a fresh per-application virtual key.
 //
 // Returns nil when comp.PreDeployed is false (normal new-deploy path).
-func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, comp *deploymenttypes.ComponentPlan) (*deploymenttypes.LiteLLMInfo, error) {
+func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan *deployment.DeploymentPlan, comp *deploymenttypes.ComponentPlan) (*deploymenttypes.LiteLLMInfo, error) {
 	if !comp.PreDeployed {
 		return nil, nil
 	}
@@ -1143,29 +1174,43 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, comp
 	firstRegistration := existingKey == nil
 	if firstRegistration {
 		// No existing key → the route has not been registered with LiteLLM yet.
-		// Determine api_base from the first "service" endpoint.
-		apiBase := ""
+		// Extract the pod host from the stored service endpoint URL, then let
+		// resolveAPIBase decide local vs remote Caddy path — same as a fresh deploy.
+		podHost := ""
 		for _, ep := range existing.Endpoints {
 			epType, _ := ep["type"].(string)
 			if epType == "service" {
-				epURL, _ := ep["url"].(string)
-				apiBase = epURL + "/v1"
+				if epURL, _ := ep["url"].(string); epURL != "" {
+					// ep["url"] is the pod DNS name (e.g. "llm-<slug>") or a full URL.
+					// Strip any scheme/port so resolveAPIBase gets a bare hostname.
+					if u, err := url.Parse(epURL); err == nil && u.Hostname() != "" {
+						podHost = u.Hostname()
+					} else {
+						podHost = epURL
+					}
+				}
 				break
 			}
 		}
-		if apiBase == "" {
+		if podHost == "" {
 			logger.WarningfCtx(ctx, "[app-deploy] component %s has no service endpoint; skipping LiteLLM route registration", existing.ID)
 		} else {
-			logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for pre-deployed component %s", routeID, existing.ID)
-			if regErr := litellmPostApp(ctx, "/model/new", map[string]any{
-				"model_name": routeID,
-				"litellm_params": map[string]any{
-					"model":    "hosted_vllm/" + modelName,
-					"api_base": apiBase,
-				},
-			}); regErr != nil {
-				// Non-fatal: log but continue — the key can still be generated.
-				logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
+			caddyRouteID := routeID + "--" + existing.ID.String()[:8]
+			apiBase, resolveErr := s.resolveAPIBase(ctx, plan, podHost, existing.ID, caddyRouteID)
+			if resolveErr != nil {
+				logger.WarningfCtx(ctx, "[app-deploy] resolveAPIBase failed for pre-deployed component %s: %v", existing.ID, resolveErr)
+			} else {
+				logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for pre-deployed component %s api_base=%s", routeID, existing.ID, apiBase)
+				if regErr := litellmPostApp(ctx, "/model/new", map[string]any{
+					"model_name": routeID,
+					"litellm_params": map[string]any{
+						"model":    "hosted_vllm/" + modelName,
+						"api_base": apiBase,
+					},
+				}); regErr != nil {
+					// Non-fatal: log but continue — the key can still be generated.
+					logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
+				}
 			}
 		}
 	}
@@ -1325,6 +1370,89 @@ func (s *ApplicationServiceBase) buildPostComponentHook(plan *deployment.Deploym
 	}
 }
 
+// resolveAPIBase determines the correct LiteLLM api_base for a newly deployed model
+// component, mirroring the logic in model_service.deployAsync.
+//
+// For a local worker, LiteLLM reaches the vLLM pod directly via pod DNS on plain HTTP.
+// For a remote worker, two Caddy routes are registered (mTLS ingress on the worker,
+// mTLS egress on the CP) and the api_base points at the CP Caddy egress :8080.
+//
+// podHost is the pod DNS name / IP returned by the deployer (e.g. "llm-<slug>").
+// componentID is used to build a unique Caddy route ID per deployment.
+func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deployment.DeploymentPlan, podHost string, componentID uuid.UUID, caddyRouteID string) (string, error) {
+	if plan.WorkerName == workerconstants.LocalWorkerName {
+		// Local: LiteLLM → vLLM pod directly.
+		return fmt.Sprintf("http://%s:8000/v1", podHost), nil
+	}
+
+	// Remote worker — needs mTLS Caddy routes exactly as model_service does.
+	if s.WorkerRegistry == nil {
+		return "", fmt.Errorf("WorkerRegistry not configured; cannot build remote api_base for worker %q", plan.WorkerName)
+	}
+
+	workerMeta, _ := s.WorkerRegistry.WorkerMetadata(plan.WorkerName)
+	workerDomainSuffix := workerMeta[workerconstants.MetaKeyDomainSuffix]
+	if workerDomainSuffix == "" {
+		return "", fmt.Errorf("worker %q did not send %s at registration — cannot build mTLS routes",
+			plan.WorkerName, workerconstants.MetaKeyDomainSuffix)
+	}
+
+	// Build a runtime so we can get the RemoteRuntime sender for the worker Caddy Admin API.
+	rt, err := runtime.NewRuntimeFactory(runtimeTypes.RuntimeType(plan.RuntimeType)).
+		CreateRemote(plan.WorkerName, s.WorkerRegistry, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to build remote runtime for worker %q: %w", plan.WorkerName, err)
+	}
+	remoteRT, ok := rt.(*remoteruntime.RemoteRuntime)
+	if !ok {
+		return "", fmt.Errorf("expected RemoteRuntime for worker %q, got %T", plan.WorkerName, rt)
+	}
+
+	ingressPathPrefix := fmt.Sprintf("/worker/%s/models/%s", plan.WorkerName, caddyRouteID)
+
+	// 1. Worker Caddy :8443 — mTLS ingress (path-based, strips prefix → vLLM :8000).
+	remotePM := proxy.NewRemoteProxyManager(remoteRT.Sender)
+	mtlsRoute := proxy.Route{
+		ID:         caddyRouteID + "--mtls",
+		PathPrefix: ingressPathPrefix,
+		Upstream:   podHost + ":8000",
+		Terminal:   true,
+	}
+	logger.InfofCtx(ctx, "[app-deploy] registering mTLS ingress route %q on worker Caddy (prefix %s)", mtlsRoute.ID, ingressPathPrefix)
+	if err := remotePM.RegisterMTLSPathRoute(ctx, mtlsRoute); err != nil {
+		return "", fmt.Errorf("worker mTLS ingress route registration failed: %w", err)
+	}
+
+	// 2. CP Caddy :8080 — mTLS egress → worker Caddy :8443.
+	localPM, err := proxy.GetCaddyProxyManager()
+	if err != nil {
+		return "", fmt.Errorf("CP Caddy proxy manager unavailable: %w", err)
+	}
+	workerDialAddr := fmt.Sprintf("%s.%s:%s", plan.WorkerName, workerDomainSuffix, proxy.DefaultMTLSPort)
+	egressRoute := proxy.EgressRoute{
+		ID:                caddyRouteID + "--egress",
+		PathPrefix:        ingressPathPrefix,
+		DialUpstream:      workerDialAddr,
+		ClientCertPath:    workerconstants.GatewayPKIDir + "/server.crt",
+		ClientKeyPath:     workerconstants.GatewayPKIDir + "/" + gatewaypkg.ServerKeyPlaintextFile,
+		TrustedCACertPath: workerconstants.GatewayPKIDir + "/ca.crt",
+	}
+	logger.InfofCtx(ctx, "[app-deploy] registering mTLS egress route %q on CP Caddy → %s", egressRoute.ID, workerDialAddr)
+	if err := localPM.RegisterEgressRoute(ctx, egressRoute); err != nil {
+		return "", fmt.Errorf("CP Caddy egress route registration failed: %w", err)
+	}
+
+	// LiteLLM api_base: plain HTTP to local CP Caddy egress :8080.
+	caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
+	caddyHost := "ai-services--caddy"
+	if caddyAdminURL != "" {
+		if u, err := url.Parse(caddyAdminURL); err == nil && u.Hostname() != "" {
+			caddyHost = u.Hostname()
+		}
+	}
+	return fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix), nil
+}
+
 // handleNewlyDeployedModel performs LiteLLM registration, DB key persistence, and per-app
 // virtual key injection for a freshly deployed managed-model component.
 func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, plan *deployment.DeploymentPlan, comp *deploymenttypes.ComponentPlan) error {
@@ -1336,24 +1464,23 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 	}
 
 	routeID := buildAppRouteID(modelName, comp.ProviderID)
+	caddyRouteID := routeID + "--" + comp.DatabaseID.String()[:8]
 
-	// Derive api_base from the endpoint the deployer populated.
-	apiBase := ""
+	// Derive pod host from the endpoint the deployer populated.
+	podHost := ""
 	if ep, ok := comp.Endpoints[comp.ComponentType]; ok {
 		if epMap, ok := ep.(map[string]any); ok {
-			host, _ := epMap["host"].(string)
-			port, _ := epMap["port"].(string)
-			if host != "" {
-				if port == "" {
-					port = "8000"
-				}
-				apiBase = fmt.Sprintf("http://%s:%s/v1", host, port)
-			}
+			podHost, _ = epMap["host"].(string)
 		}
 	}
-
-	if apiBase == "" {
+	if podHost == "" {
 		return fmt.Errorf("no endpoint found for component %s after deployment; skipping LiteLLM registration", comp.ComponentType)
+	}
+
+	// Resolve the correct api_base (local pod DNS or CP Caddy egress for remote workers).
+	apiBase, err := s.resolveAPIBase(ctx, plan, podHost, comp.DatabaseID, caddyRouteID)
+	if err != nil {
+		return fmt.Errorf("failed to resolve api_base for component %s: %w", comp.DatabaseID, err)
 	}
 
 	// 1. Register the LiteLLM route.
