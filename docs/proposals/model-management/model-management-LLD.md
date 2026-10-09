@@ -53,6 +53,7 @@
 9. [Deployment Flow](#9-deployment-flow)
    - [Flow: Application Create with Managed Model (model already deployed)](#flow-application-create--model-already-deployed-pre-deployed-path)
    - [Flow: Application Create with Managed Model (new deploy)](#flow-application-create--new-model-deploy)
+   - [Flow: Application Create with Model Connector](#flow-application-create--model-connector-remote)
 10. [Key Design Decisions](#10-key-design-decisions)
 11. [Common Queries](#11-common-queries)
 12. [Error Handling](#12-error-handling)
@@ -943,6 +944,7 @@ Error responses are the same as datasource §6.6 and §6.7: `404 {"error": "conn
 
 | Existing Endpoint | Change |
 |---|---|
+| `POST /api/v1/applications` | `services[].connectors[]` accepts `{type, id}` entries with `type` = `llm` / `embedding` / `reranker`, the same `ConnectorRef` shape used for `datasource`. A given type can be set via `components` or `connectors`, not both. See [Flow: Application Create — Model Connector](#flow-application-create--model-connector-remote) |
 | `GET /api/v1/applications/:id` | Response includes model connectors from `connectors` table alongside `services` and local `components` |
 | `GET /api/v1/architectures/:id/deploy-options` | `providers` list under `llm`/`embedding`/`reranker` includes connector provider options (`watsonx`, `hosted_vllm`, `openai`) alongside `vllm-cpu`, `vllm-spyre`; worker list included for target-worker selection |
 
@@ -1831,6 +1833,91 @@ POST /api/v1/applications
     render summarize-api.yaml.tmpl → volume + volumeMount for litellm-secret
                                    → LLM_ENDPOINT / LLM_MODEL point at LiteLLM
                                    → LLM_API_KEY exported from secret at pod startup
+```
+
+---
+
+### Flow: Application Create — Model Connector (remote)
+
+A service can use a pre-registered remote model connector (created via `POST /api/v1/connectors/models`) instead of a local model component. It is referenced from the service's `connectors` list using the same [`ConnectorRef`](../data-source-connectors/catalog-datasource-connectors-proposal.md) shape as datasource connectors: `{ "type": ..., "id": ... }`. The only difference is `type`, which is the model type (`llm`, `embedding` or `reranker`) instead of `datasource`.
+
+**Example request body:**
+
+```json
+{
+  "name": "My App",
+  "catalog_id": "rag-pattern",
+  "version": "1.0.0",
+  "services": [
+    {
+      "catalog_id": "summarize",
+      "version": "2.0.0",
+      "components": [],
+      "connectors": [
+        { "type": "llm", "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc" }
+      ]
+    },
+    {
+      "catalog_id": "digitize",
+      "version": "1.2.0",
+      "components": [
+        {
+          "component_type": "embedding",
+          "provider_id": "vllm-cpu",
+          "version": "1.0.0",
+          "params": { "model": "ibm-granite/granite-embedding-278m-multilingual" }
+        }
+      ],
+      "connectors": [
+        { "type": "llm", "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc" },
+        { "type": "datasource", "id": "550e8400-e29b-41d4-a716-446655440000" }
+      ]
+    }
+  ]
+}
+```
+
+In this example, `summarize` gets its `llm` from a WatsonX connector. `digitize` gets its `llm` from the same connector, deploys a local `embedding` component, and attaches a datasource connector.
+
+**Validation rules (per service, before deployment begins):**
+
+These extend the datasource `ConnectorRef` rules. They are not a replacement.
+
+- `ConnectorRef.type` must be `datasource`, `llm`, `embedding` or `reranker`.
+- `ConnectorRef.id` must reference a `connectors` row whose `type` matches `ConnectorRef.type` and whose `status` is `connected`. An unknown, type-mismatched or non-`connected` ID returns `400 Bad Request`.
+- **A model type is supplied either as a component or as a connector, never both.** For each of `llm`, `embedding` and `reranker`, a service may have **either** a `components[]` entry with that `component_type` **or** a `connectors[]` entry with that `type`. Setting both returns `400 Bad Request`. For example, a service cannot have both `components: [{component_type: "llm", provider_id: "vllm-cpu", ...}]` and `connectors: [{type: "llm", id: "<watsonx-connector-id>"}]`. A different type is allowed: an `llm` connector plus an `embedding` component is valid.
+- At most one connector per model type per service: two `{type: "llm"}` entries in the same service return `400 Bad Request`.
+- The same model connector `id` may appear in multiple services' `connectors` lists. Each one creates its own `service_dependencies` row.
+
+**Flow:**
+
+```
+POST /api/v1/applications
+{ services: [{catalog_id: "summarize", components: [],
+              connectors: [{type: "llm", id: "c1d2e3f4-..."}]}] }
+
+  Validate (per service):
+    for each ConnectorRef with type in (llm, embedding, reranker):
+      ConnectorRepo.GetByID(id) → 400 if missing, type mismatch, or status != connected
+      reject if components[] also has component_type == ConnectorRef.type   → 400
+      reject if connectors[] has another entry with the same type            → 400
+
+  PlanDeployment:
+    no components row inserted for the connector-supplied type (no pod, no pre-flight)
+    INSERT service_dependencies (service_id, dependency_type='connector', dependency_id=<connector id>)
+
+  executeDeploymentAsync → resolveModelsAndPrepareKeys:
+    routeID = "{last path segment of connectors.metadata.model_name}--{connectors.provider}"
+              (e.g. granite-4-h-small--watsonx). The route is already registered with
+              LiteLLM at connector create time, so there is no POST /model/new here.
+    generate per-app virtual key → POST /key/generate {key_name: routeID--app-<appID[:8]>, models: [routeID]}
+    injectLiteLLMIntoServices:
+      svc.Values["litellm"]["key"] = appVirtualKey
+      svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"=routeID] → LiteLLM coordinates
+
+  deployServices:
+    identical to the local-model path. The service only talks to LiteLLM and cannot tell
+    whether the backend is a local vLLM pod or a remote WatsonX endpoint.
 ```
 
 ---
