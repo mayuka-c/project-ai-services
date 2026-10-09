@@ -228,11 +228,11 @@ func (h *ModelHandler) UndeployModel(c *gin.Context) {
 // GetModelKey godoc
 //
 //	@Summary		Get virtual key for a model
-//	@Description	Returns the LiteLLM virtual key for a deployed local model. Used by consumer service pods at startup to retrieve their bearer token.
+//	@Description	Returns the LiteLLM virtual key for a managed model — a deployed local model (components.id) or a remote model connector (connectors.id). Used by consumer service pods at startup to retrieve their bearer token.
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			instance_id	query		string						true	"Model component UUID"
+//	@Param			instance_id	query		string						true	"Model component UUID or model connector UUID"
 //	@Success		200			{object}	models.GetModelKeyResponse	"Virtual key"
 //	@Failure		400			{object}	ErrorResponse				"Missing or invalid instance_id"
 //	@Failure		401			{object}	ErrorResponse				"Unauthorized"

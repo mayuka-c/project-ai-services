@@ -127,7 +127,8 @@ type UndeployModelResponse struct {
 	Message string `json:"message"`
 }
 
-// GetModelKeyResponse is the response body for GET /api/v1/keys/:component_id.
+// GetModelKeyResponse is the response body for GET /api/v1/models/keys?instance_id=<id>.
+// ComponentID holds the components.id or connectors.id passed as instance_id.
 type GetModelKeyResponse struct {
 	ComponentID string `json:"component_id"`
 	VirtualKey  string `json:"virtual_key"`

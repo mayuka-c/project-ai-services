@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -979,17 +980,28 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 		DeleteComponent(ctx, c.ID, keepData)
 }
 
-// GetModelKey returns the virtual key for a deployed local model.
+// GetModelKey returns the virtual key for a managed model. The ID may be either a
+// locally deployed component (components.id) or a remote model connector (connectors.id).
 func (s *ModelService) GetModelKey(ctx context.Context, componentID uuid.UUID) (*apimodels.GetModelKeyResponse, error) {
+	depType := dbmodels.DependencyTypeComponent
+
 	c, err := s.componentRepo.GetByID(ctx, componentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch component: %w", err)
 	}
 	if c == nil || c.CreatedBy == nil {
-		return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
+		// Not a managed component — fall back to a model connector.
+		if _, err := s.connectorRepo.GetByID(ctx, componentID, false); err != nil {
+			if errors.Is(err, dbrepo.ErrConnectorNotFound) {
+				return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
+			}
+
+			return nil, fmt.Errorf("failed to fetch connector: %w", err)
+		}
+		depType = dbmodels.DependencyTypeConnector
 	}
 
-	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeComponent, componentID)
+	key, err := s.keyRepo.GetByDependency(ctx, depType, componentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch virtual key: %w", err)
 	}
