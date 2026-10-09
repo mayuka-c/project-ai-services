@@ -1166,7 +1166,7 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 	routeID := buildAppRouteID(modelName, comp.ProviderID)
 
 	// Check whether this component already has a LiteLLM key → was already registered.
-	existingKey, err := s.KeyRepo.GetByComponentID(ctx, existing.ID)
+	existingKey, err := s.KeyRepo.GetByDependency(ctx, models.DependencyTypeComponent, existing.ID)
 	if err != nil {
 		return nil, fmt.Errorf("key lookup failed for component %s: %w", existing.ID, err)
 	}
@@ -1499,7 +1499,7 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 	// Guard against duplicate inserts: if a key row already exists for this component
 	// (e.g. a retry after a partial failure) reuse the stored key rather than minting
 	// another one in LiteLLM and leaving the old one orphaned.
-	existingKey, err := s.KeyRepo.GetByComponentID(ctx, comp.DatabaseID)
+	existingKey, err := s.KeyRepo.GetByDependency(ctx, models.DependencyTypeComponent, comp.DatabaseID)
 	if err != nil {
 		return fmt.Errorf("key lookup for component %s failed: %w", comp.DatabaseID, err)
 	}
@@ -1509,9 +1509,10 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 			return fmt.Errorf("model virtual key generation failed: %w", err)
 		}
 		if err := s.KeyRepo.Insert(ctx, &models.Key{
-			ComponentID: comp.DatabaseID,
-			VirtualKey:  modelVirtualKey,
-			RouteID:     routeID,
+			DependencyID:   comp.DatabaseID,
+			DependencyType: models.DependencyTypeComponent,
+			VirtualKey:     modelVirtualKey,
+			RouteID:        routeID,
 		}); err != nil {
 			return fmt.Errorf("failed to persist model virtual key: %w", err)
 		}

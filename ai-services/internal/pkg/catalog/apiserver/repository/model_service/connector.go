@@ -26,7 +26,9 @@ var connectorNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 //  2. Duplicate-name guard (case-insensitive — handled by LOWER() in the DB query).
 //  3. Register the LiteLLM route (sensitive params passed straight to LiteLLM).
 //  4. Probe the route via GET /health?model=<route_id>; on failure delete the route and return 422.
-//  5. Persist the connector with sensitive fields stripped from metadata.
+//  5. Generate a per-model LiteLLM virtual key for the route.
+//  6. Persist the connector with sensitive fields stripped from metadata.
+//  7. Persist the virtual key in keys (dependency_type = 'connector').
 func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.CreateModelConnectorRequest) (*apimodels.CreateModelConnectorResponse, error) {
 	// Phase 1: validate request.
 	if !validModelTypes[req.Type] {
@@ -103,7 +105,15 @@ func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.Create
 		}
 	}
 
-	// Phase 5: persist the connector with sensitive fields stripped.
+	// Phase 5: generate the per-model virtual key scoped to this route.
+	virtualKey, err := s.generateVirtualKey(ctx, routeID)
+	if err != nil {
+		s.rollbackConnectorRoute(ctx, routeID, "")
+
+		return nil, fmt.Errorf("virtual key generation failed: %w", err)
+	}
+
+	// Phase 6: persist the connector with sensitive fields stripped.
 	connector := &dbmodels.Connector{
 		Name:      req.Name,
 		Type:      req.Type,
@@ -114,14 +124,39 @@ func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.Create
 	}
 
 	if err := s.connectorRepo.Insert(ctx, connector); err != nil {
-		if delErr := s.deleteLiteLLMRoute(ctx, routeID); delErr != nil {
-			logger.WarningfCtx(ctx, "failed to delete LiteLLM route %q after insert failure: %v", routeID, delErr)
-		}
+		s.rollbackConnectorRoute(ctx, routeID, virtualKey)
 
 		return nil, fmt.Errorf("failed to persist connector: %w", err)
 	}
 
+	// Phase 7: persist the virtual key against the connector.
+	if err := s.keyRepo.Insert(ctx, &dbmodels.Key{
+		DependencyID:   connector.ID,
+		DependencyType: dbmodels.DependencyTypeConnector,
+		VirtualKey:     virtualKey,
+		RouteID:        routeID,
+	}); err != nil {
+		if _, delErr := s.connectorRepo.DeleteIfUnlinked(ctx, connector.ID, dbmodels.DependencyTypeConnector); delErr != nil {
+			logger.WarningfCtx(ctx, "failed to delete connector %s after key insert failure: %v", connector.ID, delErr)
+		}
+		s.rollbackConnectorRoute(ctx, routeID, virtualKey)
+
+		return nil, fmt.Errorf("failed to persist virtual key: %w", err)
+	}
+
 	return &apimodels.CreateModelConnectorResponse{ID: connector.ID.String()}, nil
+}
+
+// rollbackConnectorRoute best-effort revokes the virtual key (if any) and deletes the LiteLLM route.
+func (s *ModelService) rollbackConnectorRoute(ctx context.Context, routeID, virtualKey string) {
+	if virtualKey != "" {
+		if err := s.revokeVirtualKey(ctx, virtualKey); err != nil {
+			logger.WarningfCtx(ctx, "failed to revoke virtual key for route %q during rollback: %v", routeID, err)
+		}
+	}
+	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
+		logger.WarningfCtx(ctx, "failed to delete LiteLLM route %q during rollback: %v", routeID, err)
+	}
 }
 
 // registerConnectorRoute calls POST /model/new for a remote connector.

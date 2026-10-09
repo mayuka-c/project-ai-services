@@ -464,9 +464,14 @@ func (r *componentRepo) UpdateEndpoints(ctx context.Context, id uuid.UUID, endpo
 	return nil
 }
 
-// Delete removes a component from the database.
+// Delete removes a component from the database along with its keys row (keys.dependency_id
+// is polymorphic, so there is no FK cascade).
 func (r *componentRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM components WHERE id = $1`
+	query := `
+		WITH deleted_keys AS (
+			DELETE FROM keys WHERE dependency_type = 'component' AND dependency_id = $1
+		)
+		DELETE FROM components WHERE id = $1`
 
 	_, err := r.pool.Exec(ctx, query, id)
 	if err != nil {

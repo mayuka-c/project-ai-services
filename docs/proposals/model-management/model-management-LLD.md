@@ -192,14 +192,22 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 
 `"key_name"` matches the route ID (`{model_name}--{provider}`). `"models"` scopes the key to that single route — attempts to call any other route with this key return `401`. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
 
-**Storage — `keys` table in Catalog DB (local models only):**
+**Storage — `keys` table in Catalog DB (local models and remote connectors):**
 
-The generated virtual key for a **local model** is inserted into the `keys` table immediately after generation. It is not written to a Podman secret. For **remote connectors**, no virtual key is generated and no `keys` row is created — the connector's upstream credentials (`api_key`, `token`, etc.) are stored inside LiteLLM's own DB as part of the registered route's `litellm_params` and are never exposed via the Catalog API.
+A per-model virtual key is generated for both local models and remote model connectors. It is inserted into the `keys` table right after generation and is not written to a Podman secret. The row points at its owner through `dependency_id` + `dependency_type`, using the same `dependency_type` enum as `service_dependencies`:
+- local model → `('component', components.id)`
+- remote connector → `('connector', connectors.id)`
+
+For remote connectors, the upstream credentials (`api_key` etc.) are still stored only in LiteLLM's own DB, as part of the registered route's `litellm_params`. The Catalog DB stores only the LiteLLM virtual key.
 
 ```sql
 -- After POST /key/generate succeeds for a local model:
-INSERT INTO keys (component_id, virtual_key, route_id)
-VALUES ('<components.id>', 'sk-...', 'granite-3.3-8b-instruct--vllm-spyre');
+INSERT INTO keys (dependency_id, dependency_type, virtual_key, route_id)
+VALUES ('<components.id>', 'component', 'sk-...', 'granite-3.3-8b-instruct--vllm-spyre');
+
+-- After POST /key/generate succeeds for a remote model connector:
+INSERT INTO keys (dependency_id, dependency_type, virtual_key, route_id)
+VALUES ('<connectors.id>', 'connector', 'sk-...', 'granite-4-h-small--watsonx');
 ```
 
 **Consumers of the virtual key:**
@@ -211,7 +219,7 @@ VALUES ('<components.id>', 'sk-...', 'granite-3.3-8b-instruct--vllm-spyre');
 
 **Key revocation at undeploy:**
 
-When a **local model** is deleted, `modelmanager` revokes the virtual key via the LiteLLM Admin API and removes the `keys` row. When a **remote connector** is deleted, only `DELETE /model/delete` is called (no virtual key to revoke — connectors never had one). In both cases the LiteLLM route is deregistered so the upstream credentials are purged from the LiteLLM DB.
+When a **local model** or a **remote connector** is deleted, `modelmanager` revokes the virtual key through the LiteLLM Admin API (`POST /key/delete`) and removes the `keys` row for that `(dependency_type, dependency_id)`. In both cases the LiteLLM route is also deregistered, which removes the upstream credentials from the LiteLLM DB.
 
 ```
 POST http://litellm:4000/key/delete
@@ -599,19 +607,27 @@ CREATE INDEX ON workers(runtime_type);
 
 ### 5.7 New `keys` Table
 
-The `keys` table persists the **per-model** LiteLLM virtual key for every deployed local model. This is the shared, stable key scoped to the model's LiteLLM route — it is created once per model and reused across all applications that reference that model.
+The `keys` table stores the **per-model** LiteLLM virtual key for every managed model. A managed model is either a locally deployed component or a remote model connector. This is the shared, stable key scoped to the model's LiteLLM route. It is created once per model and reused by every application that references that model.
 
 ```sql
 CREATE TABLE keys (
-    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    component_id UUID        NOT NULL REFERENCES components (id) ON DELETE CASCADE,
-    virtual_key  TEXT        NOT NULL,   -- 'sk-...' value — treated as a secret; never logged
-    route_id     VARCHAR(255) NOT NULL,  -- LiteLLM route ID, e.g. 'granite-3.3-8b-instruct--vllm-spyre'
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+    dependency_id   UUID            NOT NULL,   -- components.id or connectors.id
+    dependency_type dependency_type NOT NULL CHECK (dependency_type IN ('component', 'connector')),
+    virtual_key     TEXT            NOT NULL,   -- 'sk-...' value — treated as a secret; never logged
+    route_id        VARCHAR(255)    NOT NULL,   -- LiteLLM route ID, e.g. 'granite-3.3-8b-instruct--vllm-spyre'
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_keys_component_id ON keys (component_id);
+CREATE INDEX idx_keys_dependency ON keys (dependency_type, dependency_id);
 ```
+
+| `dependency_type` | `dependency_id` references | Created by |
+|---|---|---|
+| `component` | `components.id` | `POST /api/v1/models` (after the pod is healthy) or application create (new or pre-deployed model) |
+| `connector` | `connectors.id` | `POST /api/v1/connectors/models` (after the LiteLLM probe passes) |
+
+> **Polymorphic reference, no FK.** `dependency_id` can point at either table, so it has no foreign key or `ON DELETE CASCADE`. The `keys` row is deleted explicitly with its owner. `ComponentRepository.Delete` removes the `component` key in the same statement, and connector delete removes the `connector` key. This follows the `service_dependencies.dependency_id` pattern.
 
 > The `virtual_key` column stores the raw `sk-...` bearer token. It is never returned in list responses or logs. It is accessible via the authenticated `GET /api/v1/models/keys?instance_id=<component_id>` endpoint.
 
@@ -626,7 +642,7 @@ Model management adds the following goose migration files:
 | File | Purpose |
 |---|---|
 | `20260430094510_alter_components_model_columns.sql` | Adds `name` and `created_by` columns to `components`; adds `'Deploying'` to `component_status` enum |
-| `20260430094511_create_keys_table.sql` | Creates `keys` table with FK to `components` and `idx_keys_component_id` index |
+| `20260430094511_create_keys_table.sql` | Creates the `keys` table with a polymorphic `(dependency_type, dependency_id)` reference (`component` or `connector`) and the `idx_keys_dependency` index |
 | `20260801000002_create_workers_table.sql` | Creates `worker_runtime_type` enum (`unknown\|podman\|openshift`), `worker_status` enum (`pending\|ready\|disconnected`), and `workers` table (`name`, `runtime_type`, `status`, `message`, `last_heartbeat`, `metadata`, `registered_at`, `updated_at`) with status and runtime_type indexes |
 | `20260801000003_add_worker_fk_to_applications.sql` | Adds `worker_id UUID NOT NULL` FK column to `applications` (ON DELETE RESTRICT) with index |
 | `20260801000004_add_worker_fk_to_components.sql` | Adds `worker_id UUID` nullable FK column to `components` (ON DELETE SET NULL) |
@@ -648,7 +664,8 @@ erDiagram
     services     ||--o{ service_dependencies : "depends_on"
     components   ||--o{ service_dependencies : "used_by (local pod)"
     connectors   ||--o{ service_dependencies : "used_by (remote connector)"
-    components   ||--o{ keys              : "has virtual key"
+    components   ||--o| keys              : "has virtual key (dependency_type=component)"
+    connectors   ||--o| keys              : "has virtual key (dependency_type=connector)"
     workers      ||--o{ components        : "hosts"
 
     applications {
@@ -719,8 +736,9 @@ erDiagram
     }
 
     keys {
-        UUID        id              PK
-        UUID        component_id    FK "→ components.id ON DELETE CASCADE"
+        UUID            id              PK
+        UUID            dependency_id      "components.id or connectors.id (no FK)"
+        dependency_type dependency_type    "component | connector"
         TEXT        virtual_key        "sk-… bearer token; never logged"
         VARCHAR_255 route_id           "LiteLLM route ID"
         TIMESTAMPTZ created_at
@@ -1480,9 +1498,9 @@ WHERE sd.dependency_id   = :id
 | Step | Call | Detail |
 |---|---|---|
 | 1 | `DELETE /model/delete` on LiteLLM | Removes route and credentials from gateway |
-| 2 | Delete `connectors` row | Final cleanup |
-
-> **No `keys` row to delete.** Remote connectors have no entry in the `keys` table — LiteLLM manages its own credentials internally. Only local models (`components` table) have a `keys` row.
+| 2 | `POST /key/delete` on LiteLLM | Body: `{ "keys": ["<virtual-key>"] }` — revokes the per-model key |
+| 3 | Delete `keys` row | `WHERE dependency_type = 'connector' AND dependency_id = :id` |
+| 4 | Delete `connectors` row | Final cleanup |
 
 **Response `204 No Content`:** Connector deleted.
 
@@ -1739,12 +1757,15 @@ POST /api/v1/connectors/models
                                        api_key:    params.api_key,
                                        project_id: params.project_id } }
   4. Run connectivity probe via LiteLLM GET /health?model=<route_id> → if fails, DELETE /model/delete and return 422
-  5. INSERT into connectors (name='prod-watsonx', type=llm, provider=watsonx,
+  5. POST /key/generate {key_name: route_id, models: [route_id], duration: null} → per-model virtual key
+  6. INSERT into connectors (name='prod-watsonx', type=llm, provider=watsonx,
                              status='connected', created_by=<user>,
                              metadata={model_name: ...,        ← from request params.model_name
                                        endpoint_url: ...,      ← from request params.endpoint_url
                                        project_id: ...})       ← from request params.project_id
                                                                ← api_key (format: password) stripped, not stored
+  7. INSERT into keys (dependency_id=connectors.id, dependency_type='connector', virtual_key, route_id)
+     (on failure in 5–7: revoke key, DELETE /model/delete, remove connectors row → 500)
   8. Return 201 { id: connectors.id }
 ```
 
@@ -1823,7 +1844,7 @@ POST /api/v1/applications
           remote → register mTLS ingress + egress Caddy routes
                  → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>/v1
       POST /model/new to LiteLLM (model_name=routeID, api_base=apiBase)
-      KeyRepo.GetByComponentID → nil → generate model key → INSERT keys row
+      KeyRepo.GetByDependency('component', componentID) → nil → generate model key → INSERT keys row
       generate per-app virtual key → POST /key/generate {key_name: routeID--app-<appID[:8]>}
       injectLiteLLMIntoServices → svc.Values["litellm"]["key"] = appVirtualKey
                                 → svc.Values["llm"]["host/port/prefixPath/model"] = LiteLLM coords
@@ -1953,11 +1974,12 @@ DELETE /api/v1/connectors/models/:id
 
   1. Verify created_by=user
   2. DELETE /model/delete from LiteLLM Gateway (removes route + upstream credentials from LiteLLM DB)
-  3. DELETE connectors row
-  4. Return 204 No Content
+  3. POST /key/delete on LiteLLM (revokes the per-model virtual key)
+  4. DELETE keys row WHERE dependency_type='connector' AND dependency_id = :id
+  5. DELETE connectors row
+  6. Return 204 No Content
 
-  Note: no keys row and no POST /key/delete — connectors never have a virtual key in the Catalog DB.
-  No Podman secret to delete.
+  Note: no Podman secret to delete.
 ```
 
 ---
@@ -1970,7 +1992,7 @@ Local pod models live in `components`; remote model connectors live in the share
 
 ### 2. Credentials Never Enter the Catalog DB
 
-Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/models/keys?instance_id=<component_id>` to consumer service pods at startup. Remote credentials (sensitive `params` marked `"format": "password"` in the provider's `schema.json`) are passed directly to the LiteLLM Gateway at route-registration time and stripped before `params` is stored in `connectors.metadata`. At delete time, local removes the `keys` row and calls `DELETE /model/delete` on LiteLLM; remote also calls `DELETE /model/delete`.
+Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/models/keys?instance_id=<component_id>` to consumer service pods at startup. Remote credentials (sensitive `params` marked `"format": "password"` in the provider's `schema.json`) are passed directly to the LiteLLM Gateway at route-registration time and stripped before `params` is stored in `connectors.metadata`. Remote connectors also get a per-model virtual key in `keys` (`dependency_type = 'connector'`). At delete time, both local and remote revoke the key, remove the `keys` row, and call `DELETE /model/delete` on LiteLLM.
 
 ### 3. Table Is the Only Branch Point
 
@@ -2388,7 +2410,7 @@ curl -s http://litellm:4000/chat/completions \
   -d '{"model":"granite-3.3-8b-instruct--vllm-spyre","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-> The key is fetched from `GET /api/v1/models/keys?instance_id=<component_id>` and is **never logged** by the CLI. Only local models have a key retrievable this way — connector keys are managed internally by LiteLLM.
+> The key is fetched from `GET /api/v1/models/keys?instance_id=<component_id>` and is **never logged** by the CLI. Only local models have a key retrievable this way. Connector keys are stored in `keys` (`dependency_type = 'connector'`), but this endpoint does not serve them yet.
 
 ---
 

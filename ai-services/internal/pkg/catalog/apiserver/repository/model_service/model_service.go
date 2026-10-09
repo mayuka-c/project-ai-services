@@ -402,9 +402,10 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	}
 
 	if err := s.keyRepo.Insert(ctx, &dbmodels.Key{
-		ComponentID: componentID,
-		VirtualKey:  virtualKey,
-		RouteID:     routeID,
+		DependencyID:   componentID,
+		DependencyType: dbmodels.DependencyTypeComponent,
+		VirtualKey:     virtualKey,
+		RouteID:        routeID,
 	}); err != nil {
 		fail(fmt.Sprintf("failed to persist virtual key: %v", err))
 		return
@@ -944,7 +945,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 	}
 
 	// Step 2: revoke virtual key.
-	key, err := s.keyRepo.GetByComponentID(ctx, c.ID)
+	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeComponent, c.ID)
 	if err != nil {
 		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to fetch virtual key (continuing): %v", c.ID, err)
 	}
@@ -954,7 +955,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to revoke virtual key (continuing): %v", c.ID, err)
 		}
 		// Step 3: delete keys row.
-		if err := s.keyRepo.DeleteByComponentID(ctx, c.ID); err != nil {
+		if err := s.keyRepo.DeleteByDependency(ctx, dbmodels.DependencyTypeComponent, c.ID); err != nil {
 			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to delete keys row (continuing): %v", c.ID, err)
 		}
 	}
@@ -988,7 +989,7 @@ func (s *ModelService) GetModelKey(ctx context.Context, componentID uuid.UUID) (
 		return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
 	}
 
-	key, err := s.keyRepo.GetByComponentID(ctx, componentID)
+	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeComponent, componentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch virtual key: %w", err)
 	}
