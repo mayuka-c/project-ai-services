@@ -149,6 +149,13 @@ func registerModelRoutes(v1 *gin.RouterGroup, h *handlers.ModelHandler, authMw g
 		models.GET("/:id", h.GetModel)
 		models.DELETE("/:id", h.UndeployModel)
 	}
+
+	// Model connector routes — POST /api/v1/connectors/models
+	connectors := v1.Group("connectors/models")
+	connectors.Use(authMw)
+	{
+		connectors.POST("", h.CreateConnector)
+	}
 }
 
 func registerDatasourceRoutes(v1 *gin.RouterGroup, h *handlers.DatasourceHandler, authMw gin.HandlerFunc) {

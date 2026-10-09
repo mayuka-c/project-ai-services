@@ -314,10 +314,10 @@ func parseConnector(ctx context.Context, path, appPath string, itemFS fs.FS, dat
 		return nil
 	}
 
-	// Use composite key for connectors: {connector_type}/{id}
-	// This allows same ID across different connector types
-	connectorKey := fmt.Sprintf("%s/%s", conn.ConnectorType, conn.ID)
-	items[connectorKey] = &catalogItem{
+	// Use a prefixed composite key for connectors: connectors/{connector_type}/{id}.
+	// The prefix keeps connector keys distinct from component keys ({component_type}/{id}),
+	// e.g. connector llm/watsonx must not overwrite component llm/watsonx.
+	items[connectorItemKey(conn.ConnectorType, conn.ID)] = &catalogItem{
 		Path:      appPath,
 		Connector: &conn,
 		itemFS:    itemFS,
@@ -379,11 +379,15 @@ func (p *CatalogProvider) LoadComponent(componentType, id string) (*types.Compon
 	return item.Component, nil
 }
 
+// connectorItemKey returns the cache key for a connector provider.
+func connectorItemKey(connectorType, id string) string {
+	return fmt.Sprintf("%s/%s/%s", constants.CatalogTypeConnectors, connectorType, id)
+}
+
 // LoadConnector loads a connector by connector type and ID from cache.
-// connectorType examples: "datasource".
+// connectorType examples: "datasource", "llm".
 func (p *CatalogProvider) LoadConnector(connectorType, id string) (*types.Connector, error) {
-	connectorKey := fmt.Sprintf("%s/%s", connectorType, id)
-	item, ok := p.getItem(connectorKey)
+	item, ok := p.getItem(connectorItemKey(connectorType, id))
 	if !ok || item.Connector == nil {
 		return nil, fmt.Errorf("connector '%s/%s' not found", connectorType, id)
 	}
@@ -504,7 +508,7 @@ func (p *CatalogProvider) ListConnectors(connectorType string) ([]*types.Connect
 		if item.Connector == nil {
 			continue
 		}
-		if strings.HasPrefix(key, connectorType+"/") {
+		if strings.HasPrefix(key, connectorItemKey(connectorType, "")) {
 			result = append(result, item.Connector)
 			found = true
 		}

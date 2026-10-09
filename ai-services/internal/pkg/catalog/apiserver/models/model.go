@@ -31,6 +31,27 @@ type DeployModelResponse struct {
 	ID uuid.UUID `json:"id"`
 }
 
+// CreateModelConnectorRequest is the request body for POST /api/v1/connectors/models.
+// It mirrors CreateDatasourceRequest with an additional Type field (llm, embedding, reranker).
+type CreateModelConnectorRequest struct {
+	// Name is the unique human-readable label for this connector (3–100 chars, case-insensitive unique).
+	Name string `json:"name" binding:"required,min=3,max=100"`
+	// Type is the connector type: "llm", "embedding", or "reranker".
+	Type string `json:"type" binding:"required"`
+	// ProviderID identifies the remote provider (e.g. "watsonx").
+	ProviderID string `json:"provider_id" binding:"required"`
+	// Params holds the flat provider-specific configuration validated against the provider's schema.json.
+	// Sensitive fields (format: "password") are passed to LiteLLM and never stored.
+	Params map[string]any `json:"params" binding:"required"`
+	// CreatedBy is set from the auth context, never from the request body.
+	CreatedBy string `json:"-"`
+}
+
+// CreateModelConnectorResponse is the response body returned with 201 Created.
+type CreateModelConnectorResponse struct {
+	ID string `json:"id"`
+}
+
 // ModelProviderInfo is the provider sub-object embedded in model API responses.
 type ModelProviderInfo struct {
 	ID   string `json:"id"`
@@ -47,15 +68,15 @@ type ModelWorkerInfo struct {
 
 // ModelListItem is a single entry in the list-models response.
 type ModelListItem struct {
-	ID        uuid.UUID          `json:"id"`
-	Name      string             `json:"name"`
-	Type      string             `json:"type"`
-	Provider  ModelProviderInfo  `json:"provider"`
-	Worker    *ModelWorkerInfo   `json:"worker"`
-	Metadata  map[string]any     `json:"metadata"`
-	Status    string             `json:"status"`
-	CreatedAt time.Time          `json:"created_at"`
-	UpdatedAt time.Time          `json:"updated_at"`
+	ID        uuid.UUID         `json:"id"`
+	Name      string            `json:"name"`
+	Type      string            `json:"type"`
+	Provider  ModelProviderInfo `json:"provider"`
+	Worker    *ModelWorkerInfo  `json:"worker"`
+	Metadata  map[string]any    `json:"metadata"`
+	Status    string            `json:"status"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
 }
 
 // ListModelsRequest carries validated pagination and filter params for GET /api/v1/models.

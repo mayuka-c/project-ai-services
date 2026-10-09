@@ -19,6 +19,7 @@
 4. [New Concepts](#4-new-concepts)
    - [4.1 Models](#41-models)
    - [4.2 Connectors](#42-connectors)
+   - [4.3 Supported Provider Params](#43-supported-provider-params)
 5. [Database Schema](#5-database-schema)
    - [5.1 Guiding Principle](#51-guiding-principle)
    - [5.2 Additions to Existing `components` Table](#52-additions-to-existing-components-table)
@@ -70,7 +71,7 @@ This proposal extends the existing Catalog Service with two new capabilities:
 
 1. **Model Management** — dynamic deploy, undeploy, list, and status of model inference backends (`llm`, `embedding`, `reranker`) across all supported runtimes (Podman, OpenShift, Docker Compose). Models are no longer bundled statically inside application pods; they are standalone deployable components managed independently and exposed to consumer services through a **LiteLLM Gateway** — a universal model proxy that sits between applications and any backend provider.
 
-2. **Connectors** — a way to register external model endpoints (WatsonX, OpenAI-compatible, HuggingFace) without deploying any local pod. Credentials are passed directly to the **LiteLLM Gateway** at route-registration time and stored there — they never enter the Catalog database or a Podman secret.
+2. **Connectors** — a way to register external model endpoints (WatsonX, hosted vLLM, OpenAI) without deploying any local pod. Credentials are passed directly to the **LiteLLM Gateway** at route-registration time and stored there — they never enter the Catalog database or a Podman secret.
 
 > **`modelmanager` is a Go package inside the Catalog API server process** — not a separate service or sidecar. The HTTP handlers call into it directly; there is no inter-process communication. It owns the full lifecycle (deploy, update, undeploy, status) of all three component types: `llm`, `embedding`, and `reranker` — for both local pods and remote connectors.
 
@@ -79,7 +80,7 @@ This proposal extends the existing Catalog Service with two new capabilities:
 | Kind | Table | Pod? | Credentials stored in | Examples |
 |---|---|---|---|---|
 | Local pod | `components` | ✅ | `keys` table (virtual key served via API) | vLLM (cpu, spyre) |
-| Remote connector | `connectors` | ❌ | LiteLLM Gateway DB | WatsonX, OpenAI-compatible, HuggingFace |
+| Remote connector | `connectors` | ❌ | LiteLLM Gateway DB | WatsonX, hosted vLLM, OpenAI |
 
 Three new columns on `components` (`name`, `created_by`, `worker_id`), a new `workers` table, and a new `keys` table are the complete schema delta. Remote model connectors reuse the shared `connectors` table (same as datasource connectors). Credentials never touch the Catalog database directly.
 
@@ -316,18 +317,28 @@ The `model` query parameter is the route ID registered in the previous step (e.g
 
 When deploying with `provider: watsonx`, no local pod is created. Credentials are passed directly to LiteLLM at route-registration time — they are never stored in the Catalog DB or a Podman secret. LiteLLM stores and manages them internally:
 
-```json
+```
+POST http://litellm:4000/model/new
+Authorization: Bearer <LITELLM_MASTER_KEY>
+Content-Type: application/json
+
 {
-  "model_name": "granite-3-8b-instruct--watsonx",
+  "model_name": "granite-4-h-small--watsonx",
   "litellm_params": {
-    "model": "ibm/granite-3-8b-instruct",
-    "custom_llm_provider": "watsonx",
-    "api_base": "<from params.endpoint_url>",
-    "api_key": "<from params.auth — passed to LiteLLM at registration; never stored in Catalog DB>",
-    "watsonx_project_id": "<from params.project_id>"
+    "model": "watsonx/ibm/granite-4-h-small",
+    "api_base": "https://us-south.ml.cloud.ibm.com",
+    "api_key": "<params.api_key>",
+    "project_id": "<params.project_id>"
   }
 }
 ```
+
+| `litellm_params` field | Source |
+|---|---|
+| `model` | `"{provider_id}/{params.model_name}"` — e.g. `watsonx/ibm/granite-4-h-small`. LiteLLM infers the provider from the prefix; no `custom_llm_provider` field is needed |
+| `api_base` | `params.endpoint_url` |
+| `api_key` | `params.api_key` — passed to LiteLLM at registration; **never stored in Catalog DB** |
+| `project_id` | `params.project_id` |
 
 ---
 
@@ -340,7 +351,7 @@ A **Model** is an inference backend for a specific role (`llm`, `embedding`, `re
 | Kind | Storage table | Example providers | Pod? | Credentials location |
 |---|---|---|---|---|
 | Local | `components` | `vllm-cpu`, `vllm-spyre` | ✅ Yes | `keys` table (virtual key served via `GET /api/v1/models/keys`) |
-| Remote (connector) | `connectors` | `watsonx`, `openai-compatible` | ❌ No | LiteLLM Gateway DB |
+| Remote (connector) | `connectors` | `watsonx`, `hosted_vllm`, `openai` | ❌ No | LiteLLM Gateway DB |
 
 Both kinds are registered as a route in the **LiteLLM Gateway** pod. Consumer services only ever talk to the LiteLLM gateway — they have no knowledge of which table is behind it.
 
@@ -356,17 +367,46 @@ The key differences from today's application-coupled components:
 
 ### 4.2 Connectors
 
-A **Connector** is a row in the shared `connectors` table with `type` set to the model role (`llm`, `embedding`, `reranker`). It has no pod and no Podman secret. Credentials are passed directly to the **LiteLLM Gateway** at route-registration time — LiteLLM stores and manages them. The Catalog DB stores only non-secret connection config (`metadata.endpoint_url`, `metadata.project_id`, `metadata.auth.type`) — never the secret values themselves.
+A **Connector** is a row in the shared `connectors` table with `type` set to the model role (`llm`, `embedding`, `reranker`). It has no pod and no Podman secret. Credentials are passed directly to the **LiteLLM Gateway** at route-registration time — LiteLLM stores and manages them. The Catalog DB stores only non-secret connection config (`metadata.model_name`, `metadata.endpoint_url`, `metadata.project_id`) — never the secret values themselves. Sensitive fields are identified from the provider's `schema.json` (properties with `"format": "password"`), the same mechanism used by datasource connectors.
 
 **Connector types (by `type` + `provider` on `connectors`):**
 
-| `type` | `provider` | Description | LiteLLM auth fields |
+| `type` | `provider` | Description | Sensitive `params` (`format: password`) |
 |---|---|---|---|
-| `llm` | `watsonx` | IBM WatsonX.ai LLM | `api_key` |
-| `llm` | `openai-compatible` | Any OpenAI-compatible endpoint | `api_key` (optional) |
-| `llm` | `huggingface` | HuggingFace Hub token (weight pull) | `token` |
-| `embedding` | `openai-compatible` | Any OpenAI-compatible embedding endpoint | `api_key` (optional) |
-| `reranker` | `openai-compatible` | Any OpenAI-compatible reranker endpoint | `api_key` (optional) |
+| `llm` / `embedding` | `watsonx` | IBM watsonx.ai | `api_key` |
+| `llm` / `embedding` / `reranker` | `hosted_vllm` | Externally hosted vLLM endpoint (OpenAI-compatible API) | `api_key` (optional) |
+| `llm` / `embedding` | `openai` | OpenAI API | `api_key` |
+
+Supported model connector providers are **`watsonx`**, **`hosted_vllm`** and **`openai`**. Provider IDs follow the LiteLLM provider prefix so the catalog `provider` value maps directly to `litellm_params.model` (e.g. `hosted_vllm/<model_name>`, `openai/<model_name>`, `watsonx/<model_name>`).
+
+### 4.3 Supported Provider Params
+
+The credential fields for each provider follow LiteLLM's provider credential definitions. Each field `key` is passed unchanged into `litellm_params` on `POST /model/new`. Each provider's fields are defined in `assets/connectors/<connector_type>/<provider_id>/schema.json`. A field with `field_type: password` gets `"format": "password"` in the schema, so it is passed to LiteLLM and stripped before `params` is saved to `connectors.metadata`. Every other field is saved as non-sensitive metadata.
+
+#### `hosted_vllm` — vLLM
+
+| Key | Label | Required | Field type | Sensitive | Placeholder / Tooltip |
+|---|---|---|---|---|---|
+| `api_base` | API Base | Yes | `text` | No | `https://...` |
+| `api_key` | vLLM API Key | No | `password` | Yes | — |
+
+#### `openai` — OpenAI-Compatible Endpoints (Together AI, etc.)
+
+| Key | Label | Required | Field type | Sensitive | Placeholder / Tooltip |
+|---|---|---|---|---|---|
+| `api_base` | API Base | Yes | `text` | No | `https://...` |
+| `api_key` | OpenAI API Key | Yes | `password` | Yes | — |
+
+#### `watsonx` — Watsonx
+
+| Key | Label | Required | Field type | Sensitive | Placeholder / Tooltip |
+|---|---|---|---|---|---|
+| `api_base` | API Base | No | `text` | No | Base URL of your WatsonX instance |
+| `api_key` | API Key | No | `password` | Yes | IBM Cloud API key. Required if not using Token or Zen API Key |
+| `project_id` | Project ID | No | `text` | No | Optional: Your Watsonx.ai Project ID |
+
+> **Note:** For `watsonx`, at least one of `api_key`, `token` or `zen_api_key` must be supplied. All of them are marked `"ui:section": "Authentication"` in `schema.json`, so they are the only updatable fields on `PUT /api/v1/connectors/models/:id`.
+
 ---
 
 ## 5. Database Schema
@@ -378,9 +418,9 @@ A **Connector** is a row in the shared `connectors` table with `type` set to the
 | Provider | Storage table | `type` value | Pod? | Credentials location |
 |---|---|---|---|---|
 | vLLM (cpu / spyre) | `components` | — | ✅ | `keys` table (virtual key) |
-| WatsonX | `connectors` | `llm` | ❌ | LiteLLM Gateway |
-| OpenAI-compatible | `connectors` | `llm` / `embedding` / `reranker` | ❌ | LiteLLM Gateway |
-| HuggingFace | `connectors` | `llm` / `embedding` | ❌ | LiteLLM Gateway |
+| WatsonX (`watsonx`) | `connectors` | `llm` / `embedding` | ❌ | LiteLLM Gateway |
+| Hosted vLLM (`hosted_vllm`) | `connectors` | `llm` / `embedding` / `reranker` | ❌ | LiteLLM Gateway |
+| OpenAI (`openai`) | `connectors` | `llm` / `embedding` | ❌ | LiteLLM Gateway |
 
 `service_dependencies.dependency_id` points at `components.id` for local models and at `connectors.id` for remote model connectors — both already use `dependency_type = 'connector'` from §4.2 of the datasource proposal, so no new enum value is needed.
 
@@ -441,7 +481,7 @@ The `components` table already has a `metadata JSONB` column (no migration neede
 
 ### 5.3 Reuse of Shared `connectors` Table for Remote Model Connectors
 
-Remote model connectors (WatsonX, OpenAI-compatible, HuggingFace, generic-HTTP) are stored in the **same `connectors` table** defined in the datasource connectors proposal (§4.1). No new table is required. The existing `type` column discriminates between datasource and model connector records.
+Remote model connectors (`watsonx`, `hosted_vllm`, `openai`) are stored in the **same `connectors` table** defined in the datasource connectors proposal (§4.1). No new table is required. The existing `type` column discriminates between datasource and model connector records.
 
 A model connector record in the `connectors` table:
 
@@ -450,32 +490,30 @@ A model connector record in the `connectors` table:
 | `id` | `uuid` |
 | `name` | `"prod-watsonx"` (unique, case-insensitive) |
 | `type` | `"llm"` / `"embedding"` / `"reranker"` |
-| `provider` | `"watsonx"` / `"openai-compatible"` / `"huggingface"` / `"generic-http"` |
+| `provider` | `"watsonx"` / `"hosted_vllm"` / `"openai"` |
 | `status` | `"connected"` / `"offline"` (lowercase, reuses `connector_status` enum) |
 | `message` | `null` / `"Endpoint reachable and credentials accepted"` |
-| `metadata` | `{"model_name": "ibm/granite-3-8b-instruct", "endpoint_url": "https://...", "auth": {"type": "api-key"}}` |
+| `metadata` | `{"model_name": "ibm/granite-3-8b-instruct", "endpoint_url": "https://...", "project_id": "..."}` |
 | `created_by` | `"user@example.com"` |
 | `created_at` | timestamp |
 | `updated_at` | timestamp |
 
-> **No credentials in `metadata`.** Secret fields (`api_key`, `token`, `password`, etc.) are passed directly to LiteLLM at route-registration time and are **never stored** in `connectors.metadata`. Only `auth.type` is persisted so the UI knows what credential shape was registered.
+> **No credentials in `metadata`.** Sensitive `params` fields (those marked `"format": "password"` in the provider's `schema.json`, e.g. `api_key`) are passed directly to LiteLLM at route-registration time and are **stripped before** `params` is written to `connectors.metadata`. All other `params` fields are stored as-is (flat, same shape as datasource connectors).
 
 `metadata` JSONB — value stored in `connectors.metadata` (WatsonX LLM example):
 ```json
 {
   "model_name": "ibm/granite-3-8b-instruct",
   "endpoint_url": "https://us-south.ml.cloud.ibm.com",
-  "project_id": "my-watsonx-project-id",
-  "auth": { "type": "api-key" }
+  "project_id": "my-watsonx-project-id"
 }
 ```
 
 | `metadata` key | Required for |
 |---|---|
-| `model_name` | all providers except `generic-http` |
-| `endpoint_url` | all providers |
+| `model_name` | all providers |
+| `endpoint_url` | `watsonx`, `hosted_vllm` (optional for `openai`; defaults to `https://api.openai.com/v1`) |
 | `project_id` | `watsonx` |
-| `auth.type` | all providers (secret fields stripped before storage) |
 
 The Go `Connector` DB model struct (already defined for datasources) is reused without modification. The `connected_services` count for list responses is fetched via `svcDepRepo.GetServiceCountByDependency` — not stored on the row.
 
@@ -658,7 +696,7 @@ erDiagram
         UUID             id              PK
         VARCHAR_255      name               "UNIQUE"
         VARCHAR_64       type               "llm | embedding | reranker | datasource"
-        VARCHAR_64       provider           "watsonx | openai-compatible | huggingface | …"
+        VARCHAR_64       provider           "watsonx | hosted_vllm | openai | object_storage | file_system"
         connector_status status             "connected | offline"
         TEXT             message
         JSONB            metadata           "no credentials stored"
@@ -764,12 +802,129 @@ Remote model connectors register external model endpoints. They are stored in th
 
 ### 6.3 Provider Schema Endpoints (shared with datasource connectors)
 
-The same provider schema endpoints used by datasource connectors are reused for model connectors. The `:connector_type` path segment is the model role (`llm`, `embedding`, `reranker`) — analogous to `datasource` for datasource connectors.
+Model connectors use the two provider endpoints that were already built for datasource connectors. They are §6.6 *Get Provider Input Schema* and §6.7 *List Providers for a Connector Type* in the [datasource connectors proposal](../data-source-connectors/catalog-datasource-connectors-proposal.md). No new routes or handlers are added. The `:connector_type` path segment, or the `type` query parameter, is the model role (`llm`, `embedding`, `reranker`), in the same way datasources use `datasource`.
 
-| Method | Path | Description | Response |
-|---|---|---|---|
-| `GET` | `/api/v1/connectors/:connector_type/providers/:provider_id/params` | Get the `params` JSON Schema for a model connector provider. Examples: `/api/v1/connectors/llm/providers/watsonx/params`, `/api/v1/connectors/embedding/providers/openai-compatible/params` | `200 OK` |
-| `GET` | `/api/v1/connectors?type=llm` | List all registered providers for a given model connector type. Omit `type` to return all connector types (datasource + model) | `200 OK` |
+| Method | Path | Datasource proposal | Description | Response |
+|---|---|---|---|---|
+| `GET` | `/api/v1/connectors/:connector_type/providers/:provider_id/params` | §6.6 | Returns the provider's `schema.json` unchanged. Examples: `/api/v1/connectors/llm/providers/watsonx/params`, `/api/v1/connectors/embedding/providers/hosted_vllm/params` | `200 OK` |
+| `GET` | `/api/v1/connectors?type=llm` | §6.7 | Lists the registered providers for one connector type. Omit `type` to list every connector type, datasource and model | `200 OK` |
+
+#### Reuse check against the current implementation
+
+Both endpoints are already registered in [`router.go`](../../../ai-services/internal/pkg/catalog/apiserver/router.go). They are served by [`CatalogHandler.ListConnectorProviders`](../../../ai-services/internal/pkg/catalog/apiserver/handlers/catalog.go) and [`CatalogHandler.GetConnectorProviderParams`](../../../ai-services/internal/pkg/catalog/apiserver/handlers/catalog.go). Neither handler hard-codes `datasource`:
+
+| Check | Result |
+|---|---|
+| Route and handler | ✅ Generic. `connector_type` and `provider_id` come straight from the path or query string |
+| Asset discovery | ✅ The catalog loader picks up any `assets/connectors/<connector_type>/<provider_id>/metadata.yaml` (a 4-part path) and stores it under the key `<connector_type>/<provider_id>` |
+| Schema serving | ✅ [`GetConnectorProviderParams`](../../../ai-services/internal/pkg/catalog/deploy_options.go) reads `schema.json` from the provider directory and returns it unchanged, so property order is kept |
+| List response | ✅ [`ToConnectorResponse`](../../../ai-services/internal/pkg/catalog/types/types.go) builds `provider.schema` as `/api/v1/connectors/<connector_type>/providers/<id>/params` for any type |
+| Sensitive / updatable fields | ✅ The same `schema.json` conventions apply. `"format": "password"` marks a sensitive field and `"ui:section": "Authentication"` marks an updatable one (see §4.3) |
+
+**Result:** both endpoints work for model connectors with **no code change**. The only work is adding provider asset directories, with one blocker described next.
+
+> **⚠️ Blocker: catalog key collision for `llm/watsonx`.** Components and connectors share one in-memory `items` map. The key is `<component_type>/<id>` for components and `<connector_type>/<id>` for connectors. A new `assets/connectors/llm/watsonx/` therefore gets the same key, `llm/watsonx`, as the existing `assets/components/llm/watsonx/`. The asset walk visits `components/` before `connectors/`, so the connector entry overwrites the component entry, and `LoadComponent("llm", "watsonx")` starts failing. That breaks the current application-pipeline WatsonX deploy and `deploy-options`. `hosted_vllm`, `openai` and `embedding/watsonx` are not affected, because no component uses those keys. Pick one fix before adding the asset:
+> 1. Remove `assets/components/llm/watsonx/` as part of this change, since WatsonX moves from a per-app component to a connector (§4.1); **or**
+> 2. Add a catalog-type prefix to connector keys (e.g. `connectors/<connector_type>/<id>`) in `parseConnector`, `LoadConnector` and `ListConnectors`. This is a small code change.
+
+**Provider assets to add.** Each provider gets one directory per connector type it supports:
+
+```
+assets/connectors/
+├── datasource/            (existing)
+├── llm/
+│   ├── watsonx/           metadata.yaml, schema.json
+│   ├── hosted_vllm/       metadata.yaml, schema.json
+│   └── openai/            metadata.yaml, schema.json
+├── embedding/
+│   ├── watsonx/           metadata.yaml, schema.json
+│   ├── hosted_vllm/       metadata.yaml, schema.json
+│   └── openai/            metadata.yaml, schema.json
+└── reranker/
+    └── hosted_vllm/       metadata.yaml, schema.json
+```
+
+`assets/connectors/llm/watsonx/metadata.yaml` follows the same format as the datasource provider files:
+
+```yaml
+type: connector
+id: watsonx
+name: "Watsonx"
+description: "IBM watsonx.ai hosted models"
+connector_type: llm
+connector_name: "Large language model (LLM)"
+```
+
+**Example: `GET /api/v1/connectors?type=llm`** returns the same response shape as datasource §6.7:
+
+```json
+[
+  {
+    "type": "llm",
+    "name": "Large language model (LLM)",
+    "provider": {
+      "id": "watsonx",
+      "name": "Watsonx",
+      "description": "IBM watsonx.ai hosted models",
+      "schema": "/api/v1/connectors/llm/providers/watsonx/params"
+    }
+  },
+  {
+    "type": "llm",
+    "name": "Large language model (LLM)",
+    "provider": {
+      "id": "hosted_vllm",
+      "name": "vLLM",
+      "description": "Externally hosted vLLM endpoint",
+      "schema": "/api/v1/connectors/llm/providers/hosted_vllm/params"
+    }
+  },
+  {
+    "type": "llm",
+    "name": "Large language model (LLM)",
+    "provider": {
+      "id": "openai",
+      "name": "OpenAI-Compatible Endpoints (Together AI, etc.)",
+      "description": "Any OpenAI-compatible endpoint",
+      "schema": "/api/v1/connectors/llm/providers/openai/params"
+    }
+  }
+]
+```
+
+**Example: `GET /api/v1/connectors/llm/providers/hosted_vllm/params`** returns `schema.json` built from the §4.3 field definitions:
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model_name", "api_base"],
+  "properties": {
+    "model_name": {
+      "type": "string",
+      "title": "Model name",
+      "minLength": 1,
+      "ui:section": "Model"
+    },
+    "api_base": {
+      "type": "string",
+      "title": "API Base",
+      "format": "uri",
+      "ui:placeholder": "https://...",
+      "ui:section": "Connection"
+    },
+    "api_key": {
+      "type": "string",
+      "title": "vLLM API Key",
+      "format": "password",
+      "ui:section": "Authentication"
+    }
+  }
+}
+```
+
+Error responses are the same as datasource §6.6 and §6.7: `404 {"error": "connector type \"<type>\" not found"}` for an unknown type, and `404` for an unknown provider.
 
 ### 6.4 Worker Endpoints
 
@@ -789,7 +944,7 @@ The same provider schema endpoints used by datasource connectors are reused for 
 | Existing Endpoint | Change |
 |---|---|
 | `GET /api/v1/applications/:id` | Response includes model connectors from `connectors` table alongside `services` and local `components` |
-| `GET /api/v1/architectures/:id/deploy-options` | `providers` list under `llm`/`embedding`/`reranker` includes connector provider options (WatsonX, OpenAI-compatible, etc.) alongside `vllm-cpu`, `vllm-spyre`; worker list included for target-worker selection |
+| `GET /api/v1/architectures/:id/deploy-options` | `providers` list under `llm`/`embedding`/`reranker` includes connector provider options (`watsonx`, `hosted_vllm`, `openai`) alongside `vllm-cpu`, `vllm-spyre`; worker list included for target-worker selection |
 
 ---
 
@@ -1023,10 +1178,7 @@ Content-Type: application/json
     "model_name": "ibm/granite-3-8b-instruct",
     "endpoint_url": "https://us-south.ml.cloud.ibm.com",
     "project_id": "my-watsonx-project-id",
-    "auth": {
-      "type": "api-key",
-      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    }
+    "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   }
 }
 ```
@@ -1037,37 +1189,27 @@ Content-Type: application/json
 |---|---|---|---|
 | `name` | string | Yes | Human-readable label for this connector (3–100 chars, unique, case-insensitive) |
 | `type` | string | Yes | Connector type: `llm`, `embedding`, `reranker` |
-| `provider_id` | string | Yes | Provider identifier: `watsonx`, `openai-compatible`, `huggingface`, `generic-http` |
-| `params` | object | Yes | Model and endpoint config — validated against the provider's `schema.json` |
-| `params.model_name` | string | Conditional | Model identifier — required for all providers except `generic-http` |
-| `params.endpoint_url` | string | Yes | Remote service base URL |
-| `params.auth` | object | Yes | Auth object — `type` discriminates the shape; secret fields passed to LiteLLM; **never stored in Catalog DB** |
-| `params.auth.type` | string | Yes | `api-key`, `bearer-token`, `basic`, `none` |
+| `provider_id` | string | Yes | Provider identifier: `watsonx`, `hosted_vllm`, `openai` |
+| `params` | object | Yes | Flat provider-specific config — validated against the provider's `schema.json` (same shape rules as datasource connectors) |
+| `params.model_name` | string | Yes | Model identifier on the remote endpoint |
+| `params.endpoint_url` | string | Conditional | Remote service base URL — required for `watsonx` and `hosted_vllm`; optional for `openai` |
+| `params.project_id` | string | Conditional | Required for `watsonx` |
+| `params.api_key` | string | Conditional | Marked `"format": "password"` in `schema.json`; passed to LiteLLM; **never stored in Catalog DB** |
 
 **Validation rules:**
 - `name` must be 3–100 characters and unique (case-insensitive). Stored in `connectors.name`.
 - `provider_id` must be a registered provider identifier.
 - All required fields for the given provider must be present (validated via the provider schema).
 - A live connectivity check (LiteLLM route probe) must succeed before the record is persisted. If the check fails, return `422 Unprocessable Entity`.
-- Secret fields in `params.auth` are passed to LiteLLM and **never written to `connectors.metadata`**.
+- Sensitive fields (`"format": "password"` in `schema.json`) are passed to LiteLLM and **never written to `connectors.metadata`**.
 
 **Polymorphic `params` — required fields per `provider_id`:**
 
-| `provider_id` | Required `params` fields |
-|---|---|
-| `watsonx` | `model_name`, `endpoint_url`, `auth` |
-| `openai-compatible` | `model_name`, `endpoint_url`, `auth` |
-| `huggingface` | `model_name`, `endpoint_url`, `auth` |
-| `generic-http` | `endpoint_url`, `auth` |
-
-**Polymorphic `params.auth` — shape per `type`:**
-
-| `params.auth.type` | Additional fields |
-|---|---|
-| `api-key` | `"api_key": "sk-..."` |
-| `bearer-token` | `"token": "eyJ..."` |
-| `basic` | `"username": "user"`, `"password": "pass"` |
-| `none` | — (omit `auth` entirely) |
+| `provider_id` | Required `params` fields | Sensitive fields |
+|---|---|---|
+| `watsonx` | `model_name`, `endpoint_url`, `project_id`, `api_key` | `api_key` |
+| `hosted_vllm` | `model_name`, `endpoint_url` | `api_key` (optional) |
+| `openai` | `model_name`, `api_key` | `api_key` |
 
 **Response `201 Created`:**
 
@@ -1145,7 +1287,7 @@ GET /api/v1/connectors/models?status=offline
       "id": "d2e3f4a5-b6c7-8901-defa-234567890bcd",
       "name": "prod-embeddings",
       "type": "embedding",
-      "provider": { "id": "openai-compatible", "name": "OpenAI-compatible" },
+      "provider": { "id": "hosted_vllm", "name": "Hosted vLLM" },
       "status": "connected",
       "message": "",
       "connected_services": 2,
@@ -1197,33 +1339,29 @@ LIMIT :page_size OFFSET (:page - 1) * :page_size;
 |---|---|
 | `:id` | Connector UUID |
 
-**Description:** Updates a connector's credential fields. Only the `auth` fields for the connector's provider may be updated — structural fields (`name`, `type`, `provider`, `endpoint_url`, `model_name`) are immutable after creation. Any non-updatable field in the request body is silently ignored. The connectivity check is always re-run with the merged credentials before saving. If the check fails, return `422 Unprocessable Entity` and leave the existing record unchanged.
+**Description:** Updates a connector's credential fields. Only the credential (Authentication) fields for the connector's provider may be updated — updatable fields are those whose `ui:section` is `"Authentication"` in the provider's `schema.json`. Structural fields (`name`, `type`, `provider`, `endpoint_url`, `model_name`) are immutable after creation. Any non-updatable field in the request body is silently ignored. The connectivity check is always re-run with the merged credentials before saving. If the check fails, return `422 Unprocessable Entity` and leave the existing record unchanged.
 
 | `provider` | Updatable `params` fields |
 |---|---|
-| `watsonx` | `auth.api_key` |
-| `openai-compatible` | `auth.api_key` / `auth.token` |
-| `huggingface` | `auth.api_key` |
-| `generic-http` | `auth` (any type) |
+| `watsonx` | `api_key` |
+| `hosted_vllm` | `api_key` |
+| `openai` | `api_key` |
 
 **Request Body:**
 
 ```json
 {
   "params": {
-    "auth": {
-      "type": "api-key",
-      "api_key": "sk-new-key-here"
-    }
+    "api_key": "sk-new-key-here"
   }
 }
 ```
 
 **Processing steps:**
 
-1. Re-register LiteLLM route (`DELETE /model/delete` then `POST /model/new`) with updated `auth` secret fields.
+1. Re-register LiteLLM route (`DELETE /model/delete` then `POST /model/new`) with the updated credential fields.
 2. Run connectivity check — if it fails, return `422` and revert LiteLLM registration; leave `connectors` row unchanged.
-3. Merge supplied auth fields into `connectors.metadata` (omitted keys preserved); update `connectors.status = 'connected'` and `updated_at`.
+3. Merge supplied credential fields into `connectors.metadata` (omitted keys preserved); update `connectors.status = 'connected'` and `updated_at`.
 
 **Response `200 OK`:** Updated connector object (without secret fields, without `metadata` blob):
 
@@ -1285,8 +1423,7 @@ LIMIT :page_size OFFSET (:page - 1) * :page_size;
   "metadata": {
     "model_name": "ibm/granite-3-8b-instruct",
     "endpoint_url": "https://us-south.ml.cloud.ibm.com",
-    "project_id": "my-watsonx-project-id",
-    "auth": { "type": "api-key" }
+    "project_id": "my-watsonx-project-id"
   },
   "applications": [
     {
@@ -1584,23 +1721,28 @@ POST /api/v1/models
 ```
 POST /api/v1/connectors/models
 { name: "prod-watsonx", type: "llm", provider_id: "watsonx",
-  params: {model_name: "ibm/granite-3-8b-instruct",
+  params: {model_name: "ibm/granite-4-h-small",
            endpoint_url: "https://us-south.ml.cloud.ibm.com", project_id: "my-watsonx-project-id",
-           auth: {type: "api-key", api_key: "sk-..."}} }
+           api_key: "<watsonx-api-key>"} }
 
   Read assets/components/llm/watsonx/metadata.yaml → deployment_strategy: remote
 
   1. Validate request fields (name uniqueness, required params)
   2. No pod, no pre-flight resource check
-  3. POST /model/new to LiteLLM Gateway (passing params.auth secret fields directly — never stored in Catalog DB)
-             route_id = "{sanitised params.model_name}--{provider_id}"  (e.g. ibm-granite-3-8b-instruct--watsonx)
+  3. POST /model/new to LiteLLM Gateway (passing sensitive params, e.g. api_key, directly — never stored in Catalog DB)
+             route_id = "{last path segment of params.model_name}--{provider_id}"  (e.g. granite-4-h-small--watsonx)
+             body: { model_name: route_id,
+                     litellm_params: { model:      "watsonx/ibm/granite-4-h-small",   ← "{provider_id}/{params.model_name}"
+                                       api_base:   params.endpoint_url,
+                                       api_key:    params.api_key,
+                                       project_id: params.project_id } }
   4. Run connectivity probe via LiteLLM GET /health?model=<route_id> → if fails, DELETE /model/delete and return 422
   5. INSERT into connectors (name='prod-watsonx', type=llm, provider=watsonx,
                              status='connected', created_by=<user>,
                              metadata={model_name: ...,        ← from request params.model_name
                                        endpoint_url: ...,      ← from request params.endpoint_url
-                                       project_id: ...,        ← from request params.project_id
-                                       auth: {type: "api-key"} ← only auth.type stored; secret fields not stored})
+                                       project_id: ...})       ← from request params.project_id
+                                                               ← api_key (format: password) stripped, not stored
   8. Return 201 { id: connectors.id }
 ```
 
@@ -1741,7 +1883,7 @@ Local pod models live in `components`; remote model connectors live in the share
 
 ### 2. Credentials Never Enter the Catalog DB
 
-Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/models/keys?instance_id=<component_id>` to consumer service pods at startup. Remote credentials are passed directly to the LiteLLM Gateway at route-registration time and never stored in `connectors.metadata` — only `auth.type` is persisted. At delete time, local removes the `keys` row and calls `DELETE /model/delete` on LiteLLM; remote also calls `DELETE /model/delete`.
+Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/models/keys?instance_id=<component_id>` to consumer service pods at startup. Remote credentials (sensitive `params` marked `"format": "password"` in the provider's `schema.json`) are passed directly to the LiteLLM Gateway at route-registration time and stripped before `params` is stored in `connectors.metadata`. At delete time, local removes the `keys` row and calls `DELETE /model/delete` on LiteLLM; remote also calls `DELETE /model/delete`.
 
 ### 3. Table Is the Only Branch Point
 
@@ -2025,9 +2167,8 @@ ai-services connector create [name] --type <type> --provider <provider> --runtim
 | Flag | Short | Required | Description |
 |---|---|---|---|
 | `--type` | `-t` | Yes | Component type: `llm`, `embedding`, `reranker` |
-| `--provider` | `-p` | Yes | Connector provider: `watsonx`, `openai-compatible`, `huggingface` |
-| `--auth-type` | | Yes | Auth scheme: `api-key`, `bearer-token`, `basic`, `none` |
-| `--api-key` | | Conditional | API key (required when `--auth-type api-key`) — passed to LiteLLM, never stored in DB |
+| `--provider` | `-p` | Yes | Connector provider: `watsonx`, `hosted_vllm`, `openai` |
+| `--api-key` | | Conditional | API key (required by `watsonx`, `openai`; optional for `hosted_vllm`) — passed to LiteLLM, never stored in DB |
 | `--params` | | No | Inline key=value pairs (e.g. `endpoint_url=...`, `project_id=...`, `model_name=...`) |
 
 ```bash
@@ -2035,18 +2176,23 @@ ai-services connector create [name] --type <type> --provider <provider> --runtim
 ai-services connector create prod-watsonx \
   --type llm \
   --provider watsonx \
-  --auth-type api-key \
   --api-key sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   --params endpoint_url=https://us-south.ml.cloud.ibm.com,model_name=ibm/granite-3-8b-instruct,project_id=my-project-id \
   --runtime podman
 
-# Create an OpenAI-compatible embedding connector
+# Create an OpenAI embedding connector
 ai-services connector create openai-embed \
   --type embedding \
-  --provider openai-compatible \
-  --auth-type api-key \
+  --provider openai \
   --api-key sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  --params endpoint_url=https://api.openai.com,model_name=text-embedding-3-small \
+  --params model_name=text-embedding-3-small \
+  --runtime podman
+
+# Create a hosted vLLM LLM connector (externally running vLLM server)
+ai-services connector create ext-vllm \
+  --type llm \
+  --provider hosted_vllm \
+  --params endpoint_url=http://vllm.example.com:8000/v1,model_name=ibm-granite/granite-3.3-8b-instruct \
   --runtime podman
 ```
 
@@ -2063,7 +2209,7 @@ ai-services connector list --runtime podman
 | Flag | Short | Required | Description |
 |---|---|---|---|
 | `--type` | `-t` | No | Filter by connector type: `llm`, `embedding`, `reranker`. Omit for all |
-| `--provider` | `-p` | No | Filter by provider: `watsonx`, `openai-compatible`, etc. |
+| `--provider` | `-p` | No | Filter by provider: `watsonx`, `hosted_vllm`, `openai` |
 | `--status` | | No | Filter by status: `connected`, `offline` |
 
 ```bash

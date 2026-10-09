@@ -89,6 +89,7 @@ func buildRouteID(modelName, providerID string) string {
 //   - Support list, get, and delete (undeploy) operations.
 type ModelService struct {
 	componentRepo   dbrepo.ComponentRepository
+	connectorRepo   dbrepo.ConnectorRepository
 	keyRepo         dbrepo.KeyRepository
 	workerRepo      dbrepo.WorkerRepository
 	catalogProvider *catalog.CatalogProvider
@@ -101,6 +102,7 @@ type ModelService struct {
 // NewModelService creates a new ModelService.
 func NewModelService(
 	componentRepo dbrepo.ComponentRepository,
+	connectorRepo dbrepo.ConnectorRepository,
 	keyRepo dbrepo.KeyRepository,
 	workerRepo dbrepo.WorkerRepository,
 	catalogProvider *catalog.CatalogProvider,
@@ -109,6 +111,7 @@ func NewModelService(
 ) *ModelService {
 	return &ModelService{
 		componentRepo:   componentRepo,
+		connectorRepo:   connectorRepo,
 		keyRepo:         keyRepo,
 		workerRepo:      workerRepo,
 		catalogProvider: catalogProvider,

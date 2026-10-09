@@ -23,6 +23,9 @@ type ModelServiceInterface interface {
 	UndeployModel(ctx context.Context, id uuid.UUID, userID string, keepData bool) (*apimodels.UndeployModelResponse, error)
 	// GetModelKey returns the LiteLLM virtual key for a deployed local model.
 	GetModelKey(ctx context.Context, componentID uuid.UUID) (*apimodels.GetModelKeyResponse, error)
+	// CreateConnector registers a remote model endpoint (e.g. WatsonX) via LiteLLM, probes it,
+	// and persists a connectors row. Returns 201 on success, 422 if the probe fails.
+	CreateConnector(ctx context.Context, req apimodels.CreateModelConnectorRequest) (*apimodels.CreateModelConnectorResponse, error)
 }
 
 // DatasourceServiceInterface defines the contract for datasource connector business logic.

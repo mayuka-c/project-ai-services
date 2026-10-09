@@ -377,7 +377,7 @@ func (p *CatalogProvider) GetConnectorProviderParams(ctx context.Context, connec
 		return nil, fmt.Errorf("connector provider not found: %w", err)
 	}
 
-	connectorKey := fmt.Sprintf("%s/%s", connectorType, providerID)
+	connectorKey := connectorItemKey(connectorType, providerID)
 	connectorPath, err := p.GetCatalogItemPath(connectorKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connector path: %w", err)

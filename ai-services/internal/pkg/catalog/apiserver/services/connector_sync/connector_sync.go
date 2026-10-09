@@ -162,7 +162,8 @@ func (j *ConnectorSyncJob) performSync(ctx context.Context) {
 
 	logger.DebuglnCtx(ctx, "Starting connector sync cycle")
 
-	connectors, err := j.connectorRepo.List(ctx, nil)
+	// Only datasource connectors have testers; model connectors are probed via LiteLLM.
+	connectors, err := j.connectorRepo.List(ctx, &dbrepo.ConnectorFilters{Type: catalogconstants.ConnectorTypeDatasource})
 	if err != nil {
 		logger.ErrorfCtx(ctx, "Connector sync: failed to list connectors: %v", err)
 

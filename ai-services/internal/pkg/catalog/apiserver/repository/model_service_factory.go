@@ -13,13 +13,14 @@ import (
 // is used to forward deploys to remote workers over gRPC.
 func NewModelService(
 	componentRepo dbrepo.ComponentRepository,
+	connectorRepo dbrepo.ConnectorRepository,
 	keyRepo dbrepo.KeyRepository,
 	workerRepo dbrepo.WorkerRepository,
 	provider *catalog.CatalogProvider,
 	runtimeFactory *runtime.RuntimeFactory,
 	workerRegistry stream.WorkerRegistry,
 ) ModelServiceInterface {
-	return modelservice.NewModelService(componentRepo, keyRepo, workerRepo, provider, runtimeFactory, workerRegistry)
+	return modelservice.NewModelService(componentRepo, connectorRepo, keyRepo, workerRepo, provider, runtimeFactory, workerRegistry)
 }
 
 // Made with Bob

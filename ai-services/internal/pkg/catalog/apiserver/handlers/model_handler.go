@@ -277,4 +277,61 @@ func (h *ModelHandler) GetModelKey(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// CreateConnector godoc
+//
+//	@Summary		Create a model connector
+//	@Description	Registers a remote model endpoint (e.g. WatsonX) as a LiteLLM route, probes it, and persists a connector record. Sensitive params are passed to LiteLLM and never stored. Returns 422 if the connection test fails.
+//	@Tags			Connectors
+//	@Accept			json
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			request	body		models.CreateModelConnectorRequest	true	"Model connector creation request"
+//	@Success		201		{object}	models.CreateModelConnectorResponse	"Connector created"
+//	@Failure		400		{object}	ErrorResponse						"Invalid request body or validation errors"
+//	@Failure		401		{object}	ErrorResponse						"Unauthorized"
+//	@Failure		404		{object}	ErrorResponse						"Provider not found in catalog"
+//	@Failure		409		{object}	ErrorResponse						"Connector name already exists"
+//	@Failure		422		{object}	ErrorResponse						"Connection test failed"
+//	@Failure		500		{object}	ErrorResponse						"Internal Server Error"
+//	@Router			/connectors/models [post]
+func (h *ModelHandler) CreateConnector(c *gin.Context) {
+	var req models.CreateModelConnectorRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: fmt.Sprintf("Invalid request body: %v", err),
+		})
+
+		return
+	}
+
+	userID := c.GetString(middleware.CtxUserIDKey)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, ErrorResponse{
+			Error: "Unauthorized: user ID not found in context",
+		})
+
+		return
+	}
+
+	req.CreatedBy = userID
+
+	resp, err := h.modelSvc.CreateConnector(c.Request.Context(), req)
+	if err != nil {
+		if valErr, ok := err.(*repository.ValidationError); ok {
+			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
+
+			return
+		}
+
+		logger.ErrorfCtx(c.Request.Context(), "failed to create model connector: %v", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: fmt.Sprintf("Failed to create connector: %v", err),
+		})
+
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
 // Made with Bob
