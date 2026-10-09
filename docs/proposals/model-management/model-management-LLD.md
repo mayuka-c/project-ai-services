@@ -1,7 +1,7 @@
 # Model Management & Connectors — Low-Level Design
 
-**Version:** 1.0
-**Date:** July 2026
+**Version:** 1.1
+**Date:** October 2026
 **Status:** Draft / Proposal
 **See also:** [`model-management-architecture.md`](model-management-architecture.md) — High-Level Architecture and UX Designs
 
@@ -50,6 +50,8 @@
    - [7.11 Get Virtual Key](#711-get-virtual-key)
 8. [Pre-flight Resource Check](#8-pre-flight-resource-check)
 9. [Deployment Flow](#9-deployment-flow)
+   - [Flow: Application Create with Managed Model (model already deployed)](#flow-application-create--model-already-deployed-pre-deployed-path)
+   - [Flow: Application Create with Managed Model (new deploy)](#flow-application-create--new-model-deploy)
 10. [Key Design Decisions](#10-key-design-decisions)
 11. [Common Queries](#11-common-queries)
 12. [Error Handling](#12-error-handling)
@@ -522,38 +524,43 @@ Model connectors reuse the existing `connector_status` enum defined in the datas
 
 ### 5.6 New `workers` Table
 
-The `workers` table stores the registered Worker LPARs that the `modelmanager` package can target for remote pod deployment via the WorkerGateway gRPC stream. It is referenced by `components.worker_id`.
+The `workers` table stores the registered Worker LPARs that the `modelmanager` package can target for remote pod deployment via the WorkerGateway gRPC stream. It is referenced by both `components.worker_id` (nullable) and `applications.worker_id` (NOT NULL).
 
 ```sql
-CREATE TYPE worker_status AS ENUM ('ready', 'disconnected');
+CREATE TYPE worker_runtime_type AS ENUM ('unknown', 'podman', 'openshift');
+CREATE TYPE worker_status       AS ENUM ('pending', 'ready', 'disconnected');
 
 CREATE TABLE workers (
-    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
-    worker_id      VARCHAR(100)  NOT NULL UNIQUE,   -- user-visible LPAR label, e.g. 'lpar-1'
-    runtime_type   VARCHAR(64)   NOT NULL,           -- 'spyre' | 'cpu'
-    status         worker_status NOT NULL DEFAULT 'disconnected',
-    address        VARCHAR(255),                     -- worker Caddy address registered as LiteLLM upstream
-    last_seen_at   TIMESTAMPTZ,
-    created_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    id             UUID                PRIMARY KEY DEFAULT gen_random_uuid(),
+    name           TEXT                NOT NULL UNIQUE,    -- user-visible LPAR label, e.g. 'lpar-1'
+    runtime_type   worker_runtime_type NOT NULL DEFAULT 'unknown',
+    status         worker_status       NOT NULL DEFAULT 'pending',
+    message        TEXT,                                   -- human-readable reason for current status
+    last_heartbeat TIMESTAMPTZ,                            -- NULL until first heartbeat arrives
+    metadata       JSONB,
+    registered_at  TIMESTAMPTZ         NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ         NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_workers_status ON workers (status);
+CREATE INDEX ON workers(status);
+CREATE INDEX ON workers(runtime_type);
 ```
 
 | Column | Description |
 |---|---|
-| `worker_id` | User-visible label shown in the UI and CLI (e.g. `"lpar-1"`). Unique |
-| `runtime_type` | `"spyre"` or `"cpu"` — determines which `metadata.yaml` providers are compatible |
-| `status` | `"ready"` — daemon connected via gRPC stream; `"disconnected"` — stream not active |
-| `address` | Worker Caddy base URL registered as an upstream in the control-plane egress Caddy and as `api_base` in LiteLLM routes |
-| `last_seen_at` | Timestamp of last gRPC heartbeat from the worker daemon |
+| `name` | User-visible label shown in the UI and CLI (e.g. `"lpar-1"`). Unique |
+| `runtime_type` | `'unknown'` until the worker connects and declares its runtime; then `'podman'` or `'openshift'` |
+| `status` | `'pending'` — pre-registered, not yet connected; `'ready'` — daemon connected via gRPC; `'disconnected'` — stream no longer active |
+| `message` | Human-readable reason for the current status, set by the catalog on status transitions |
+| `last_heartbeat` | Timestamp of the most recent heartbeat received from the worker daemon; NULL until the first heartbeat arrives |
+| `metadata` | Arbitrary JSON set by the worker daemon at registration time (e.g. capacity, labels) |
+| `registered_at` | When the worker first registered with the system |
 
 ---
 
 ### 5.7 New `keys` Table
 
-The `keys` table persists the per-model LiteLLM virtual key for every deployed local model. Consumer service pods call `GET /api/v1/keys` at startup to retrieve the key for their model — they do not mount Podman secrets. This replaces the Podman-secret-per-model approach for the Worker LPAR topology where Podman secrets on the control plane are not accessible to worker pods.
+The `keys` table persists the **per-model** LiteLLM virtual key for every deployed local model. This is the shared, stable key scoped to the model's LiteLLM route — it is created once per model and reused across all applications that reference that model.
 
 ```sql
 CREATE TABLE keys (
@@ -567,21 +574,29 @@ CREATE TABLE keys (
 CREATE INDEX idx_keys_component_id ON keys (component_id);
 ```
 
-> The `virtual_key` column stores the raw `sk-...` bearer token. Access is scoped to the Catalog API process — it is never returned in list responses or logs. Consumer services retrieve it only via the authenticated `GET /api/v1/models/keys?instance_id=<component_id>` endpoint.
+> The `virtual_key` column stores the raw `sk-...` bearer token. It is never returned in list responses or logs. It is accessible via the authenticated `GET /api/v1/models/keys?instance_id=<component_id>` endpoint.
+
+**Per-application virtual keys** are a separate concept from the per-model key above. Each application that deploys or reuses a managed model receives its own freshly generated LiteLLM virtual key scoped to the same route. This key is **not stored in the DB** — it is written into a Podman Secret (`litellm-secret-<instance-slug>`) that is mounted into the service pod at deploy time. The pod reads it from `/etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY` and exports it as `LLM_API_KEY` (or `EMB_API_KEY` for embedding) before starting the server process.
 
 ---
 
 ### 5.8 Migration Plan
 
-Model management adds the following goose migration files, numbered after the current highest set by the datasource migration (`20260430094508`).
+Model management adds the following goose migration files:
 
 | File | Purpose |
 |---|---|
-| `20260430094510_alter_components_model_columns.sql` | Adds `name`, `created_by`, `worker_id` (UUID FK) columns to `components`; adds `'Deploying'` to `component_status` enum |
-| `20260430094510_create_workers_table.sql` | Creates `worker_status` enum and `workers` table with index |
-| `20260430094511_create_keys_table.sql` | Creates `keys` table with FK to `components` and index |
+| `20260430094510_alter_components_model_columns.sql` | Adds `name` and `created_by` columns to `components`; adds `'Deploying'` to `component_status` enum |
+| `20260430094511_create_keys_table.sql` | Creates `keys` table with FK to `components` and `idx_keys_component_id` index |
+| `20260801000002_create_workers_table.sql` | Creates `worker_runtime_type` enum (`unknown\|podman\|openshift`), `worker_status` enum (`pending\|ready\|disconnected`), and `workers` table (`name`, `runtime_type`, `status`, `message`, `last_heartbeat`, `metadata`, `registered_at`, `updated_at`) with status and runtime_type indexes |
+| `20260801000003_add_worker_fk_to_applications.sql` | Adds `worker_id UUID NOT NULL` FK column to `applications` (ON DELETE RESTRICT) with index |
+| `20260801000004_add_worker_fk_to_components.sql` | Adds `worker_id UUID` nullable FK column to `components` (ON DELETE SET NULL) |
 
 > `connectors`, `connector_status`, and `dependency_type = 'connector'` are already present from the datasource migration — no re-creation needed.
+
+> The `worker_id` FK on `components` is in a separate migration (`20260801000004`) from the column additions in `20260430094510` because the `workers` table must exist before the FK reference can be added.
+
+> `applications.worker_id` is NOT NULL (every application is deployed through a worker; the local worker is used for local deployments). `components.worker_id` is nullable (NULL = control-plane Podman).
 
 ---
 
@@ -589,99 +604,132 @@ Model management adds the following goose migration files, numbered after the cu
 
 ```mermaid
 erDiagram
-    applications ||--o{ services : "has"
-    services ||--o{ service_dependencies : "depends_on"
-    components ||--o{ service_dependencies : "used_by (local pod)"
-    connectors ||--o{ service_dependencies : "used_by (remote connector)"
-    components ||--o{ keys : "has virtual key"
+    applications ||--o{ services          : "has"
+    applications }o--|| workers           : "deployed on"
+    services     ||--o{ service_dependencies : "depends_on"
+    components   ||--o{ service_dependencies : "used_by (local pod)"
+    connectors   ||--o{ service_dependencies : "used_by (remote connector)"
+    components   ||--o{ keys              : "has virtual key"
+    workers      ||--o{ components        : "hosts"
 
     applications {
-        UUID id PK
-        VARCHAR name
-        VARCHAR catalog_id
-        deployment_type deployment_type
-        status status
-        TEXT message
-        VARCHAR version
-        VARCHAR created_by
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ updated_at
+        UUID            id              PK
+        VARCHAR_100     name
+        VARCHAR_100     catalog_id
+        deployment_type deployment_type    "architectures | services"
+        status          status             "Downloading|Deploying|Running|Deleting|Error"
+        TEXT            message
+        VARCHAR_50      version
+        VARCHAR_100     created_by
+        UUID            worker_id       FK "NOT NULL → workers.id ON DELETE RESTRICT"
+        TIMESTAMPTZ     created_at
+        TIMESTAMPTZ     updated_at
     }
 
     services {
-        UUID id PK
-        UUID app_id FK
-        VARCHAR catalog_id
-        service_status status
-        TEXT message
-        JSONB endpoints
-        TEXT version
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ updated_at
+        UUID            id              PK
+        UUID            app_id          FK "→ applications.id ON DELETE CASCADE"
+        VARCHAR_100     catalog_id
+        service_status  status             "Initializing | Running | Error"
+        TEXT            message
+        JSONB           endpoints
+        TEXT            version
+        TIMESTAMPTZ     created_at
+        TIMESTAMPTZ     updated_at
     }
 
     components {
-        UUID id PK
-        VARCHAR name
-        VARCHAR type
-        VARCHAR provider
-        UUID worker_id FK
-        component_status status
-        TEXT message
-        JSONB endpoints
-        JSONB metadata
-        TEXT version
-        VARCHAR created_by
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ updated_at
+        UUID             id              PK
+        VARCHAR_100      type
+        VARCHAR_100      provider
+        component_status status             "Initializing|Deploying|Running|Error"
+        TEXT             message
+        JSONB            endpoints
+        TEXT             version
+        JSONB            metadata
+        VARCHAR_100      name               "NULL for pipeline-created components"
+        VARCHAR_100      created_by         "NULL for pipeline-created components"
+        UUID             worker_id       FK "NULL → control-plane; ON DELETE SET NULL"
+        TIMESTAMPTZ      created_at
+        TIMESTAMPTZ      updated_at
     }
 
     connectors {
-        UUID id PK
-        VARCHAR name
-        VARCHAR type
-        VARCHAR provider
-        connector_status status
-        TEXT message
-        JSONB metadata
-        VARCHAR created_by
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ updated_at
+        UUID             id              PK
+        VARCHAR_255      name               "UNIQUE"
+        VARCHAR_64       type               "llm | embedding | reranker | datasource"
+        VARCHAR_64       provider           "watsonx | openai-compatible | huggingface | …"
+        connector_status status             "connected | offline"
+        TEXT             message
+        JSONB            metadata           "no credentials stored"
+        VARCHAR_100      created_by
+        TIMESTAMPTZ      created_at
+        TIMESTAMPTZ      updated_at
     }
 
     workers {
-        UUID id PK
-        VARCHAR worker_id
-        VARCHAR runtime_type
-        worker_status status
-        VARCHAR address
-        TIMESTAMPTZ last_seen_at
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ updated_at
+        UUID                 id              PK
+        TEXT                 name               "UNIQUE — user-visible LPAR label"
+        worker_runtime_type  runtime_type       "unknown | podman | openshift"
+        worker_status        status             "pending | ready | disconnected"
+        TEXT                 message
+        TIMESTAMPTZ          last_heartbeat     "NULL until first heartbeat"
+        JSONB                metadata
+        TIMESTAMPTZ          registered_at
+        TIMESTAMPTZ          updated_at
     }
 
     keys {
-        UUID id PK
-        UUID component_id FK
-        TEXT virtual_key
-        VARCHAR route_id
+        UUID        id              PK
+        UUID        component_id    FK "→ components.id ON DELETE CASCADE"
+        TEXT        virtual_key        "sk-… bearer token; never logged"
+        VARCHAR_255 route_id           "LiteLLM route ID"
         TIMESTAMPTZ created_at
     }
 
     service_dependencies {
-        UUID service_id "PK, FK"
-        UUID dependency_id "PK → components.id or connectors.id"
-        dependency_type dependency_type
+        UUID            service_id      "PK, FK → services.id ON DELETE CASCADE"
+        UUID            dependency_id   "PK → components.id or connectors.id"
+        dependency_type dependency_type "service | component | connector"
     }
 
     tokens_blacklist {
-        VARCHAR token_hash PK
-        token_type token_type
+        VARCHAR_64  token_hash      PK
+        token_type  token_type         "access | refresh"
         TIMESTAMPTZ expires_at
+    }
+
+    catalog_bundles {
+        UUID          id              PK
+        VARCHAR_255   name               "display label from metadata.yaml"
+        bundle_status status             "processing | active | failed | deleting"
+        BIGINT        size_bytes         "NULL until extraction completes"
+        VARCHAR_50    catalog_type       "service | component"
+        VARCHAR_200   catalog_id         "bare id or composite type--id"
+        VARCHAR_50    version
+        TEXT          error
+        VARCHAR_100   created_by
+        TIMESTAMPTZ   created_at
+        TIMESTAMPTZ   updated_at
     }
 ```
 
-> **No credentials column.** `name` and `worker_id` are dedicated top-level columns on `components`. Local credentials (virtual keys) are stored in the `keys` table and served via `GET /api/v1/models/keys`. Remote credentials are passed directly to LiteLLM and never touch the Catalog DB.
+**Enum reference**
+
+| Enum type | Values |
+|---|---|
+| `status` | `Downloading`, `Deploying`, `Running`, `Deleting`, `Error` |
+| `service_status` | `Initializing`, `Running`, `Error` |
+| `component_status` | `Initializing`, `Deploying`, `Running`, `Error` |
+| `connector_status` | `connected`, `offline` |
+| `worker_status` | `pending`, `ready`, `disconnected` |
+| `worker_runtime_type` | `unknown`, `podman`, `openshift` |
+| `dependency_type` | `service`, `component`, `connector` |
+| `deployment_type` | `architectures`, `services` |
+| `token_type` | `access`, `refresh` |
+| `bundle_status` | `processing`, `active`, `failed`, `deleting` |
+
+> **No credentials column.** `name` and `worker_id` are dedicated top-level columns on `components`. Per-model virtual keys are stored in the `keys` table. Per-application virtual keys are written to Podman Secrets at deploy time and are never stored in the DB. Remote credentials are passed directly to LiteLLM and never touch the Catalog DB. `catalog_bundles` has a partial unique index on `(catalog_type, catalog_id)` WHERE `status = 'active'`, enforcing at most one active bundle per item.
 
 ---
 
@@ -1556,6 +1604,95 @@ POST /api/v1/connectors/models
   8. Return 201 { id: connectors.id }
 ```
 
+### Flow: Application Create — Model Already Deployed (pre-deployed path)
+
+```
+POST /api/v1/applications
+{ services: [{catalog_id: "summarize", components: [{type: "llm", provider_id: "vllm-cpu"}]}],
+  worker: "lpar-1" }
+
+  PlanDeployment → insertComponentRecords checks:
+    ComponentRepo.GetRunningByTypeAndProvider(type="llm", provider="vllm-cpu")
+    → existing Running component found → comp.PreDeployed = true, comp.DatabaseID = existing.ID
+    → no new components row inserted
+    → managed-model component gets created_by=<user>, worker_id=<worker-uuid>, name=<model-param>
+       written so GET /api/v1/models shows it
+
+  executeDeploymentAsync:
+    resolveModelsAndPrepareKeys:
+      resolveModelComponent(ctx, plan, comp):
+        → fetch existing component from DB (endpoints, metadata)
+        → copy endpoints into ComponentPlan so deployer sees host/port
+        → KeyRepo.GetByComponentID → nil (no key yet) → firstRegistration = true
+          → extract podHost from stored service endpoint
+          → resolveAPIBase:
+              local worker → apiBase = http://<pod-name>:8000/v1
+              remote worker → register mTLS ingress on worker Caddy :8443
+                            → register mTLS egress on CP Caddy :8080
+                            → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>/v1
+          → POST /model/new to LiteLLM (model_name=routeID, api_base=apiBase)
+        → generate per-app virtual key: POST /key/generate {key_name: routeID--app-<appID[:8]>, models:[routeID]}
+        → injectLiteLLMIntoServices:
+            svc.Values["litellm"]["key"] = appVirtualKey
+            svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"] → LiteLLM coordinates
+    plan.PostComponentHook = buildPostComponentHook (no-op for PreDeployed components)
+
+  deployServices:
+    render litellm-secret.yaml.tmpl → {{if .Values.litellm.key}} → Podman Secret created
+                                       LITELLM_VIRTUAL_KEY = appVirtualKey
+    render summarize-api.yaml.tmpl → volume + volumeMount for litellm-secret included
+                                    → LLM_API_KEY exported from /etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY
+                                    → LLM_ENDPOINT = http://<litellm-host>:<port><prefixPath>
+                                    → LLM_MODEL = routeID (e.g. granite-3-3-8b--vllm-cpu)
+```
+
+---
+
+### Flow: Application Create — New Model Deploy
+
+```
+POST /api/v1/applications
+{ services: [{catalog_id: "summarize", components: [{type: "llm", provider_id: "vllm-cpu",
+                                                     params: {model: "ibm-granite/granite-3.3-8b-instruct"}}]}],
+  worker: "lpar-1" }
+
+  PlanDeployment → insertComponentRecords:
+    GetRunningByTypeAndProvider → nil (no running component) → new components row inserted
+    managed-model component gets: created_by=<user>, worker_id=<worker-uuid>, name=<model-param>
+
+  executeDeploymentAsync:
+    resolveModelsAndPrepareKeys → comp.PreDeployed=false → skipped (nothing to do pre-deploy)
+    plan.PostComponentHook = buildPostComponentHook(plan)   ← hook wired for post-component phase
+
+  deployComponents:
+    render vllm-server.yaml.tmpl → podman kube play (pod starts on worker)
+    deployer polls until pod healthy → mergeComponentEndpoints → comp.Endpoints["llm"]["host"] = podName
+
+  PostComponentHook (called by deployer after all component pods up, before services):
+    handleNewlyDeployedModel:
+      modelName from comp.Params["model"]
+      routeID = buildAppRouteID(modelName, providerID)
+      caddyRouteID = routeID + "--" + componentID[:8]
+      podHost from comp.Endpoints["llm"]["host"]
+      resolveAPIBase:
+          local → apiBase = http://<pod-name>:8000/v1
+          remote → register mTLS ingress + egress Caddy routes
+                 → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>/v1
+      POST /model/new to LiteLLM (model_name=routeID, api_base=apiBase)
+      KeyRepo.GetByComponentID → nil → generate model key → INSERT keys row
+      generate per-app virtual key → POST /key/generate {key_name: routeID--app-<appID[:8]>}
+      injectLiteLLMIntoServices → svc.Values["litellm"]["key"] = appVirtualKey
+                                → svc.Values["llm"]["host/port/prefixPath/model"] = LiteLLM coords
+
+  deployServices:
+    render litellm-secret.yaml.tmpl → Podman Secret created with LITELLM_VIRTUAL_KEY = appVirtualKey
+    render summarize-api.yaml.tmpl → volume + volumeMount for litellm-secret
+                                   → LLM_ENDPOINT / LLM_MODEL point at LiteLLM
+                                   → LLM_API_KEY exported from secret at pod startup
+```
+
+---
+
 ### Flow: Undeploy local model
 
 ```
@@ -1637,6 +1774,28 @@ The `litellm_params.model` field uses the `hosted_vllm/<upstream-model-name>` pr
 ### 9. Pre-flight Returns All Violations, Not Just First
 
 The pre-flight response always includes every constraint result (satisfied or not) so operators see the full resource gap at once. Connector providers skip pre-flight entirely — they consume no local resources.
+
+### 10. Application Create Reuses or Deploys Managed Models
+
+When `POST /api/v1/applications` references a managed-model component type (`llm`, `embedding`, `reranker`), the application create flow checks the `components` table for a running instance of that type and provider before inserting a new row:
+
+- **Running instance found** (`PreDeployed = true`): no new pod is started; the existing component's endpoints are copied into the deployment plan. If the component has no `keys` row yet (first application to reference it), the LiteLLM route is registered and a per-model key is stored in `keys`. A fresh per-application virtual key is always generated regardless.
+- **No running instance**: the component pod is deployed normally. After the pod is healthy, a `PostComponentHook` registers the LiteLLM route, persists the per-model key to `keys`, and generates a per-application virtual key.
+
+In both cases the component row is written with `created_by`, `worker_id`, and `name` populated so it appears in `GET /api/v1/models`.
+
+### 11. Per-Application Virtual Keys Are Pod-Scoped, Not DB-Scoped
+
+Each application receives a unique LiteLLM virtual key scoped to the model's route ID. This key is generated fresh at application create time, injected into `svc.Values["litellm"]["key"]`, and rendered into a Podman Secret (`litellm-secret-<instance-slug>`) by the `litellm-secret.yaml.tmpl` catalog template. Service pods read it via a volume mount at `/etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY`. The key is **never stored in the `keys` DB table** — only the per-model key (shared, stable) lives there.
+
+### 12. LiteLLM `api_base` Differs for Local vs Remote Workers
+
+When registering a LiteLLM route during application create (both pre-deployed and new-deploy paths), the `api_base` is resolved by `resolveAPIBase`:
+
+- **Local worker**: `http://<pod-name>:8000/v1` — LiteLLM and the vLLM pod share the same Podman network; direct DNS is sufficient.
+- **Remote worker**: two Caddy routes are registered (mTLS ingress on worker Caddy `:8443`, mTLS egress on CP Caddy `:8080`) and `api_base = http://ai-services--caddy:8080/worker/<workerName>/models/<caddyRouteID>/v1`. LiteLLM calls the CP Caddy egress which tunnels over mTLS to the worker. The `caddyRouteID = routeID + "--" + componentID[:8]` ensures route uniqueness per deployment.
+
+This mirrors the exact same logic used by `model_service.deployAsync`.
 
 ---
 
