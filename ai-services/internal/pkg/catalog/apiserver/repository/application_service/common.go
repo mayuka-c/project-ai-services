@@ -88,6 +88,19 @@ func buildAppRouteID(modelName, providerID string) string {
 	return sanitiseRouteSegmentApp(modelName) + "--" + sanitiseRouteSegmentApp(providerID)
 }
 
+// litellmModeForTypeApp returns the LiteLLM model_info.mode value for the given
+// component type, or an empty string when no explicit mode is required (e.g. llm).
+func litellmModeForTypeApp(componentType string) string {
+	switch componentType {
+	case "embedding":
+		return "embedding"
+	case "reranker":
+		return "rerank"
+	default:
+		return ""
+	}
+}
+
 // litellmPostApp POSTs a JSON payload to the LiteLLM Admin API.
 func litellmPostApp(ctx context.Context, path string, payload any) error {
 	body, err := json.Marshal(payload)
@@ -1201,13 +1214,19 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 				logger.WarningfCtx(ctx, "[app-deploy] resolveAPIBase failed for pre-deployed component %s: %v", existing.ID, resolveErr)
 			} else {
 				logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for pre-deployed component %s api_base=%s", routeID, existing.ID, apiBase)
-				if regErr := litellmPostApp(ctx, "/model/new", map[string]any{
-					"model_name": routeID,
-					"litellm_params": map[string]any{
-						"model":    "hosted_vllm/" + modelName,
-						"api_base": apiBase,
-					},
-				}); regErr != nil {
+				preDeployedPayload := map[string]any{
+						"model_name": routeID,
+						"litellm_params": map[string]any{
+							"model":    "hosted_vllm/" + modelName,
+							"api_base": apiBase,
+						},
+					}
+				if mode := litellmModeForTypeApp(comp.ComponentType); mode != "" {
+					preDeployedPayload["model_info"] = map[string]any{
+						"mode": mode,
+					}
+				}
+				if regErr := litellmPostApp(ctx, "/model/new", preDeployedPayload); regErr != nil {
 					// Non-fatal: log but continue — the key can still be generated.
 					logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
 				}
@@ -1489,13 +1508,19 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 
 	// 1. Register the LiteLLM route.
 	logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for new component %s api_base=%s", routeID, comp.DatabaseID, apiBase)
-	if err := litellmPostApp(ctx, "/model/new", map[string]any{
+	newModelPayload := map[string]any{
 		"model_name": routeID,
 		"litellm_params": map[string]any{
 			"model":    "hosted_vllm/" + modelName,
 			"api_base": apiBase,
 		},
-	}); err != nil {
+	}
+	if mode := litellmModeForTypeApp(comp.ComponentType); mode != "" {
+		newModelPayload["model_info"] = map[string]any{
+			"mode": mode,
+		}
+	}
+	if err := litellmPostApp(ctx, "/model/new", newModelPayload); err != nil {
 		return fmt.Errorf("LiteLLM route registration failed: %w", err)
 	}
 

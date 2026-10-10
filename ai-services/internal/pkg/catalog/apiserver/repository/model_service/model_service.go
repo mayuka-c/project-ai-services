@@ -409,7 +409,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
 	log("registering LiteLLM route %q api_base=%s", routeID, apiBase)
 
-	if err := s.registerLiteLLMRoute(ctx, routeID, modelName, apiBase); err != nil {
+	if err := s.registerLiteLLMRoute(ctx, routeID, modelName, apiBase, req.Type); err != nil {
 		fail(fmt.Sprintf("LiteLLM route registration failed: %v", err))
 		return
 	}
@@ -699,7 +699,7 @@ func (s *ModelService) allocateSpyreCards(
 //   - model:       "hosted_vllm/{modelName}"  (provider prefix inline — no separate custom_llm_provider field)
 //   - api_base:    internal pod URL or worker Caddy URL
 //   - api_key absent for local vLLM (open endpoint, no auth required)
-func (s *ModelService) registerLiteLLMRoute(ctx context.Context, routeID, modelName, apiBase string) error {
+func (s *ModelService) registerLiteLLMRoute(ctx context.Context, routeID, modelName, apiBase, componentType string) error {
 	payload := map[string]any{
 		"model_name": routeID,
 		"litellm_params": map[string]any{
@@ -708,7 +708,26 @@ func (s *ModelService) registerLiteLLMRoute(ctx context.Context, routeID, modelN
 		},
 	}
 
+	if mode := litellmModeForType(componentType); mode != "" {
+		payload["model_info"] = map[string]any{
+			"mode": mode,
+		}
+	}
+
 	return s.litellmPost(ctx, "/model/new", payload)
+}
+
+// litellmModeForType returns the LiteLLM model_info.mode value for the given
+// component type, or an empty string when no explicit mode is required (e.g. llm).
+func litellmModeForType(componentType string) string {
+	switch componentType {
+	case "embedding":
+		return "embedding"
+	case "reranker":
+		return "rerank"
+	default:
+		return ""
+	}
 }
 
 // deleteLiteLLMRoute calls DELETE /model/delete on the LiteLLM Admin API.
