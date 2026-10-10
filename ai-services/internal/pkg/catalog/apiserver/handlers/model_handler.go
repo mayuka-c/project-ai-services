@@ -23,77 +23,71 @@ func NewModelHandler(modelSvc repository.ModelServiceInterface) *ModelHandler {
 	return &ModelHandler{modelSvc: modelSvc}
 }
 
-// DeployModel godoc
+// CreateModel godoc
 //
-//	@Summary		Deploy a local model
-//	@Description	Validates the request, inserts a Deploying component row, and starts async pod creation + LiteLLM route registration. Returns 202 immediately. Poll GET /api/v1/models/:id for status.
+//	@Summary		Create a model (polymorphic)
+//	@Description	deployment_type=local: deploys a pod and registers a LiteLLM route (async, 202). deployment_type=remote: registers a remote connector, probes connectivity, returns 201.
 //	@Tags			Models
 //	@Accept			json
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			request	body		models.DeployModelRequest	true	"Model deploy request"
-//	@Success		202		{object}	models.DeployModelResponse	"Deploy initiated"
-//	@Failure		400		{object}	ErrorResponse				"Missing required fields, unknown type, or unknown provider_id"
+//	@Param			request	body		models.CreateModelRequest	true	"Model create request"
+//	@Success		202		{object}	models.CreateModelResponse	"Local deploy initiated"
+//	@Success		201		{object}	models.CreateModelResponse	"Remote connector created"
+//	@Failure		400		{object}	ErrorResponse				"Invalid request body, unknown deployment_type/type/provider_id"
 //	@Failure		401		{object}	ErrorResponse				"Unauthorized"
-//	@Failure		404		{object}	ErrorResponse				"worker_selector refers to an unknown worker"
-//	@Failure		409		{object}	ErrorResponse				"A component of this type is already Running or Deploying"
-//	@Failure		422		{object}	ErrorResponse				"Pre-flight resource check failed"
+//	@Failure		404		{object}	ErrorResponse				"worker_selector or provider_id not found"
+//	@Failure		409		{object}	ErrorResponse				"Conflict (duplicate name or already deploying)"
+//	@Failure		422		{object}	ErrorResponse				"Pre-flight or connectivity check failed"
 //	@Failure		500		{object}	ErrorResponse				"Internal Server Error"
 //	@Router			/models [post]
-func (h *ModelHandler) DeployModel(c *gin.Context) {
-	var req models.DeployModelRequest
+func (h *ModelHandler) CreateModel(c *gin.Context) {
+	var req models.CreateModelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("Invalid request body: %v", err),
-		})
-
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("invalid request body: %v", err)})
 		return
 	}
 
 	userID := c.GetString(middleware.CtxUserIDKey)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "Unauthorized: user ID not found in context",
-		})
-
+		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized: user ID not found in context"})
 		return
 	}
-
 	req.CreatedBy = userID
 
-	resp, err := h.modelSvc.DeployModel(c.Request.Context(), req)
+	resp, err := h.modelSvc.CreateModel(c.Request.Context(), req)
 	if err != nil {
 		if valErr, ok := err.(*repository.ValidationError); ok {
 			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
 			return
 		}
-
-		logger.ErrorfCtx(c.Request.Context(), "failed to deploy model: %v", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: fmt.Sprintf("Failed to deploy model: %v", err),
-		})
-
+		logger.ErrorfCtx(c.Request.Context(), "failed to create model: %v", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to create model: %v", err)})
 		return
 	}
 
-	c.JSON(http.StatusAccepted, resp)
+	if resp.DeploymentType == "remote" {
+		c.JSON(http.StatusCreated, resp)
+	} else {
+		c.JSON(http.StatusAccepted, resp)
+	}
 }
 
 // ListModels godoc
 //
-//	@Summary		List local models
-//	@Description	Returns a paginated list of all managed local model components. Filter by component type with ?type=.
+//	@Summary		List models
+//	@Description	Returns a paginated list of all models — both local (components) and remote (connectors). Filter by ?type= and ?deployment_type=.
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			type		query		string	false	"Filter by component type: llm, embedding, reranker"
-//	@Param			page		query		int		false	"Page number (1-indexed)"		default(1)
-//	@Param			page_size	query		int		false	"Items per page (max 100)"		default(20)
-//	@Success		200			{object}	models.ListModelsResponse
-//	@Failure		400			{object}	ErrorResponse	"Invalid query parameters"
-//	@Failure		401			{object}	ErrorResponse	"Unauthorized"
-//	@Failure		500			{object}	ErrorResponse	"Internal Server Error"
+//	@Param			type			query		string	false	"Filter by role: llm, embedding, reranker"
+//	@Param			deployment_type	query		string	false	"Filter by kind: local, remote"
+//	@Param			page			query		int		false	"Page number (1-indexed)"	default(1)
+//	@Param			page_size		query		int		false	"Items per page (max 100)"	default(20)
+//	@Success		200				{object}	models.ListModelsResponse
+//	@Failure		400				{object}	ErrorResponse	"Invalid query parameters"
+//	@Failure		401				{object}	ErrorResponse	"Unauthorized"
+//	@Failure		500				{object}	ErrorResponse	"Internal Server Error"
 //	@Router			/models [get]
 func (h *ModelHandler) ListModels(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
@@ -102,23 +96,20 @@ func (h *ModelHandler) ListModels(c *gin.Context) {
 	page, pageSize, err := repository.ValidatePaginationParams(page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: err.Error()})
-
 		return
 	}
 
 	req := models.ListModelsRequest{
-		Type:     c.Query("type"),
-		Page:     page,
-		PageSize: pageSize,
+		Type:           c.Query("type"),
+		DeploymentType: c.Query("deployment_type"),
+		Page:           page,
+		PageSize:       pageSize,
 	}
 
 	resp, err := h.modelSvc.ListModels(c.Request.Context(), req)
 	if err != nil {
 		logger.ErrorfCtx(c.Request.Context(), "failed to list models: %v", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: "Failed to list models",
-		})
-
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to list models"})
 		return
 	}
 
@@ -128,13 +119,13 @@ func (h *ModelHandler) ListModels(c *gin.Context) {
 // GetModel godoc
 //
 //	@Summary		Get model details
-//	@Description	Returns the full record for a managed local model by UUID.
+//	@Description	Returns full details of any model by UUID. Resolves against components first, then connectors. The deployment_type field in the response indicates which table was matched.
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			id	path		string					true	"Model component UUID"
+//	@Param			id	path		string					true	"Model UUID"
 //	@Success		200	{object}	models.GetModelResponse	"Model detail"
-//	@Failure		400	{object}	ErrorResponse			"Invalid UUID format"
+//	@Failure		400	{object}	ErrorResponse			"Invalid UUID"
 //	@Failure		401	{object}	ErrorResponse			"Unauthorized"
 //	@Failure		404	{object}	ErrorResponse			"Model not found"
 //	@Failure		500	{object}	ErrorResponse			"Internal Server Error"
@@ -142,10 +133,7 @@ func (h *ModelHandler) ListModels(c *gin.Context) {
 func (h *ModelHandler) GetModel(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("Invalid model ID format: %v", err),
-		})
-
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("invalid model ID: %v", err)})
 		return
 	}
 
@@ -153,15 +141,62 @@ func (h *ModelHandler) GetModel(c *gin.Context) {
 	if err != nil {
 		if valErr, ok := err.(*repository.ValidationError); ok {
 			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
 			return
 		}
-
 		logger.ErrorfCtx(c.Request.Context(), "failed to get model: %v", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: "Failed to get model",
-		})
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to get model"})
+		return
+	}
 
+	c.JSON(http.StatusOK, resp)
+}
+
+// UpdateRemoteModel godoc
+//
+//	@Summary		Update remote model credentials
+//	@Description	Updates the credential (Authentication) fields of a remote model connector. Only fields marked ui:section="Authentication" in the provider's schema.json are applied. Structural fields are immutable. Returns 405 if the UUID resolves to a local model.
+//	@Tags			Models
+//	@Accept			json
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id		path		string								true	"Model UUID"
+//	@Param			request	body		models.UpdateRemoteModelRequest		true	"Credential update"
+//	@Success		200		{object}	models.UpdateRemoteModelResponse	"Updated"
+//	@Failure		400		{object}	ErrorResponse						"Invalid request"
+//	@Failure		401		{object}	ErrorResponse						"Unauthorized"
+//	@Failure		403		{object}	ErrorResponse						"Not the owner"
+//	@Failure		404		{object}	ErrorResponse						"Model not found"
+//	@Failure		405		{object}	ErrorResponse						"UUID resolves to a local model — not updatable"
+//	@Failure		422		{object}	ErrorResponse						"Connectivity check failed"
+//	@Failure		500		{object}	ErrorResponse						"Internal Server Error"
+//	@Router			/models/{id} [put]
+func (h *ModelHandler) UpdateRemoteModel(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("invalid model ID: %v", err)})
+		return
+	}
+
+	userID := c.GetString(middleware.CtxUserIDKey)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized: user ID not found in context"})
+		return
+	}
+
+	var req models.UpdateRemoteModelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("invalid request body: %v", err)})
+		return
+	}
+
+	resp, err := h.modelSvc.UpdateRemoteModel(c.Request.Context(), id, userID, req)
+	if err != nil {
+		if valErr, ok := err.(*repository.ValidationError); ok {
+			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
+			return
+		}
+		logger.ErrorfCtx(c.Request.Context(), "failed to update remote model: %v", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to update remote model"})
 		return
 	}
 
@@ -170,69 +205,60 @@ func (h *ModelHandler) GetModel(c *gin.Context) {
 
 // UndeployModel godoc
 //
-//	@Summary		Undeploy a local model
-//	@Description	Initiates async teardown: stops pod, deletes secrets/volumes, deregisters the LiteLLM route, revokes the virtual key, and deletes the component row. Returns 202 immediately.
+//	@Summary		Delete / undeploy a model
+//	@Description	Resolves the UUID against components first, then connectors. Local: async teardown (stop pod, deregister route, revoke key, delete row) → 202. Remote: sync deregister + delete → 204.
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			id			path		string						true	"Model component UUID"
-//	@Param			keep_data	query		bool						false	"Preserve host volume (stop pod but keep model weights on disk)"	default(false)
-//	@Success		202			{object}	models.UndeployModelResponse	"Undeploy initiated"
-//	@Failure		400			{object}	ErrorResponse				"Invalid UUID format"
-//	@Failure		401			{object}	ErrorResponse				"Unauthorized"
-//	@Failure		403			{object}	ErrorResponse				"Not the deploying user"
-//	@Failure		404			{object}	ErrorResponse				"Model not found"
-//	@Failure		409			{object}	ErrorResponse				"Model in use by active applications or already deleting"
-//	@Failure		500			{object}	ErrorResponse				"Internal Server Error"
+//	@Param			id	path		string						true	"Model UUID"
+//	@Success		202	{object}	models.UndeployModelResponse	"Local undeploy initiated"
+//	@Success		204	nil											"Remote connector deleted"
+//	@Failure		400	{object}	ErrorResponse				"Invalid UUID"
+//	@Failure		401	{object}	ErrorResponse				"Unauthorized"
+//	@Failure		403	{object}	ErrorResponse				"Not the owner"
+//	@Failure		404	{object}	ErrorResponse				"Model not found"
+//	@Failure		409	{object}	ErrorResponse				"Model in use or already deleting"
+//	@Failure		500	{object}	ErrorResponse				"Internal Server Error"
 //	@Router			/models/{id} [delete]
 func (h *ModelHandler) UndeployModel(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("Invalid model ID format: %v", err),
-		})
-
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("invalid model ID: %v", err)})
 		return
 	}
 
 	userID := c.GetString(middleware.CtxUserIDKey)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "Unauthorized: user ID not found in context",
-		})
-
+		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized: user ID not found in context"})
 		return
 	}
 
-	keepData := c.Query("keep_data") == "true"
-
-	resp, err := h.modelSvc.UndeployModel(c.Request.Context(), id, userID, keepData)
+	resp, err := h.modelSvc.UndeployModel(c.Request.Context(), id, userID)
 	if err != nil {
 		if valErr, ok := err.(*repository.ValidationError); ok {
 			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
 			return
 		}
-
 		logger.ErrorfCtx(c.Request.Context(), "failed to undeploy model: %v", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: "Failed to undeploy model",
-		})
-
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to undeploy model"})
 		return
 	}
 
-	c.JSON(http.StatusAccepted, resp)
+	if resp.DeploymentType == "remote" {
+		c.Status(http.StatusNoContent)
+	} else {
+		c.JSON(http.StatusAccepted, resp)
+	}
 }
 
 // GetModelKey godoc
 //
 //	@Summary		Get virtual key for a model
-//	@Description	Returns the LiteLLM virtual key for a managed model — a deployed local model (components.id) or a remote model connector (connectors.id). Used by consumer service pods at startup to retrieve their bearer token.
+//	@Description	Returns the LiteLLM virtual key for any model (local component or remote connector). Used by consumer service pods at startup to retrieve their bearer token.
 //	@Tags			Models
 //	@Produce		json
 //	@Security		BearerAuth
-//	@Param			instance_id	query		string						true	"Model component UUID or model connector UUID"
+//	@Param			instance_id	query		string						true	"Model UUID (component or connector)"
 //	@Success		200			{object}	models.GetModelKeyResponse	"Virtual key"
 //	@Failure		400			{object}	ErrorResponse				"Missing or invalid instance_id"
 //	@Failure		401			{object}	ErrorResponse				"Unauthorized"
@@ -242,96 +268,28 @@ func (h *ModelHandler) UndeployModel(c *gin.Context) {
 func (h *ModelHandler) GetModelKey(c *gin.Context) {
 	raw := c.Query("instance_id")
 	if raw == "" {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: "instance_id query parameter is required",
-		})
-
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "instance_id query parameter is required"})
 		return
 	}
 
-	componentID, err := uuid.Parse(raw)
+	instanceID, err := uuid.Parse(raw)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("Invalid instance_id format: %v", err),
-		})
-
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("invalid instance_id: %v", err)})
 		return
 	}
 
-	resp, err := h.modelSvc.GetModelKey(c.Request.Context(), componentID)
+	resp, err := h.modelSvc.GetModelKey(c.Request.Context(), instanceID)
 	if err != nil {
 		if valErr, ok := err.(*repository.ValidationError); ok {
 			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
 			return
 		}
-
 		logger.ErrorfCtx(c.Request.Context(), "failed to get model key: %v", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: "Failed to get model key",
-		})
-
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to get model key"})
 		return
 	}
 
 	c.JSON(http.StatusOK, resp)
-}
-
-// CreateConnector godoc
-//
-//	@Summary		Create a model connector
-//	@Description	Registers a remote model endpoint (e.g. WatsonX) as a LiteLLM route, probes it, and persists a connector record. Sensitive params are passed to LiteLLM and never stored. Returns 422 if the connection test fails.
-//	@Tags			Connectors
-//	@Accept			json
-//	@Produce		json
-//	@Security		BearerAuth
-//	@Param			request	body		models.CreateModelConnectorRequest	true	"Model connector creation request"
-//	@Success		201		{object}	models.CreateModelConnectorResponse	"Connector created"
-//	@Failure		400		{object}	ErrorResponse						"Invalid request body or validation errors"
-//	@Failure		401		{object}	ErrorResponse						"Unauthorized"
-//	@Failure		404		{object}	ErrorResponse						"Provider not found in catalog"
-//	@Failure		409		{object}	ErrorResponse						"Connector name already exists"
-//	@Failure		422		{object}	ErrorResponse						"Connection test failed"
-//	@Failure		500		{object}	ErrorResponse						"Internal Server Error"
-//	@Router			/connectors/models [post]
-func (h *ModelHandler) CreateConnector(c *gin.Context) {
-	var req models.CreateModelConnectorRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("Invalid request body: %v", err),
-		})
-
-		return
-	}
-
-	userID := c.GetString(middleware.CtxUserIDKey)
-	if userID == "" {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "Unauthorized: user ID not found in context",
-		})
-
-		return
-	}
-
-	req.CreatedBy = userID
-
-	resp, err := h.modelSvc.CreateConnector(c.Request.Context(), req)
-	if err != nil {
-		if valErr, ok := err.(*repository.ValidationError); ok {
-			c.JSON(valErr.Code, ErrorResponse{Error: valErr.Message})
-
-			return
-		}
-
-		logger.ErrorfCtx(c.Request.Context(), "failed to create model connector: %v", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: fmt.Sprintf("Failed to create connector: %v", err),
-		})
-
-		return
-	}
-
-	c.JSON(http.StatusCreated, resp)
 }
 
 // Made with Bob

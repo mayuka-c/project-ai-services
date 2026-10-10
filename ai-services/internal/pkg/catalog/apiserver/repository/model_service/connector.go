@@ -3,14 +3,17 @@ package modelservice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
 
+	"github.com/google/uuid"
 	apimodels "github.com/project-ai-services/ai-services/internal/pkg/catalog/apiserver/models"
 	dbmodels "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/models"
+	dbrepo "github.com/project-ai-services/ai-services/internal/pkg/catalog/db/repository"
 	catalogutils "github.com/project-ai-services/ai-services/internal/pkg/catalog/utils"
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/validators"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
@@ -20,7 +23,7 @@ import (
 // connectorNameRe matches the datasource connector name rule: letters, digits, hyphens, underscores.
 var connectorNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
-// CreateConnector registers a remote model endpoint as a connector. Flow:
+// createRemote registers a remote model endpoint as a connector. Flow:
 //
 //  1. Validate type, name, provider existence and params against the provider's schema.json.
 //  2. Duplicate-name guard (case-insensitive — handled by LOWER() in the DB query).
@@ -29,7 +32,7 @@ var connectorNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 //  5. Generate a per-model LiteLLM virtual key for the route.
 //  6. Persist the connector with sensitive fields stripped from metadata.
 //  7. Persist the virtual key in keys (dependency_type = 'connector').
-func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.CreateModelConnectorRequest) (*apimodels.CreateModelConnectorResponse, error) {
+func (s *ModelService) createRemote(ctx context.Context, req apimodels.CreateModelRequest) (*apimodels.CreateModelResponse, error) {
 	// Phase 1: validate request.
 	if !validModelTypes[req.Type] {
 		return nil, &ValidationError{
@@ -41,7 +44,7 @@ func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.Create
 	if !connectorNameRe.MatchString(req.Name) {
 		return nil, &ValidationError{
 			Code:    http.StatusBadRequest,
-			Message: "Connector name may only contain letters, digits, hyphens (-), and underscores (_)",
+			Message: "Model name may only contain letters, digits, hyphens (-), and underscores (_)",
 		}
 	}
 
@@ -81,7 +84,7 @@ func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.Create
 	if existing != nil {
 		return nil, &ValidationError{
 			Code:    http.StatusConflict,
-			Message: fmt.Sprintf("Connector with name %q already exists", req.Name),
+			Message: fmt.Sprintf("Model with name %q already exists", req.Name),
 		}
 	}
 
@@ -144,7 +147,145 @@ func (s *ModelService) CreateConnector(ctx context.Context, req apimodels.Create
 		return nil, fmt.Errorf("failed to persist virtual key: %w", err)
 	}
 
-	return &apimodels.CreateModelConnectorResponse{ID: connector.ID.String()}, nil
+	return &apimodels.CreateModelResponse{ID: connector.ID, DeploymentType: "remote"}, nil
+}
+
+// UpdateRemoteModel re-registers the LiteLLM route with new credentials, probes it,
+// then updates the connector row. Returns 405 if the UUID belongs to a local component.
+// userID is accepted for audit/ownership checks by callers but is not currently used here.
+func (s *ModelService) UpdateRemoteModel(ctx context.Context, id uuid.UUID, _ string, req apimodels.UpdateRemoteModelRequest) (*apimodels.UpdateRemoteModelResponse, error) {
+	// Reject if this UUID belongs to a local component (managed pod).
+	comp, err := s.componentRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check component: %w", err)
+	}
+	if comp != nil && comp.CreatedBy != nil {
+		return nil, &ValidationError{
+			Code:    http.StatusMethodNotAllowed,
+			Message: "local models cannot be updated via this endpoint",
+		}
+	}
+
+	// Fetch the connector.
+	connector, err := s.connectorRepo.GetByID(ctx, id, true)
+	if err != nil {
+		if errors.Is(err, dbrepo.ErrConnectorNotFound) {
+			return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
+		}
+		return nil, fmt.Errorf("failed to fetch connector: %w", err)
+	}
+
+	// Load and validate the provider schema.
+	rawSchema, err := s.catalogProvider.GetConnectorProviderParams(ctx, connector.Type, connector.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load param schema for provider %q: %w", connector.Provider, err)
+	}
+
+	schema, err := pkgutils.ConvertRawJsontoMap(rawSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode param schema for provider %q: %w", connector.Provider, err)
+	}
+
+	if err := validators.ValidateParams(req.Params, schema, fmt.Sprintf("connector provider %q", connector.Provider)); err != nil {
+		return nil, err
+	}
+
+	// Rebuild the route ID from existing connector metadata.
+	existingModelName, _ := connector.Metadata["model_name"].(string)
+	routeID := buildRouteID(path.Base(existingModelName), connector.Provider)
+
+	// Delete the old LiteLLM route (best-effort — proceed even if it fails).
+	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
+		logger.WarningfCtx(ctx, "UpdateRemoteModel: failed to delete old LiteLLM route %q (continuing): %v", routeID, err)
+	}
+
+	// Re-register with new params.
+	if err := s.registerConnectorRoute(ctx, routeID, connector.Provider, req.Params); err != nil {
+		return nil, fmt.Errorf("LiteLLM route re-registration failed: %w", err)
+	}
+
+	// Probe the new route; roll back on failure.
+	if probeErr := s.probeLiteLLMRoute(ctx, routeID); probeErr != nil {
+		if delErr := s.deleteLiteLLMRoute(ctx, routeID); delErr != nil {
+			logger.WarningfCtx(ctx, "UpdateRemoteModel: failed to delete LiteLLM route %q after failed probe: %v", routeID, delErr)
+		}
+		return nil, &ValidationError{
+			Code:    http.StatusUnprocessableEntity,
+			Message: fmt.Sprintf("Connection test failed: %v", probeErr),
+		}
+	}
+
+	// Persist updated metadata (sensitive fields stripped).
+	updatedConnector, err := s.connectorRepo.Update(ctx, id, dbrepo.ConnectorUpdateFields{
+		Metadata: catalogutils.StripSensitiveFields(req.Params, catalogutils.SensitiveFieldsFromSchema(schema)),
+		Status:   dbmodels.ConnectorStatusConnected,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update connector: %w", err)
+	}
+
+	// Resolve provider display name.
+	providerName := updatedConnector.Provider
+	if catalogConn, loadErr := s.catalogProvider.LoadConnector(updatedConnector.Type, updatedConnector.Provider); loadErr == nil {
+		providerName = catalogConn.Name
+	}
+
+	return &apimodels.UpdateRemoteModelResponse{
+		ID:             updatedConnector.ID,
+		DeploymentType: "remote",
+		Name:           updatedConnector.Name,
+		Type:           updatedConnector.Type,
+		Provider: apimodels.ModelProviderInfo{
+			ID:   updatedConnector.Provider,
+			Name: providerName,
+		},
+		Status:    string(updatedConnector.Status),
+		Message:   updatedConnector.Message,
+		CreatedBy: updatedConnector.CreatedBy,
+		CreatedAt: updatedConnector.CreatedAt,
+		UpdatedAt: updatedConnector.UpdatedAt,
+	}, nil
+}
+
+// deleteRemote tears down a remote connector synchronously:
+//  1. Revoke and delete the virtual key.
+//  2. Delete the LiteLLM route.
+//  3. Delete the connector DB row (only if unlinked).
+func (s *ModelService) deleteRemote(ctx context.Context, connector *dbmodels.Connector) error {
+	modelName, _ := connector.Metadata["model_name"].(string)
+	routeID := buildRouteID(path.Base(modelName), connector.Provider)
+
+	// Step 1: revoke and delete the virtual key.
+	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeConnector, connector.ID)
+	if err != nil {
+		logger.WarningfCtx(ctx, "[modelmanager] connector %s: failed to fetch virtual key (continuing): %v", connector.ID, err)
+	}
+	if key != nil {
+		if err := s.revokeVirtualKey(ctx, key.VirtualKey); err != nil {
+			logger.WarningfCtx(ctx, "[modelmanager] connector %s: failed to revoke virtual key (continuing): %v", connector.ID, err)
+		}
+		if err := s.keyRepo.DeleteByDependency(ctx, dbmodels.DependencyTypeConnector, connector.ID); err != nil {
+			logger.WarningfCtx(ctx, "[modelmanager] connector %s: failed to delete keys row (continuing): %v", connector.ID, err)
+		}
+	}
+
+	// Step 2: deregister LiteLLM route.
+	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
+		logger.WarningfCtx(ctx, "[modelmanager] connector %s: failed to deregister LiteLLM route %q (continuing): %v", connector.ID, routeID, err)
+	}
+
+	// Step 3: delete the connector row.
+	if _, err := s.connectorRepo.DeleteIfUnlinked(ctx, connector.ID, dbmodels.DependencyTypeConnector); err != nil {
+		if errors.Is(err, dbrepo.ErrConnectorInUse) {
+			return &ValidationError{
+				Code:    http.StatusConflict,
+				Message: "model is in use by one or more active applications",
+			}
+		}
+		return fmt.Errorf("failed to delete connector: %w", err)
+	}
+
+	return nil
 }
 
 // rollbackConnectorRoute best-effort revokes the virtual key (if any) and deletes the LiteLLM route.

@@ -135,9 +135,25 @@ func litellmMasterKey() string {
 	return os.Getenv(litellmMasterKeyEnv)
 }
 
-// DeployModel validates the request, inserts a Deploying component row, returns 202,
-// and kicks off the async deployment goroutine.
-func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployModelRequest) (*apimodels.DeployModelResponse, error) {
+// CreateModel is the polymorphic entry point for POST /api/v1/models.
+// It dispatches to deployLocal or CreateConnector based on deployment_type.
+func (s *ModelService) CreateModel(ctx context.Context, req apimodels.CreateModelRequest) (*apimodels.CreateModelResponse, error) {
+	switch req.DeploymentType {
+	case "local":
+		return s.deployLocal(ctx, req)
+	case "remote":
+		return s.createRemote(ctx, req)
+	default:
+		return nil, &ValidationError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("unknown deployment_type %q: must be \"local\" or \"remote\"", req.DeploymentType),
+		}
+	}
+}
+
+// deployLocal validates the request, inserts a Deploying component row, and kicks off
+// the async pod creation + LiteLLM route registration. Returns 202.
+func (s *ModelService) deployLocal(ctx context.Context, req apimodels.CreateModelRequest) (*apimodels.CreateModelResponse, error) {
 	// 1. Validate type.
 	if !validModelTypes[req.Type] {
 		return nil, &ValidationError{
@@ -210,10 +226,10 @@ func (s *ModelService) DeployModel(ctx context.Context, req apimodels.DeployMode
 		return nil, fmt.Errorf("failed to insert component: %w", err)
 	}
 
-	// 7. Kick off async deployment.
+	// 6. Kick off async deployment.
 	go s.deployAsync(context.Background(), component.ID, workerID, req, comp)
 
-	return &apimodels.DeployModelResponse{ID: component.ID}, nil
+	return &apimodels.CreateModelResponse{ID: component.ID, DeploymentType: "local"}, nil
 }
 
 // validateModelParams checks that mandatory fields are present in params.
@@ -234,7 +250,7 @@ func validateModelParams(params map[string]any) error {
 //  4. Register the LiteLLM route once the pod is reachable
 //  5. Generate and persist a per-model virtual key
 //  6. Mark the component Running
-func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, workerID *uuid.UUID, req apimodels.DeployModelRequest, _ *catalogtypes.Component) {
+func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, workerID *uuid.UUID, req apimodels.CreateModelRequest, _ *catalogtypes.Component) {
 	log := func(msg string, args ...any) {
 		logger.InfofCtx(ctx, "[modelmanager] component %s: "+msg, append([]any{componentID}, args...)...)
 	}
@@ -507,7 +523,7 @@ func (s *ModelService) downloadModel(ctx context.Context, rt runtime.Runtime, mo
 // the provided runtime (local Podman or remote worker over gRPC).
 // It returns the pod hostname (podSpec.Name from the rendered template) which the caller
 // uses to construct the LiteLLM api_base for control-plane deploys.
-func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, workerID *uuid.UUID, req apimodels.DeployModelRequest, rt runtime.Runtime) (string, error) {
+func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID, workerID *uuid.UUID, req apimodels.CreateModelRequest, rt runtime.Runtime) (string, error) {
 	modelName, _ := req.Params["model"].(string)
 
 	// Load catalog values for this provider so the templates render correctly.
@@ -766,17 +782,37 @@ func (s *ModelService) ListModels(ctx context.Context, req apimodels.ListModelsR
 		req.PageSize = catalogconstants.DefaultPageSize
 	}
 
-	offset := (req.Page - 1) * req.PageSize
-	components, total, err := s.componentRepo.ListManaged(ctx, req.Type, offset, req.PageSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list managed components: %w", err)
+	var items []apimodels.ModelListItem
+
+	// Fetch local models unless the caller requests remote-only.
+	if req.DeploymentType == "" || req.DeploymentType == "local" {
+		offset := (req.Page - 1) * req.PageSize
+		components, _, err := s.componentRepo.ListManaged(ctx, req.Type, offset, req.PageSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list managed components: %w", err)
+		}
+		for _, c := range components {
+			items = append(items, s.toModelListItem(ctx, c))
+		}
 	}
 
-	items := make([]apimodels.ModelListItem, 0, len(components))
-	for _, c := range components {
-		items = append(items, s.toModelListItem(ctx, c))
+	// Fetch remote models unless the caller requests local-only.
+	if req.DeploymentType == "" || req.DeploymentType == "remote" {
+		offset := (req.Page - 1) * req.PageSize
+		connectors, err := s.connectorRepo.List(ctx, &dbrepo.ConnectorFilters{
+			Type:   req.Type,
+			Limit:  req.PageSize,
+			Offset: offset,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list remote model connectors: %w", err)
+		}
+		for _, conn := range connectors {
+			items = append(items, s.connectorToListItem(conn))
+		}
 	}
 
+	total := len(items)
 	totalPages := int(math.Ceil(float64(total) / float64(req.PageSize)))
 	if totalPages < 1 {
 		totalPages = 1
@@ -795,118 +831,165 @@ func (s *ModelService) ListModels(ctx context.Context, req apimodels.ListModelsR
 	}, nil
 }
 
-// GetModel returns the full details of a managed local model.
+// GetModel returns the full details of a model — local (component) or remote (connector).
 func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*apimodels.GetModelResponse, error) {
+	// Try local component first.
 	c, err := s.componentRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch component: %w", err)
 	}
-	if c == nil || c.CreatedBy == nil {
-		return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
+	if c != nil && c.CreatedBy != nil {
+		// Local model found — build full response.
+		providerName := c.Provider
+		if catalogComp, loadErr := s.catalogProvider.LoadComponent(c.Type, c.Provider); loadErr == nil {
+			providerName = catalogComp.Name
+		}
+
+		workerInfo := s.resolveWorkerInfo(ctx, c.WorkerID)
+
+		appRefs, err := s.componentRepo.GetApplicationsByComponentID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch linked applications: %w", err)
+		}
+		apps := make([]apimodels.ModelApplicationRef, 0, len(appRefs))
+		for _, ref := range appRefs {
+			apps = append(apps, apimodels.ModelApplicationRef{ID: ref.ID.String(), Name: ref.Name})
+		}
+
+		endpoints := make([]apimodels.ModelEndpoint, 0, len(c.Endpoints))
+		for _, ep := range c.Endpoints {
+			epType, _ := ep["type"].(string)
+			epURL, _ := ep["url"].(string)
+			endpoints = append(endpoints, apimodels.ModelEndpoint{Type: epType, URL: epURL})
+		}
+
+		name := ""
+		if c.Name != nil {
+			name = *c.Name
+		}
+		createdBy := ""
+		if c.CreatedBy != nil {
+			createdBy = *c.CreatedBy
+		}
+
+		return &apimodels.GetModelResponse{
+			ID:             c.ID,
+			DeploymentType: "local",
+			Name:           name,
+			Type:           c.Type,
+			Provider: apimodels.ModelProviderInfo{
+				ID:   c.Provider,
+				Name: providerName,
+			},
+			Worker:       workerInfo,
+			Metadata:     c.Metadata,
+			Status:       string(c.Status),
+			Message:      c.Message,
+			Endpoints:    endpoints,
+			Applications: apps,
+			CreatedBy:    createdBy,
+			CreatedAt:    c.CreatedAt,
+			UpdatedAt:    c.UpdatedAt,
+		}, nil
 	}
 
-	// Resolve provider display name.
-	providerName := c.Provider
-	if catalogComp, loadErr := s.catalogProvider.LoadComponent(c.Type, c.Provider); loadErr == nil {
-		providerName = catalogComp.Name
-	}
-
-	// Resolve worker info.
-	workerInfo := s.resolveWorkerInfo(ctx, c.WorkerID)
-
-	// Collect linked applications.
-	appRefs, err := s.componentRepo.GetApplicationsByComponentID(ctx, id)
+	// Fall back to remote connector.
+	connector, err := s.connectorRepo.GetByID(ctx, id, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch linked applications: %w", err)
-	}
-	apps := make([]apimodels.ModelApplicationRef, 0, len(appRefs))
-	for _, ref := range appRefs {
-		apps = append(apps, apimodels.ModelApplicationRef{ID: ref.ID.String(), Name: ref.Name})
-	}
-
-	// Build endpoints list.
-	endpoints := make([]apimodels.ModelEndpoint, 0, len(c.Endpoints))
-	for _, ep := range c.Endpoints {
-		epType, _ := ep["type"].(string)
-		epURL, _ := ep["url"].(string)
-		endpoints = append(endpoints, apimodels.ModelEndpoint{Type: epType, URL: epURL})
+		if errors.Is(err, dbrepo.ErrConnectorNotFound) {
+			return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
+		}
+		return nil, fmt.Errorf("failed to fetch connector: %w", err)
 	}
 
-	name := ""
-	if c.Name != nil {
-		name = *c.Name
-	}
-	createdBy := ""
-	if c.CreatedBy != nil {
-		createdBy = *c.CreatedBy
+	providerName := connector.Provider
+	if catalogConn, loadErr := s.catalogProvider.LoadConnector(connector.Type, connector.Provider); loadErr == nil {
+		providerName = catalogConn.Name
 	}
 
 	return &apimodels.GetModelResponse{
-		ID:   c.ID,
-		Name: name,
-		Type: c.Type,
+		ID:             connector.ID,
+		DeploymentType: "remote",
+		Name:           connector.Name,
+		Type:           connector.Type,
 		Provider: apimodels.ModelProviderInfo{
-			ID:   c.Provider,
+			ID:   connector.Provider,
 			Name: providerName,
 		},
-		Worker:       workerInfo,
-		Metadata:     c.Metadata,
-		Status:       string(c.Status),
-		Message:      c.Message,
-		Endpoints:    endpoints,
-		Applications: apps,
-		CreatedBy:    createdBy,
-		CreatedAt:    c.CreatedAt,
-		UpdatedAt:    c.UpdatedAt,
+		Metadata:     connector.Metadata,
+		Status:       string(connector.Status),
+		Message:      connector.Message,
+		Applications: []apimodels.ModelApplicationRef{},
+		CreatedBy:    connector.CreatedBy,
+		CreatedAt:    connector.CreatedAt,
+		UpdatedAt:    connector.UpdatedAt,
 	}, nil
 }
 
-// UndeployModel initiates async undeployment of a managed local model.
-// It verifies ownership and that no active applications are using the model before proceeding.
-// keepData=true preserves host volumes (model weights on disk); keepData=false deletes everything.
-func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID string, keepData bool) (*apimodels.UndeployModelResponse, error) {
+// UndeployModel removes a model — local (async, 202) or remote (sync, 204).
+// For local models it verifies ownership and that no active applications are using the model.
+func (s *ModelService) UndeployModel(ctx context.Context, id uuid.UUID, userID string) (*apimodels.UndeployModelResponse, error) {
+	// Try local component first.
 	c, err := s.componentRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch component: %w", err)
 	}
-	if c == nil || c.CreatedBy == nil {
-		return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
-	}
-
-	// Ownership check.
-	if *c.CreatedBy != userID {
-		return nil, &ValidationError{
-			Code:    http.StatusForbidden,
-			Message: "only the deploying user may undeploy this model",
+	if c != nil && c.CreatedBy != nil {
+		// Ownership check.
+		if *c.CreatedBy != userID {
+			return nil, &ValidationError{
+				Code:    http.StatusForbidden,
+				Message: "only the deploying user may undeploy this model",
+			}
 		}
+
+		// Check model is not in use by active applications.
+		appRefs, err := s.componentRepo.GetApplicationsByComponentID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check linked applications: %w", err)
+		}
+		if len(appRefs) > 0 {
+			return nil, &ValidationError{
+				Code:    http.StatusConflict,
+				Message: "model is in use by one or more active applications",
+			}
+		}
+
+		// Kick off async teardown.
+		go s.undeployAsync(context.Background(), c)
+
+		return &apimodels.UndeployModelResponse{
+			ID:             id.String(),
+			DeploymentType: "local",
+			Message:        "Undeploy initiated",
+		}, nil
 	}
 
-	// Check model is not in use by active applications.
-	appRefs, err := s.componentRepo.GetApplicationsByComponentID(ctx, id)
+	// Fall back to remote connector — synchronous teardown.
+	connector, err := s.connectorRepo.GetByID(ctx, id, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check linked applications: %w", err)
-	}
-	if len(appRefs) > 0 {
-		return nil, &ValidationError{
-			Code:    http.StatusConflict,
-			Message: "model is in use by one or more active applications",
+		if errors.Is(err, dbrepo.ErrConnectorNotFound) {
+			return nil, &ValidationError{Code: http.StatusNotFound, Message: "model not found"}
 		}
+		return nil, fmt.Errorf("failed to fetch connector: %w", err)
 	}
 
-	// Kick off async teardown.
-	go s.undeployAsync(context.Background(), c, keepData)
+	if err := s.deleteRemote(ctx, connector); err != nil {
+		return nil, err
+	}
 
 	return &apimodels.UndeployModelResponse{
-		ID:      id.String(),
-		Message: "Undeploy initiated",
+		ID:             id.String(),
+		DeploymentType: "remote",
+		Message:        "Model removed",
 	}, nil
 }
 
-// undeployAsync drives the full teardown sequence:
+// undeployAsync drives the full teardown sequence for a local (pod) model:
 //  1. Deregister the LiteLLM route
 //  2. Revoke and delete the virtual key
-//  3. Stop and delete the pod + secrets (+ volumes unless keepData=true) via PodmanDeletion
-func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component, keepData bool) {
+//  3. Stop and delete the pod + secrets + volumes via PodmanDeletion
+func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component) {
 	log := func(msg string, args ...any) {
 		logger.InfofCtx(ctx, "[modelmanager] component %s: undeploy: "+msg, append([]any{c.ID}, args...)...)
 	}
@@ -964,7 +1047,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 	// Step 4: stop pod + delete secrets/volumes + delete component DB row.
 	// PodmanDeletion.deleteOrphanedComponents finds pods by the ai-services.io/template=<componentID>
 	// label stamped at deploy time, mirrors the application deletion path exactly.
-	log("deleting pod resources (keepData=%v)", keepData)
+	log("deleting pod resources")
 
 	rt, err := s.buildRuntime(ctx, c.WorkerID)
 	if err != nil {
@@ -977,7 +1060,7 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component,
 	}
 
 	podmandeletion.NewPodmanDeletion(rt, nil, nil, s.componentRepo, nil).
-		DeleteComponent(ctx, c.ID, keepData)
+		DeleteComponent(ctx, c.ID, false)
 }
 
 // GetModelKey returns the virtual key for a managed model. The ID may be either a
@@ -1035,7 +1118,7 @@ func (s *ModelService) resolveWorkerInfo(ctx context.Context, workerID *uuid.UUI
 	}
 }
 
-// toModelListItem converts a DB component to a ModelListItem.
+// toModelListItem converts a DB component (local model) to a ModelListItem.
 func (s *ModelService) toModelListItem(ctx context.Context, c dbmodels.Component) apimodels.ModelListItem {
 	providerName := c.Provider
 	if catalogComp, err := s.catalogProvider.LoadComponent(c.Type, c.Provider); err == nil {
@@ -1048,9 +1131,10 @@ func (s *ModelService) toModelListItem(ctx context.Context, c dbmodels.Component
 	}
 
 	return apimodels.ModelListItem{
-		ID:   c.ID,
-		Name: name,
-		Type: c.Type,
+		ID:             c.ID,
+		DeploymentType: "local",
+		Name:           name,
+		Type:           c.Type,
 		Provider: apimodels.ModelProviderInfo{
 			ID:   c.Provider,
 			Name: providerName,
@@ -1060,6 +1144,28 @@ func (s *ModelService) toModelListItem(ctx context.Context, c dbmodels.Component
 		Status:    string(c.Status),
 		CreatedAt: c.CreatedAt,
 		UpdatedAt: c.UpdatedAt,
+	}
+}
+
+// connectorToListItem converts a DB connector (remote model) to a ModelListItem.
+func (s *ModelService) connectorToListItem(conn dbmodels.Connector) apimodels.ModelListItem {
+	providerName := conn.Provider
+	if catalogConn, err := s.catalogProvider.LoadConnector(conn.Type, conn.Provider); err == nil {
+		providerName = catalogConn.Name
+	}
+
+	return apimodels.ModelListItem{
+		ID:             conn.ID,
+		DeploymentType: "remote",
+		Name:           conn.Name,
+		Type:           conn.Type,
+		Provider: apimodels.ModelProviderInfo{
+			ID:   conn.Provider,
+			Name: providerName,
+		},
+		Status:    string(conn.Status),
+		CreatedAt: conn.CreatedAt,
+		UpdatedAt: conn.UpdatedAt,
 	}
 }
 

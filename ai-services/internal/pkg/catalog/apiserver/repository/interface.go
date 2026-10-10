@@ -10,22 +10,23 @@ import (
 
 // ModelServiceInterface defines the contract for model-deploy business logic.
 type ModelServiceInterface interface {
-	// DeployModel validates the request, inserts a Deploying component row, and kicks off
-	// async pod creation + LiteLLM route registration. Returns 202 immediately.
-	DeployModel(ctx context.Context, req apimodels.DeployModelRequest) (*apimodels.DeployModelResponse, error)
-	// ListModels returns a paginated list of managed local model components.
+	// CreateModel is the polymorphic entry point for POST /api/v1/models.
+	// deployment_type="local"  → validates, inserts a Deploying component row, starts async pod + LiteLLM route. Returns 202.
+	// deployment_type="remote" → validates, registers LiteLLM route, probes, persists connector row. Returns 201.
+	CreateModel(ctx context.Context, req apimodels.CreateModelRequest) (*apimodels.CreateModelResponse, error)
+	// ListModels returns a paginated list of all models (local + remote).
+	// Filter with req.Type and req.DeploymentType.
 	ListModels(ctx context.Context, req apimodels.ListModelsRequest) (*apimodels.ListModelsResponse, error)
-	// GetModel returns the full details of a managed local model by UUID.
+	// GetModel returns full details of any model by UUID (components first, connectors second).
 	GetModel(ctx context.Context, id uuid.UUID) (*apimodels.GetModelResponse, error)
-	// UndeployModel initiates async teardown of a local model pod and its LiteLLM route.
-	// Returns 202 immediately after validating ownership and confirming no active applications.
-	// keepData=true preserves host volumes (model weights on disk); keepData=false deletes everything.
-	UndeployModel(ctx context.Context, id uuid.UUID, userID string, keepData bool) (*apimodels.UndeployModelResponse, error)
-	// GetModelKey returns the LiteLLM virtual key for a deployed local model.
+	// UpdateRemoteModel updates the credential fields of a remote model connector.
+	// Returns 405 if the UUID resolves to a local (components) model.
+	UpdateRemoteModel(ctx context.Context, id uuid.UUID, userID string, req apimodels.UpdateRemoteModelRequest) (*apimodels.UpdateRemoteModelResponse, error)
+	// UndeployModel initiates teardown. Local: async 202. Remote: sync 204.
+	// Resolves UUID against components first, then connectors.
+	UndeployModel(ctx context.Context, id uuid.UUID, userID string) (*apimodels.UndeployModelResponse, error)
+	// GetModelKey returns the LiteLLM virtual key for any model (local or remote).
 	GetModelKey(ctx context.Context, componentID uuid.UUID) (*apimodels.GetModelKeyResponse, error)
-	// CreateConnector registers a remote model endpoint (e.g. WatsonX) via LiteLLM, probes it,
-	// and persists a connectors row. Returns 201 on success, 422 if the probe fails.
-	CreateConnector(ctx context.Context, req apimodels.CreateModelConnectorRequest) (*apimodels.CreateModelConnectorResponse, error)
 }
 
 // DatasourceServiceInterface defines the contract for datasource connector business logic.

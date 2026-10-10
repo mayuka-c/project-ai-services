@@ -31,24 +31,17 @@
    - [5.8 Migration Plan](#58-migration-plan)
    - [5.9 Full Entity Relationship Diagram](#59-full-entity-relationship-diagram)
 6. [API Specification](#6-api-specification)
-   - [6.1 Model Endpoints](#61-model-endpoints-local-pods--components-table)
-   - [6.2 Connector Endpoints](#62-connector-endpoints-remote-endpoints--connectors-table)
-   - [6.3 Provider Schema Endpoints](#63-provider-schema-endpoints-shared-with-datasource-connectors)
-   - [6.4 Worker Endpoints](#64-worker-endpoints)
-   - [6.5 Virtual Key Endpoint](#65-virtual-key-endpoint)
-   - [6.6 Extensions to Existing Endpoints](#66-extensions-to-existing-endpoints)
+   - [6.1 Model Endpoints (polymorphic)](#61-model-endpoints-polymorphic--components--connectors-tables)
+   - [6.2 Connector Provider-Discovery Endpoints](#62-connector-provider-discovery-endpoints-read-only)
+   - [6.3 Extensions to Existing Endpoints](#63-extensions-to-existing-endpoints)
+   - [6.4 Virtual Key Endpoint](#64-virtual-key-endpoint)
 7. [API Endpoint Details](#7-api-endpoint-details)
-   - [7.1 Deploy a Local Model](#71-deploy-a-local-model)
-   - [7.2 List Local Models](#72-list-local-models)
+   - [7.1 Create a Model (polymorphic)](#71-create-a-model-polymorphic)
+   - [7.2 List Models (polymorphic)](#72-list-models-polymorphic)
    - [7.3 Get Model Details](#73-get-model-details)
-   - [7.4 Delete / Undeploy a Local Model](#74-delete--undeploy-a-local-model)
-   - [7.5 Create a Connector](#75-create-a-connector)
-   - [7.6 List Connectors](#76-list-connectors)
-   - [7.7 Update a Connector](#77-update-a-connector)
-   - [7.8 Get Connector Details](#78-get-connector-details)
-   - [7.9 Delete a Connector](#79-delete-a-connector)
-   - [7.10 List Workers](#710-list-workers)
-   - [7.11 Get Virtual Key](#711-get-virtual-key)
+   - [7.4 Update a Remote Model's Credentials](#74-update-a-remote-models-credentials)
+   - [7.5 Delete / Undeploy a Model](#75-delete--undeploy-a-model)
+   - [7.6 Get Virtual Key](#76-get-virtual-key)
 8. [Pre-flight Resource Check](#8-pre-flight-resource-check)
 9. [Deployment Flow](#9-deployment-flow)
    - [Flow: Application Create with Managed Model (model already deployed)](#flow-application-create--model-already-deployed-pre-deployed-path)
@@ -320,7 +313,7 @@ The `model` query parameter is the route ID registered in the previous step (e.g
 | `0` | `> 0` | `components.status = 'Error'`, store error in `message` | DELETE LiteLLM route, return `422` with error |
 | `0` | `0` | `components.status = 'Error'`, store `"No endpoints returned"` | DELETE LiteLLM route, return `422` |
 
-> For local models the probe is fire-and-forget (`POST /api/v1/models` returns `202` immediately). Callers poll `GET /api/v1/models/:id` to observe `Deploying` → `Running` / `Error`. For connectors the probe is blocking — `POST /api/v1/connectors/models` only returns `201` after the probe passes.
+> For local models the probe is fire-and-forget (`POST /api/v1/models` with `deployment_type=local` returns `202` immediately). Callers poll `GET /api/v1/models/:id` to observe `Deploying` → `Running` / `Error`. For remote models the probe is blocking — `POST /api/v1/models` with `deployment_type=remote` only returns `201` after the probe passes.
 
 ### WatsonX via Connector
 
@@ -355,12 +348,12 @@ Content-Type: application/json
 
 ### 4.1 Models
 
-A **Model** is an inference backend for a specific role (`llm`, `embedding`, `reranker`) deployed and managed independently of an application. There are two kinds, stored in different tables:
+A **Model** is an inference backend for a specific role (`llm`, `embedding`, `reranker`) deployed and managed independently of an application. `/api/v1/models` is a **polymorphic API**: a single surface that covers both local pod-backed models and remote connector-backed models. The `deployment_type` field in the request body selects the backend; responses always carry the same `deployment_type` field so callers can tell them apart.
 
-| Kind | Storage table | Example providers | Pod? | Credentials location |
-|---|---|---|---|---|
-| Local | `components` | `vllm-cpu`, `vllm-spyre` | ✅ Yes | `keys` table (virtual key served via `GET /api/v1/models/keys`) |
-| Remote (connector) | `connectors` | `watsonx`, `hosted_vllm`, `openai` | ❌ No | LiteLLM Gateway DB |
+| Kind | `deployment_type` | Storage table | Example providers | Pod? | Credentials location |
+|---|---|---|---|---|---|
+| Local | `local` | `components` | `vllm-cpu`, `vllm-spyre` | ✅ Yes | `keys` table (virtual key served via `GET /api/v1/models/keys`) |
+| Remote | `remote` | `connectors` | `watsonx`, `hosted_vllm`, `openai` | ❌ No | LiteLLM Gateway DB |
 
 Both kinds are registered as a route in the **LiteLLM Gateway** pod. Consumer services only ever talk to the LiteLLM gateway — they have no knowledge of which table is behind it.
 
@@ -368,15 +361,19 @@ The key differences from today's application-coupled components:
 
 | | Today | New |
 |---|---|---|
-| Created by | Application deployment | Independent `POST /api/v1/models` or `POST /api/v1/connectors/models` |
+| Created by | Application deployment | `POST /api/v1/models` (either `deployment_type`) |
 | Lifecycle | Deleted with application | Explicit undeploy/delete required |
 | Provider endpoint | Exposed directly to services | Always proxied via LiteLLM Gateway |
-| Pre-flight resource check | None | Required for local models only |
-| WatsonX | Deploys a per-app LiteLLM proxy pod | `connectors` row — credentials stored in LiteLLM, no pod |
+| Pre-flight resource check | None | Required for `local` models only |
+| WatsonX | Deploys a per-app LiteLLM proxy pod | `deployment_type=remote` → `connectors` row — credentials stored in LiteLLM, no pod |
 
 ### 4.2 Connectors
 
-A **Connector** is a row in the shared `connectors` table with `type` set to the model role (`llm`, `embedding`, `reranker`). It has no pod and no Podman secret. Credentials are passed directly to the **LiteLLM Gateway** at route-registration time — LiteLLM stores and manages them. The Catalog DB stores only non-secret connection config (`metadata.model_name`, `metadata.api_base`, `metadata.project_id`) — never the secret values themselves. Sensitive fields are identified from the provider's `schema.json` (properties with `"format": "password"`), the same mechanism used by datasource connectors.
+A **Connector** is a static entity in the `connectors` table — a registered connection to an external service. It is managed through its own flat API (`/api/v1/connectors`) that mirrors the datasource connectors design: `type` is just a field/query-parameter discriminator, not a path segment. Model connectors have `type` set to the model role (`llm`, `embedding`, `reranker`); datasource connectors have `type = datasource`. Both share the same provider-schema endpoints.
+
+Model connectors have no pod and no Podman secret. Credentials are passed directly to the **LiteLLM Gateway** at route-registration time — LiteLLM stores and manages them. The Catalog DB stores only non-secret connection config (`metadata.model_name`, `metadata.api_base`, `metadata.project_id`) — never the secret values themselves. Sensitive fields are identified from the provider's `schema.json` (properties with `"format": "password"`), the same mechanism used by datasource connectors.
+
+> **Relationship between `/api/v1/models` and `/api/v1/connectors`:** All model CRUD lives on `/api/v1/models`. `/api/v1/connectors` is **read-only** — it serves provider definitions and `schema.json` files only, exactly mirroring its role for datasource connectors. `GET /api/v1/models` unifies both the `components` and `connectors` tables in one paginated list; `/api/v1/connectors` is never used for model entity reads or writes.
 
 **Connector types (by `type` + `provider` on `connectors`):**
 
@@ -417,7 +414,7 @@ Defined in [`assets/connectors/llm/watsonx/schema.json`](../../../ai-services/as
 | `project_id` | Project ID | No | `text` | No | Optional: Your Watsonx.ai Project ID |
 | `api_key` | API Key | Yes | `password` | Yes | IBM Cloud API key |
 
-> **Note:** For `watsonx`, `api_key` is the only field marked `"ui:section": "Authentication"`, so it is the only updatable field on `PUT /api/v1/connectors/models/:id`.
+> **Note:** For `watsonx`, `api_key` is the only field marked `"ui:section": "Authentication"`, so it is the only updatable field on `PUT /api/v1/models/:id`.
 
 ---
 
@@ -627,10 +624,10 @@ CREATE INDEX idx_keys_dependency ON keys (dependency_type, dependency_id);
 
 | `dependency_type` | `dependency_id` references | Created by |
 |---|---|---|
-| `component` | `components.id` | `POST /api/v1/models` (after the pod is healthy) or application create (new or pre-deployed model) |
-| `connector` | `connectors.id` | `POST /api/v1/connectors/models` (after the LiteLLM probe passes) |
+| `component` | `components.id` | `POST /api/v1/models` with `deployment_type=local` (after the pod is healthy) or application create (new or pre-deployed model) |
+| `connector` | `connectors.id` | `POST /api/v1/models` with `deployment_type=remote` (after the LiteLLM probe passes) |
 
-> **Polymorphic reference, no FK.** `dependency_id` can point at either table, so it has no foreign key or `ON DELETE CASCADE`. The `keys` row is deleted explicitly with its owner. `ComponentRepository.Delete` removes the `component` key in the same statement. Model connector delete (§7.9, not yet implemented) must call `KeyRepository.DeleteByDependency('connector', id)`. This follows the `service_dependencies.dependency_id` pattern.
+> **Polymorphic reference, no FK.** `dependency_id` can point at either table, so it has no foreign key or `ON DELETE CASCADE`. The `keys` row is deleted explicitly with its owner. `ComponentRepository.Delete` removes the `component` key in the same statement. Model connector delete (§7.5, not yet implemented) must call `KeyRepository.DeleteByDependency('connector', id)`. This follows the `service_dependencies.dependency_id` pattern.
 
 **`KeyRepository` methods** ([`key_repo.go`](../../../ai-services/internal/pkg/catalog/db/repository/key_repo.go)):
 
@@ -806,43 +803,32 @@ erDiagram
 
 All endpoints require `Authorization: Bearer <access_token>`. All routes are under `/api/v1` and protected by the existing `AuthMiddleware`.
 
-> **Routing note:** The static-segment route `GET /api/v1/connectors/models` must be registered **before** the parameterised `GET /api/v1/connectors/models/:id` so the router resolves it correctly.
+### 6.1 Model Endpoints (polymorphic — `components` + `connectors` tables)
 
-### 6.1 Model Endpoints (local pods — `components` table)
-
-Write operations deploy and manage local pods stored in the `components` table. The shared instance endpoints (`GET :id`, `DELETE :id`) operate on any local model by UUID.
+`/api/v1/models` is a **polymorphic** surface. The `deployment_type` field in the request body (`local` | `remote`) determines which table backs the operation. List and detail endpoints return items from both tables in a unified shape. `GET :id` and `DELETE :id` resolve the UUID against `components` first, then `connectors`.
 
 | Method | Path | Description | Response |
 |---|---|---|---|
-| `POST` | `/api/v1/models` | Deploy a local model (`type` in request body) | `202 Accepted` |
-| `GET` | `/api/v1/models` | List deployed local models; filter with `?type=` | `200 OK` |
-| `GET` | `/api/v1/models/:id` | Get full status and details of a local model | `200 OK` |
-| `DELETE` | `/api/v1/models/:id` | Undeploy and delete a local model | `202 Accepted` |
+| `POST` | `/api/v1/models` | Create a model — `deployment_type=local` deploys a pod; `deployment_type=remote` registers a remote connector | `202 Accepted` (local) / `201 Created` (remote) |
+| `GET` | `/api/v1/models` | List all models (both local and remote); filter with `?type=` and `?deployment_type=` | `200 OK` |
+| `GET` | `/api/v1/models/:id` | Get full status and details of any model (local or remote) | `200 OK` |
+| `PUT` | `/api/v1/models/:id` | Update credentials of a remote model (`deployment_type=remote` only) | `200 OK` |
+| `DELETE` | `/api/v1/models/:id` | Undeploy/delete a model — resolves to the right table by UUID | `202 Accepted` (local) / `204 No Content` (remote) |
 
-### 6.2 Connector Endpoints (remote endpoints — `connectors` table)
+### 6.2 Connector Provider-Discovery Endpoints (read-only)
 
-Remote model connectors register external model endpoints. They are stored in the shared `connectors` table (same as datasource connectors, discriminated by `type`). No pod is created. Credentials go directly to LiteLLM; the Catalog DB stores only non-secret connection config.
+`/api/v1/connectors` is **read-only and purely for provider discovery** — exactly mirroring the role it plays in the [datasource connectors proposal](../data-source-connectors/catalog-datasource-connectors-proposal.md) (§5.1). There are no CRUD operations here. All model entity CRUD (create, read, update, delete) lives on `/api/v1/models`.
+
+These two endpoints are already implemented and shared with datasource connectors. No new routes or handlers are needed for model connector types.
 
 | Method | Path | Description | Response |
 |---|---|---|---|
-| `POST` | `/api/v1/connectors/models` | Register a model connector: validates the schema, registers the LiteLLM route, runs the probe, then generates and persists the per-model virtual key. **Implemented** | `201 Created` |
-| `GET` | `/api/v1/connectors/models` | List all model connectors; filter with `?type=` | `200 OK` |
-| `GET` | `/api/v1/connectors/models/:id` | Get full details of a connector | `200 OK` |
-| `PUT` | `/api/v1/connectors/models/:id` | Update a connector's credentials | `200 OK` |
-| `DELETE` | `/api/v1/connectors/models/:id` | Delete a connector and deregister its LiteLLM route | `204 No Content` |
-
-### 6.3 Provider Schema Endpoints (shared with datasource connectors)
-
-Model connectors use the two provider endpoints that were already built for datasource connectors. They are §6.6 *Get Provider Input Schema* and §6.7 *List Providers for a Connector Type* in the [datasource connectors proposal](../data-source-connectors/catalog-datasource-connectors-proposal.md). No new routes or handlers are added. The `:connector_type` path segment, or the `type` query parameter, is the model role (`llm`, `embedding`, `reranker`), in the same way datasources use `datasource`.
-
-| Method | Path | Datasource proposal | Description | Response |
-|---|---|---|---|---|
-| `GET` | `/api/v1/connectors/:connector_type/providers/:provider_id/params` | §6.6 | Returns the provider's `schema.json` unchanged. Examples: `/api/v1/connectors/llm/providers/watsonx/params`, `/api/v1/connectors/embedding/providers/hosted_vllm/params` | `200 OK` |
-| `GET` | `/api/v1/connectors?type=llm` | §6.7 | Lists the registered providers for one connector type. Omit `type` to list every connector type, datasource and model | `200 OK` |
+| `GET` | `/api/v1/connectors?type=<type>` | List all registered provider definitions for a connector type (`llm`, `embedding`, `reranker`, `datasource`). Omit `type` to list all. | `200 OK` |
+| `GET` | `/api/v1/connectors/:connector_type/providers/:provider_id/params` | Return the provider's `schema.json` (field definitions, required fields, sensitive-field markers). Examples: `/api/v1/connectors/llm/providers/watsonx/params` | `200 OK` |
 
 #### Reuse check against the current implementation
 
-Both endpoints are already registered in [`router.go`](../../../ai-services/internal/pkg/catalog/apiserver/router.go). They are served by [`CatalogHandler.ListConnectorProviders`](../../../ai-services/internal/pkg/catalog/apiserver/handlers/catalog.go) and [`CatalogHandler.GetConnectorProviderParams`](../../../ai-services/internal/pkg/catalog/apiserver/handlers/catalog.go). Neither handler hard-codes `datasource`:
+Both endpoints are already registered in [`router.go`](../../../ai-services/internal/pkg/catalog/apiserver/router.go) and served by [`CatalogHandler.ListConnectorProviders`](../../../ai-services/internal/pkg/catalog/apiserver/handlers/catalog.go) and [`CatalogHandler.GetConnectorProviderParams`](../../../ai-services/internal/pkg/catalog/apiserver/handlers/catalog.go). Neither handler hard-codes `datasource`:
 
 | Check | Result |
 |---|---|
@@ -852,7 +838,7 @@ Both endpoints are already registered in [`router.go`](../../../ai-services/inte
 | List response | ✅ [`ToConnectorResponse`](../../../ai-services/internal/pkg/catalog/types/types.go) builds `provider.schema` as `/api/v1/connectors/<connector_type>/providers/<id>/params` for any type |
 | Sensitive / updatable fields | ✅ The same `schema.json` conventions apply. `"format": "password"` marks a sensitive field and `"ui:section": "Authentication"` marks an updatable one (see §4.3) |
 
-**Result:** both endpoints work for model connectors. The only code change needed was the key-collision fix described next.
+**Result:** both endpoints work for model connector types without any new routes. The only code change needed was the key-collision fix described next.
 
 > **✅ Resolved: catalog key collision for `llm/watsonx`.** Components and connectors share one in-memory `items` map. Before the fix, connector keys were `<connector_type>/<id>`, so `assets/connectors/llm/watsonx/` would have collided with the existing component `assets/components/llm/watsonx/` (`llm/watsonx`) and broken `LoadComponent("llm", "watsonx")`. Connector keys now carry a catalog-type prefix, `connectors/<connector_type>/<id>`. The prefix is built by `connectorItemKey()` in [`catalog.go`](../../../ai-services/internal/pkg/catalog/catalog.go) and used in `parseConnector`, `LoadConnector`, `ListConnectors` and `GetConnectorProviderParams`. The existing WatsonX component stays in place and keeps working.
 
@@ -884,7 +870,7 @@ connector_type: llm
 connector_name: "Large language model (LLM)"
 ```
 
-**Example: `GET /api/v1/connectors?type=llm`** returns the same response shape as datasource §6.7:
+**Example: `GET /api/v1/connectors?type=llm`** (provider listing, not entity listing):
 
 ```json
 [
@@ -921,7 +907,7 @@ connector_name: "Large language model (LLM)"
 ]
 ```
 
-**Example: `GET /api/v1/connectors/llm/providers/hosted_vllm/params`** returns `schema.json` built from the §4.3 field definitions:
+**Example: `GET /api/v1/connectors/llm/providers/hosted_vllm/params`** returns `schema.json`:
 
 ```json
 {
@@ -953,22 +939,9 @@ connector_name: "Large language model (LLM)"
 }
 ```
 
-Error responses are the same as datasource §6.6 and §6.7: `404 {"error": "connector type \"<type>\" not found"}` for an unknown type, and `404` for an unknown provider.
+Error responses: `404 {"error": "connector type \"<type>\" not found"}` for an unknown type, and `404` for an unknown provider.
 
-### 6.4 Worker Endpoints
-
-| Method | Path | Description | Response |
-|---|---|---|---|
-| `GET` | `/api/v1/workers` | List all registered Worker LPARs with current status | `200 OK` |
-| `GET` | `/api/v1/workers/:worker_id/resources` | Get current system info / resource availability for a worker (used by pre-flight UI) | `200 OK` |
-
-### 6.5 Virtual Key Endpoint
-
-| Method | Path | Description | Response |
-|---|---|---|---|
-| `GET` | `/api/v1/models/keys?instance_id=<component_id>` | Retrieve the LiteLLM virtual key for a deployed local model or a model connector (used by consumer service pods at startup) | `200 OK` |
-
-### 6.6 Extensions to Existing Endpoints
+### 6.3 Extensions to Existing Endpoints
 
 | Existing Endpoint | Change |
 |---|---|
@@ -976,15 +949,21 @@ Error responses are the same as datasource §6.6 and §6.7: `404 {"error": "conn
 | `GET /api/v1/applications/:id` | Response includes model connectors from `connectors` table alongside `services` and local `components` |
 | `GET /api/v1/architectures/:id/deploy-options` | `providers` list under `llm`/`embedding`/`reranker` includes connector provider options (`watsonx`, `hosted_vllm`, `openai`) alongside `vllm-cpu`, `vllm-spyre`; worker list included for target-worker selection |
 
+### 6.4 Virtual Key Endpoint
+
+| Method | Path | Description | Response |
+|---|---|---|---|
+| `GET` | `/api/v1/models/keys?instance_id=<component_id>` | Retrieve the LiteLLM virtual key for a deployed local model or a model connector (used by consumer service pods at startup) | `200 OK` |
+
 ---
 
 ## 7. API Endpoint Details
 
-### 7.1 Deploy a Local Model
+### 7.1 Create a Model (polymorphic)
 
 **Endpoint:** `POST /api/v1/models`
 
-**Description:** Deploys a new local model. Starts a pod and registers a LiteLLM route. Returns `202 Accepted` — creation is async.
+**Description:** Creates a model. `deployment_type=local` starts a pod and registers a LiteLLM route (async, `202 Accepted`). `deployment_type=remote` registers an external endpoint as a connector, validates connectivity, and returns synchronously (`201 Created`).
 
 **Request Headers:**
 ```
@@ -992,70 +971,104 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-**Request Body (example: vLLM-Spyre LLM on Worker LPAR):**
+**Request Body — `deployment_type=local` (example: vLLM-Spyre LLM on Worker LPAR):**
 
 ```json
 {
+  "deployment_type": "local",
   "type": "llm",
   "name": "granite-llm",
   "provider_id": "vllm-spyre",
-  "worker_selector": "lpar-1",   // user-facing name; stored as worker_id UUID internally
+  "worker_selector": "lpar-1",
   "params": {
     "model": "ibm-granite/granite-3.3-8b-instruct"
   }
 }
 ```
 
-**Request Schema:**
+**Request Body — `deployment_type=remote` (example: WatsonX LLM connector):**
+
+```json
+{
+  "deployment_type": "remote",
+  "type": "llm",
+  "name": "prod-watsonx",
+  "provider_id": "watsonx",
+  "params": {
+    "model_name": "ibm/granite-4-h-small",
+    "api_base": "https://us-south.ml.cloud.ibm.com",
+    "project_id": "my-watsonx-project-id",
+    "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  }
+}
+```
+
+**Common Request Schema:**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `type` | string | Yes | Component type: `llm`, `embedding`, `reranker` |
-| `name` | string | Yes | Human-readable label for this deployed instance (3–100 chars, slug-safe) |
-| `provider_id` | string | Yes | Local backend: `vllm-cpu`, `vllm-spyre` |
+| `deployment_type` | string | Yes | `local` (pod) or `remote` (connector — no pod) |
+| `type` | string | Yes | Model role: `llm`, `embedding`, `reranker` |
+| `name` | string | Yes | Human-readable label (3–100 chars, slug-safe, unique case-insensitively) |
+| `provider_id` | string | Yes | Provider identifier — local: `vllm-cpu`, `vllm-spyre`; remote: `watsonx`, `hosted_vllm`, `openai` |
+| `params` | object | Yes | Model and provider config — validated against the provider's asset schema |
+
+**Additional fields for `deployment_type=local`:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
 | `worker_selector` | string | No | Target worker name (e.g. `"lpar-1"`). Resolved to `workers.id` UUID before storage. Omit to deploy on the control-plane Podman socket |
-| `params` | object | Yes | Model and provider config — polymorphic on `provider_id` |
 
-**Polymorphic `params` — required fields per `provider_id`:**
+**Polymorphic `params` by `provider_id`:**
 
-The `modelmanager` package validates `params` against the `params` block in `assets/components/<type>/<provider_id>/metadata.yaml`. Adding a new provider requires only a new asset file.
+The `modelmanager` package validates `params` against the provider's asset schema. Adding a new provider requires only a new asset file.
 
-| `provider_id` | Required `params` fields |
-|---|---|
-| `vllm-cpu`, `vllm-spyre` | `model_name` |
+| `deployment_type` | `provider_id` | Required `params` fields | Sensitive fields |
+|---|---|---|---|
+| `local` | `vllm-cpu`, `vllm-spyre` | `model_name` | — |
+| `remote` | `watsonx` | `model_name`, `api_key` (optional: `api_base`, `project_id`) | `api_key` |
+| `remote` | `hosted_vllm` | `model_name`, `api_base` | `api_key` (optional) |
+| `remote` | `openai` | `model_name`, `api_key` | `api_key` |
 
-**Response `202 Accepted` (async):**
+**Response — `deployment_type=local`, `202 Accepted` (async):**
 
 ```json
-{ "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f" }
+{ "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f", "deployment_type": "local" }
 ```
 
 > Use `GET /api/v1/models/:id` to poll status and full details.
+
+**Response — `deployment_type=remote`, `201 Created` (sync):**
+
+```json
+{ "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc", "deployment_type": "remote" }
+```
 
 **Error Responses:**
 
 | Status | Condition |
 |---|---|
-| `400 Bad Request` | Missing required fields, unknown `type`, or unknown `provider_id` |
+| `400 Bad Request` | Missing required fields, unknown `deployment_type`, unknown `type`, or unknown `provider_id` |
 | `401 Unauthorized` | Invalid or missing access token |
-| `404 Not Found` | `worker_selector` refers to an unknown worker name |
-| `409 Conflict` | A component with the same `type` is already `Running` or `Deploying` |
-| `422 Unprocessable Entity` | Pre-flight resource check failed |
-| `500 Internal Server Error` | Pod start failure |
+| `404 Not Found` | `worker_selector` refers to an unknown worker name; or `provider_id` not found for the given `type` |
+| `409 Conflict` | A local model of the same `type` is already `Running` or `Deploying`; or a connector with the same `name` already exists |
+| `422 Unprocessable Entity` | Pre-flight resource check failed (local); or connectivity check failed (remote) |
+| `500 Internal Server Error` | Pod start failure (local); LiteLLM route registration or virtual key failure (remote) |
 
 ---
 
-### 7.2 List Local Models
+### 7.2 List Models (polymorphic)
 
 **Endpoint:** `GET /api/v1/models`
 
-**Description:** Lists all deployed local models. Optionally filter by type.
+**Description:** Lists all models — both local (`components` table) and remote (`connectors` table with model types). Optionally filter by type or deployment_type.
 
 **Query Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `type` | string | No | — | Filter by component type: `llm`, `embedding`, `reranker`. Omit for all types |
+| `type` | string | No | — | Filter by model role: `llm`, `embedding`, `reranker`. Omit for all types |
+| `deployment_type` | string | No | — | Filter by kind: `local` or `remote`. Omit to return both |
 | `page` | integer | No | 1 | Page number (1-indexed) |
 | `page_size` | integer | No | 20 | Items per page (max 100) |
 
@@ -1066,6 +1079,7 @@ The `modelmanager` package validates `params` against the `params` block in `ass
   "data": [
     {
       "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f",
+      "deployment_type": "local",
       "name": "granite-llm",
       "type": "llm",
       "provider": { "id": "vllm-spyre", "name": "vLLM (Spyre)" },
@@ -1074,12 +1088,23 @@ The `modelmanager` package validates `params` against the `params` block in `ass
       "status": "Running",
       "created_at": "2026-07-01T10:00:00Z",
       "updated_at": "2026-07-01T10:05:00Z"
+    },
+    {
+      "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc",
+      "deployment_type": "remote",
+      "name": "prod-watsonx",
+      "type": "llm",
+      "provider": { "id": "watsonx", "name": "WatsonX" },
+      "worker": null,
+      "status": "connected",
+      "created_at": "2026-07-01T11:00:00Z",
+      "updated_at": "2026-07-01T11:05:00Z"
     }
   ],
   "pagination": {
     "page": 1,
     "page_size": 20,
-    "total_items": 1,
+    "total_items": 2,
     "total_pages": 1,
     "has_next": false,
     "has_prev": false
@@ -1087,7 +1112,7 @@ The `modelmanager` package validates `params` against the `params` block in `ass
 }
 ```
 
-> `worker` is `null` when the model was deployed on the control-plane Podman socket (`worker_id` is NULL).
+> `worker` is `null` for remote models and for local models deployed on the control-plane Podman socket. The `status` field uses `component_status` values (`Running`, `Deploying`, `Error`) for local models and `connector_status` values (`connected`, `offline`) for remote models.
 
 ---
 
@@ -1095,13 +1120,14 @@ The `modelmanager` package validates `params` against the `params` block in `ass
 
 **Endpoint:** `GET /api/v1/models/:id`
 
-**Description:** Returns the full record for a local model (`components` table).
+**Description:** Returns the full record for a model. Resolves the UUID against `components` first, then `connectors`. The `deployment_type` field in the response indicates which table was matched.
 
-**Response `200 OK`:**
+**Response `200 OK` — `deployment_type=local`:**
 
 ```json
 {
   "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f",
+  "deployment_type": "local",
   "name": "granite-llm",
   "type": "llm",
   "provider": { "id": "vllm-spyre", "name": "vLLM (Spyre)" },
@@ -1124,255 +1150,56 @@ The `modelmanager` package validates `params` against the `params` block in `ass
 }
 ```
 
-> `worker` is `null` when the model was deployed on the control-plane Podman socket. The `endpoints[].url` for a worker-deployed model points to the worker Caddy (not the pod directly) — consumers always route through the worker Caddy → vLLM pod.
+**Response `200 OK` — `deployment_type=remote`:**
 
-> `applications` lists all applications that have a `service_dependencies` row pointing at this component (`dependency_type = 'component'`).
-
-**`applications` SQL (server-side):**
-
-```sql
-SELECT DISTINCT a.id, a.name
-FROM service_dependencies sd
-JOIN services s ON s.id = sd.service_id
-JOIN applications a ON a.id = s.app_id
-WHERE sd.dependency_id   = :id
-  AND sd.dependency_type = 'component';
+```json
+{
+  "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc",
+  "deployment_type": "remote",
+  "name": "prod-watsonx",
+  "type": "llm",
+  "provider": { "id": "watsonx", "name": "WatsonX" },
+  "worker": null,
+  "status": "connected",
+  "message": "Endpoint reachable and credentials accepted",
+  "metadata": {
+    "model_name": "ibm/granite-4-h-small",
+    "api_base": "https://us-south.ml.cloud.ibm.com",
+    "project_id": "my-watsonx-project-id"
+  },
+  "applications": [
+    {
+      "id": "a1b2c3d4-1234-5678-abcd-ef0123456789",
+      "name": "my-rag-app"
+    }
+  ],
+  "created_by": "user@example.com",
+  "created_at": "2026-07-01T11:00:00Z",
+  "updated_at": "2026-07-01T11:05:00Z"
+}
 ```
+
+> `worker` is `null` for remote models and for local models deployed on the control-plane Podman socket. For local models, `endpoints[].url` points to the worker Caddy — consumers always route through it. For remote models, `endpoints` is omitted; consumers route through LiteLLM. Secret fields are stripped from remote model `metadata` before serialisation.
+
+> `applications` uses `dependency_type = 'component'` for local and `dependency_type = 'connector'` for remote when querying `service_dependencies`.
 
 **Error Responses:** `401 Unauthorized`, `404 Not Found`
 
 ---
 
-### 7.4 Delete / Undeploy a Local Model
+### 7.4 Update a Remote Model's Credentials
 
-**Endpoint:** `DELETE /api/v1/models/:id`
-
-**Description:** Removes a local model (`components` table). Async — deregisters the LiteLLM route, revokes the virtual key, stops and removes the pod (on the control plane or via gRPC to the worker daemon), then deletes the `components` and `keys` rows.
-
-**Teardown steps (async, in order):**
-
-| Step | Call | Detail |
-|---|---|---|
-| 1 | `DELETE /model/delete` on LiteLLM | Removes route and credentials from gateway |
-| 2 | `POST /key/delete` on LiteLLM | Body: `{ "keys": ["<virtual-key>"] }` — revokes the per-model key |
-| 3 | Delete `keys` row | Removes virtual key from Catalog DB |
-| 4 | `StopPod` / `DeletePod` | Control-plane: local Podman. Worker: `COMMAND_TYPE_DELETE_POD` via gRPC to worker daemon |
-| 5 | Delete `components` row | Final cleanup |
-
-**Query Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `keep_data` | boolean | No | `false` | Preserve host volume / PVC; stop pod but keep weights |
-
-**Response `202 Accepted`:**
-
-```json
-{
-  "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f",
-  "message": "Undeploy initiated"
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|---|---|
-| `401 Unauthorized` | Invalid or missing access token |
-| `403 Forbidden` | Authenticated user is not `created_by` |
-| `404 Not Found` | Component not found |
-| `409 Conflict` | Model is in use by one or more active applications; or is already being deleted |
-
----
-
-### 7.5 Create a Connector
-
-**Endpoint:** `POST /api/v1/connectors/models`
-
-**Description:** Registers an external model endpoint as a connector. Stores the record in the shared `connectors` table. Credentials are passed directly to LiteLLM — no pod, no Podman secret. The catalog backend validates the connection before persisting — synchronous, returns `201 Created` on success.
-
-**Request Headers:**
-```
-Authorization: Bearer <access_token>
-Content-Type: application/json
-```
-
-**Request Body (example: WatsonX LLM connector):**
-
-```json
-{
-  "name": "prod-watsonx",
-  "type": "llm",
-  "provider_id": "watsonx",
-  "params": {
-    "model_name": "ibm/granite-4-h-small",
-    "api_base": "https://us-south.ml.cloud.ibm.com",
-    "project_id": "my-watsonx-project-id",
-    "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  }
-}
-```
-
-**Request Schema:**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | Yes | Human-readable label for this connector (3–100 chars, unique, case-insensitive) |
-| `type` | string | Yes | Connector type: `llm`, `embedding`, `reranker` |
-| `provider_id` | string | Yes | Provider identifier: `watsonx`, `hosted_vllm`, `openai` |
-| `params` | object | Yes | Flat provider-specific config — validated against the provider's `schema.json` (same shape rules as datasource connectors) |
-| `params.model_name` | string | Yes | Model identifier on the remote endpoint. For `watsonx` it must be one of the `oneOf` values in `schema.json` (currently only `ibm/granite-4-h-small`) |
-| `params.api_base` | string | Conditional | Remote service base URL. Required for `hosted_vllm`; optional for `watsonx` and `openai` |
-| `params.project_id` | string | No | watsonx.ai project ID (`watsonx` only, optional) |
-| `params.api_key` | string | Conditional | Marked `"format": "password"` in `schema.json`; passed to LiteLLM; **never stored in Catalog DB** |
-
-**Validation rules:**
-- `name` must be 3–100 characters, match `^[a-zA-Z0-9_-]+$`, and be unique (case-insensitive). Stored in `connectors.name`.
-- `provider_id` must be a registered provider identifier for the given `type` (`404` otherwise).
-- All required fields for the given provider must be present (validated via the provider schema).
-- A live connectivity check (LiteLLM route probe) must succeed before the record is persisted. If the check fails, return `422 Unprocessable Entity`.
-- Sensitive fields (`"format": "password"` in `schema.json`) are passed to LiteLLM and **never written to `connectors.metadata`**.
-
-**Polymorphic `params` — required fields per `provider_id`:**
-
-| `provider_id` | Required `params` fields | Sensitive fields |
-|---|---|---|
-| `watsonx` | `model_name`, `api_key` (optional: `api_base`, `project_id`) | `api_key` |
-| `hosted_vllm` | `model_name`, `api_base` | `api_key` (optional) |
-| `openai` | `model_name`, `api_key` | `api_key` |
-
-**Response `201 Created`:**
-
-```json
-{ "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc" }
-```
-
-**Response `422 Unprocessable Entity`:**
-
-```json
-{ "error": "connection test failed: dial tcp us-south.ml.cloud.ibm.com:443: connection refused" }
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|---|---|
-| `400 Bad Request` | Missing required fields, invalid `params`, invalid `name`, or unknown `type` |
-| `401 Unauthorized` | Invalid or missing access token |
-| `404 Not Found` | `provider_id` not found in the catalog for the given `type` |
-| `409 Conflict` | A connector with the same `name` already exists |
-| `422 Unprocessable Entity` | Connectivity check failed (LiteLLM route is deleted) |
-| `500 Internal Server Error` | LiteLLM route registration, virtual key generation, or DB insert failure (route and key are rolled back) |
-
----
-
-### 7.6 List Connectors
-
-**Endpoint:** `GET /api/v1/connectors/models`
-
-**Description:** Lists registered connectors. Optionally filter by type.
-
-**Query Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `type` | string | No | — | Filter by connector type: `llm`, `embedding`, `reranker`. Omit for all types |
-| `status` | string | No | — | Filter by status: `connected`, `offline` |
-| `page` | integer | No | 1 | Page number (1-indexed) |
-| `page_size` | integer | No | 20 | Items per page (max 100) |
-
-**Request Headers:**
-```
-Authorization: Bearer <access_token>
-```
-
-**Examples:**
-```
-# All model connectors
-GET /api/v1/connectors/models
-
-# LLM connectors only
-GET /api/v1/connectors/models?type=llm
-
-# Offline connectors only
-GET /api/v1/connectors/models?status=offline
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "data": [
-    {
-      "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc",
-      "name": "prod-watsonx",
-      "type": "llm",
-      "provider": { "id": "watsonx", "name": "WatsonX" },
-      "status": "connected",
-      "message": "",
-      "connected_services": 1,
-      "created_at": "2026-07-01T11:00:00Z",
-      "updated_at": "2026-07-01T11:05:00Z"
-    },
-    {
-      "id": "d2e3f4a5-b6c7-8901-defa-234567890bcd",
-      "name": "prod-embeddings",
-      "type": "embedding",
-      "provider": { "id": "hosted_vllm", "name": "Hosted vLLM" },
-      "status": "connected",
-      "message": "",
-      "connected_services": 2,
-      "created_at": "2026-07-01T12:00:00Z",
-      "updated_at": "2026-07-01T12:05:00Z"
-    }
-  ],
-  "pagination": {
-    "page": 1,
-    "page_size": 20,
-    "total_items": 2,
-    "total_pages": 1,
-    "has_next": false,
-    "has_prev": false
-  }
-}
-```
-
-> **Note:** `metadata` (including `auth` fields) is **not** included in list items. The `provider` field is a JSON object with `id` and `name` resolved from the provider registry. The `connected_services` count is fetched via `svcDepRepo.GetServiceCountByDependency` — not a JOIN in the list query.
-
-**Backing SQL:**
-
-```sql
-SELECT *
-FROM connectors
-WHERE type IN ('llm', 'embedding', 'reranker')
-  AND (:type   IS NULL OR type   = :type)
-  AND (:status IS NULL OR status = :status)
-ORDER BY type, created_at DESC
-LIMIT :page_size OFFSET (:page - 1) * :page_size;
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|---|---|
-| `400 Bad Request` | Unknown value in `type` or `status` query parameter |
-| `401 Unauthorized` | Invalid or missing access token |
-
----
-
-### 7.7 Update a Connector
-
-**Endpoint:** `PUT /api/v1/connectors/models/:id`
+**Endpoint:** `PUT /api/v1/models/:id`
 
 **Path Parameters:**
 
 | Parameter | Description |
 |---|---|
-| `:id` | Connector UUID |
+| `:id` | UUID of the remote model (`connectors` table). Applying this to a local model UUID returns `405 Method Not Allowed`. |
 
-**Description:** Updates a connector's credential fields. Only the credential (Authentication) fields for the connector's provider may be updated — updatable fields are those whose `ui:section` is `"Authentication"` in the provider's `schema.json`. Structural fields (`name`, `type`, `provider`, `api_base`, `model_name`) are immutable after creation. Any non-updatable field in the request body is silently ignored. The connectivity check is always re-run with the merged credentials before saving. If the check fails, return `422 Unprocessable Entity` and leave the existing record unchanged.
+**Description:** Updates the credential fields of a `deployment_type=remote` model. Only `"ui:section": "Authentication"` fields (i.e. sensitive fields) from the provider's `schema.json` may be updated. Structural fields (`name`, `type`, `provider`, `api_base`, `model_name`) are immutable after creation. Non-updatable fields in the request body are silently ignored. The connectivity check is always re-run before saving.
 
-| `provider` | Updatable `params` fields |
+| `provider_id` | Updatable `params` fields |
 |---|---|
 | `watsonx` | `api_key` |
 | `hosted_vllm` | `api_key` |
@@ -1391,14 +1218,15 @@ LIMIT :page_size OFFSET (:page - 1) * :page_size;
 **Processing steps:**
 
 1. Re-register LiteLLM route (`DELETE /model/delete` then `POST /model/new`) with the updated credential fields.
-2. Run connectivity check — if it fails, return `422` and revert LiteLLM registration; leave `connectors` row unchanged.
+2. Run connectivity check — if it fails, return `422` and revert LiteLLM registration; leave the `connectors` row unchanged.
 3. Merge supplied credential fields into `connectors.metadata` (omitted keys preserved); update `connectors.status = 'connected'` and `updated_at`.
 
-**Response `200 OK`:** Updated connector object (without secret fields, without `metadata` blob):
+**Response `200 OK`:** Updated model object (same shape as `GET /api/v1/models/:id`, without secret fields):
 
 ```json
 {
   "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc",
+  "deployment_type": "remote",
   "name": "prod-watsonx",
   "type": "llm",
   "provider": { "id": "watsonx", "name": "WatsonX" },
@@ -1423,103 +1251,49 @@ LIMIT :page_size OFFSET (:page - 1) * :page_size;
 | `400 Bad Request` | Invalid field values |
 | `401 Unauthorized` | Invalid or missing access token |
 | `403 Forbidden` | Authenticated user is not `created_by` |
-| `404 Not Found` | Connector not found |
+| `404 Not Found` | Model not found |
+| `405 Method Not Allowed` | UUID resolves to a local model (`components` table) — local models have no updatable credentials |
 | `422 Unprocessable Entity` | Connectivity check failed after credential update |
 | `500 Internal Server Error` | LiteLLM route update failure |
 
 ---
 
-### 7.8 Get Connector Details
+### 7.5 Delete / Undeploy a Model
 
-**Endpoint:** `GET /api/v1/connectors/models/:id`
+**Endpoint:** `DELETE /api/v1/models/:id`
 
-**Path Parameters:**
+**Description:** Deletes a model. The UUID is resolved against `components` first, then `connectors`, to determine the teardown path. Local models (`deployment_type=local`) are removed asynchronously (`202 Accepted`); remote models (`deployment_type=remote`) are removed synchronously (`204 No Content`).
 
-| Parameter | Description |
-|---|---|
-| `:id` | Connector UUID |
-
-**Description:** Returns the full record for a model connector from the `connectors` table. Non-sensitive `metadata` fields are included. Secret fields (`api_key`, `token`, `password`) are **never returned**.
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc",
-  "name": "prod-watsonx",
-  "type": "llm",
-  "provider": { "id": "watsonx", "name": "WatsonX" },
-  "status": "connected",
-  "message": "Endpoint reachable and credentials accepted",
-  "metadata": {
-    "model_name": "ibm/granite-4-h-small",
-    "api_base": "https://us-south.ml.cloud.ibm.com",
-    "project_id": "my-watsonx-project-id"
-  },
-  "applications": [
-    {
-      "id": "a1b2c3d4-1234-5678-abcd-ef0123456789",
-      "name": "my-rag-app"
-    }
-  ],
-  "created_by": "user@example.com",
-  "created_at": "2026-07-01T11:00:00Z",
-  "updated_at": "2026-07-01T11:05:00Z"
-}
-```
-
-> `applications` lists all applications that have a `service_dependencies` row pointing at this connector (`dependency_type = 'connector'`). Secret fields are stripped using the provider's `schema.json` sensitive-field markers before serialisation.
-
-**`applications` SQL (server-side):**
-
-```sql
-SELECT DISTINCT a.id, a.name
-FROM service_dependencies sd
-JOIN services s ON s.id = sd.service_id
-JOIN applications a ON a.id = s.app_id
-WHERE sd.dependency_id   = :id
-  AND sd.dependency_type = 'connector';
-```
-
-**Response `404 Not Found`:**
-
-```json
-{ "error": "connector not found" }
-```
-
-**Error Responses:** `401 Unauthorized`, `404 Not Found`
-
----
-
-### 7.9 Delete a Connector
-
-**Endpoint:** `DELETE /api/v1/connectors/models/:id`
-
-**Path Parameters:**
-
-| Parameter | Description |
-|---|---|
-| `:id` | Connector UUID |
-
-**Description:** Deletes a model connector. The connector must not be connected to any application at the time of deletion. Deregisters the LiteLLM route and removes the `connectors` row.
-
-**Rules:**
-- The connector must not be linked to any application (no rows in `service_dependencies` with this `dependency_id`). If it is, return `409 Conflict`.
+**Teardown — local model (async):**
 
 | Step | Call | Detail |
 |---|---|---|
 | 1 | `DELETE /model/delete` on LiteLLM | Removes route and credentials from gateway |
 | 2 | `POST /key/delete` on LiteLLM | Body: `{ "keys": ["<virtual-key>"] }` — revokes the per-model key |
+| 3 | Delete `keys` row | Removes virtual key from Catalog DB |
+| 4 | `StopPod` / `DeletePod` | Control-plane: local Podman. Worker: `COMMAND_TYPE_DELETE_POD` via gRPC to worker daemon |
+| 5 | Delete `components` row | Final cleanup |
+
+**Teardown — remote model (sync):**
+
+| Step | Call | Detail |
+|---|---|---|
+| 1 | `DELETE /model/delete` on LiteLLM | Removes route and credentials from gateway |
+| 2 | `POST /key/delete` on LiteLLM | Revokes per-model virtual key |
 | 3 | Delete `keys` row | `WHERE dependency_type = 'connector' AND dependency_id = :id` |
 | 4 | Delete `connectors` row | Final cleanup |
 
-**Response `204 No Content`:** Connector deleted.
-
-**Response `409 Conflict`:**
+**Response `202 Accepted` (local):**
 
 ```json
-{ "error": "connector is linked to 1 application(s) and cannot be deleted" }
+{
+  "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f",
+  "deployment_type": "local",
+  "message": "Undeploy initiated"
+}
 ```
+
+**Response `204 No Content` (remote):** Connector deleted.
 
 **Error Responses:**
 
@@ -1527,52 +1301,12 @@ WHERE sd.dependency_id   = :id
 |---|---|
 | `401 Unauthorized` | Invalid or missing access token |
 | `403 Forbidden` | Authenticated user is not `created_by` |
-| `404 Not Found` | Connector not found |
-| `409 Conflict` | Connector is linked to one or more applications |
+| `404 Not Found` | Model not found in either table |
+| `409 Conflict` | Model is in use by one or more active applications; or is already being deleted (local) |
 
 ---
 
-### 7.10 List Workers
-
-**Endpoint:** `GET /api/v1/workers`
-
-**Description:** Returns all registered Worker LPARs with their current connection status. Used by the UI to populate the **Target Worker** dropdown in the deploy form.
-
-**Response `200 OK`:**
-
-```json
-{
-  "data": [
-    {
-      "id": "lpar-1",
-      "runtime_type": "spyre",
-      "status": "ready",
-      "address": "https://worker-caddy-lpar-1:443",
-      "last_seen_at": "2026-07-01T10:04:00Z"
-    },
-    {
-      "id": "lpar-2",
-      "runtime_type": "cpu",
-      "status": "ready",
-      "address": "https://worker-caddy-lpar-2:443",
-      "last_seen_at": "2026-07-01T10:04:05Z"
-    },
-    {
-      "id": "lpar-3",
-      "runtime_type": "cpu",
-      "status": "disconnected",
-      "address": null,
-      "last_seen_at": "2026-06-30T08:00:00Z"
-    }
-  ]
-}
-```
-
-**Error Responses:** `401 Unauthorized`
-
----
-
-### 7.11 Get Virtual Key
+### 7.6 Get Virtual Key
 
 **Endpoint:** `GET /api/v1/models/keys`
 
@@ -1750,8 +1484,9 @@ POST /api/v1/models
 ### Flow: Register WatsonX Connector — remote (no pod)
 
 ```
-POST /api/v1/connectors/models
-{ name: "prod-watsonx", type: "llm", provider_id: "watsonx",
+POST /api/v1/models          (deployment_type=remote)
+
+{ deployment_type: "remote", name: "prod-watsonx", type: "llm", provider_id: "watsonx",
   params: {model_name: "ibm/granite-4-h-small",
            api_base: "https://us-south.ml.cloud.ibm.com", project_id: "my-watsonx-project-id",
            api_key: "<watsonx-api-key>"} }
@@ -1871,7 +1606,7 @@ POST /api/v1/applications
 
 ### Flow: Application Create — Model Connector (remote)
 
-A service can use a pre-registered remote model connector (created via `POST /api/v1/connectors/models`) instead of a local model component. It is referenced from the service's `connectors` list using the same [`ConnectorRef`](../data-source-connectors/catalog-datasource-connectors-proposal.md) shape as datasource connectors: `{ "type": ..., "id": ... }`. The only difference is `type`, which is the model type (`llm`, `embedding` or `reranker`) instead of `datasource`.
+A service can use a pre-registered remote model connector (created via `POST /api/v1/models` with `deployment_type=remote`) instead of a local model component. It is referenced from the service's `connectors` list using the same [`ConnectorRef`](../data-source-connectors/catalog-datasource-connectors-proposal.md) shape as datasource connectors: `{ "type": ..., "id": ... }`. The only difference is `type`, which is the model type (`llm`, `embedding` or `reranker`) instead of `datasource`.
 
 **Example request body:**
 
@@ -1977,7 +1712,7 @@ DELETE /api/v1/models/:id
 ### Flow: Delete remote connector
 
 ```
-DELETE /api/v1/connectors/models/:id
+DELETE /api/v1/models/:id          (resolves to connectors table — same handler)
 
   Server loads connectors row by id; checks no service_dependencies reference it → 409 if any
 
@@ -2001,15 +1736,17 @@ DELETE /api/v1/connectors/models/:id
 
 Local pod models live in `components`; remote model connectors live in the shared `connectors` table (same table used by datasource connectors, discriminated by `type`). Both are linked from `service_dependencies` using `dependency_type = 'connector'` for remote and `dependency_type = 'component'` for local. No UNION queries, no schema divergence.
 
+The API surface reflects this cleanly: `/api/v1/models` is a **polymorphic CRUD facade** that routes operations to the correct table based on `deployment_type` (or UUID resolution for read/update/delete). `/api/v1/connectors` is **read-only** — provider discovery only, mirroring its role in the datasource connectors design. All entity operations for both local and remote models go through `/api/v1/models`.
+
 ### 2. Credentials Never Enter the Catalog DB
 
 Local virtual keys are stored in the `keys` table (Catalog DB) and served via `GET /api/v1/models/keys?instance_id=<component_id>` to consumer service pods at startup. Remote credentials (sensitive `params` marked `"format": "password"` in the provider's `schema.json`) are passed directly to the LiteLLM Gateway at route-registration time and stripped before `params` is stored in `connectors.metadata`. Remote connectors also get a per-model virtual key in `keys` (`dependency_type = 'connector'`). At delete time, both local and remote revoke the key, remove the `keys` row, and call `DELETE /model/delete` on LiteLLM.
 
 ### 3. Table Is the Only Branch Point
 
-At delete/undeploy time, the `modelmanager` package determines the path by which table the record came from:
-- `components` row → stop pod + delete pod + delete `components` row
-- `connectors` row → `DELETE /model/delete` on LiteLLM + delete `connectors` row
+At read/update/delete time, the `modelmanager` package determines the path by which table the record came from:
+- `components` row → stop pod + delete pod + delete `components` row (`deployment_type=local`, async `202`)
+- `connectors` row → `DELETE /model/delete` on LiteLLM + delete `connectors` row (`deployment_type=remote`, sync `204`)
 
 ### 4. Managed Model Identity: `created_by IS NOT NULL`
 
@@ -2017,7 +1754,7 @@ The API layer distinguishes user-created components from infrastructure componen
 
 ### 5. Delete Always Removes the Row
 
-`DELETE /api/v1/models/:id` removes a `components` row (async). `DELETE /api/v1/connectors/models/:id` removes a `connectors` row (sync) — only permitted when no `service_dependencies` row references it.
+`DELETE /api/v1/models/:id` resolves the UUID — `components` first, then `connectors` — and removes the matched row. Local models are removed asynchronously (`202`); remote models synchronously (`204`). There is no separate delete path via `/api/v1/connectors`; that surface is read-only.
 
 ### 6. `deployment_strategy` in `metadata.yaml` Drives the `modelmanager` Package Deploy Path
 
@@ -2180,7 +1917,7 @@ Pre-flight failures extend this with a `violations` array (see §8):
 
 ## 14. CLI Commands
 
-Model commands live under `ai-services model` and map to the `/api/v1/models` endpoints. Connector commands live under `ai-services connector` and map to the `/api/v1/connectors/models` endpoints. Both follow the same flag style as `ai-services application`.
+All model commands live under `ai-services model` and map to the `/api/v1/models` endpoints. Both local (pod) and remote (connector) model operations use the same command group — distinguished by `--deployment-type local|remote`. All commands follow the same flag style as `ai-services application`.
 
 ---
 
@@ -2216,7 +1953,7 @@ ai-services model deploy granite-embed \
 
 ---
 
-#### List local models
+#### List models (local + remote)
 
 ```
 ai-services model list --runtime podman
@@ -2224,18 +1961,22 @@ ai-services model list --runtime podman
 
 | Flag | Short | Required | Description |
 |---|---|---|---|
-| `--type` | `-t` | No | Filter by component type: `llm`, `embedding`, `reranker` |
-| `--provider` | `-p` | No | Filter by provider: `vllm-spyre`, `vllm-cpu` |
-| `--status` | | No | Filter by status: `Running`, `Deploying`, `Error` |
+| `--type` | `-t` | No | Filter by model role: `llm`, `embedding`, `reranker` |
+| `--deployment-type` | | No | Filter by kind: `local`, `remote`. Omit for both |
+| `--provider` | `-p` | No | Filter by provider: `vllm-spyre`, `vllm-cpu`, `watsonx`, `hosted_vllm`, `openai` |
+| `--status` | | No | Filter by status: `Running`, `Deploying`, `Error` (local); `connected`, `offline` (remote) |
 
 ```bash
-# List all local models
+# List all models (both local and remote)
 ai-services model list --runtime podman
 
-# List only LLM models
+# List only LLM models (local and remote)
 ai-services model list --type llm --runtime podman
 
-# List only running models
+# List only local models
+ai-services model list --deployment-type local --runtime podman
+
+# List only running local models
 ai-services model list --status Running --runtime podman
 ```
 
@@ -2261,7 +2002,6 @@ ai-services model delete [name] --runtime podman
 
 | Flag | Short | Required | Description |
 |---|---|---|---|
-| `--keep-data` | | No | Preserve host volume / PVC; stop pod but keep weights |
 | `-y` | | No | Skip confirmation prompt |
 
 ```bash
@@ -2269,47 +2009,50 @@ ai-services model delete granite-llm --runtime podman
 
 # Skip confirmation
 ai-services model delete granite-llm -y --runtime podman
-
-# Stop pod but keep downloaded weights
-ai-services model delete granite-llm --keep-data --runtime podman
 ```
 
 ---
 
-### 14.2 Connector Commands
+### 14.2 Remote Model Commands
 
-#### Create a connector
+Remote model operations use the same `ai-services model` command group. The `--deployment-type remote` flag (or provider inference) selects the remote path on `POST /api/v1/models`.
+
+#### Create a remote model
 
 ```
-ai-services connector create [name] --type <type> --provider <provider> --runtime podman
+ai-services model create [name] --type <type> --provider <provider> --deployment-type remote --runtime podman
 ```
 
 | Flag | Short | Required | Description |
 |---|---|---|---|
-| `--type` | `-t` | Yes | Component type: `llm`, `embedding`, `reranker` |
+| `--type` | `-t` | Yes | Model role: `llm`, `embedding`, `reranker` |
 | `--provider` | `-p` | Yes | Connector provider: `watsonx`, `hosted_vllm`, `openai` |
+| `--deployment-type` | | Yes | `remote` |
 | `--api-key` | | Conditional | API key (required by `watsonx`, `openai`; optional for `hosted_vllm`) — passed to LiteLLM, never stored in DB |
 | `--params` | | No | Inline key=value pairs (e.g. `api_base=...`, `project_id=...`, `model_name=...`) |
 
 ```bash
-# Create a WatsonX LLM connector
-ai-services connector create prod-watsonx \
+# Register a WatsonX LLM connector
+ai-services model create prod-watsonx \
+  --deployment-type remote \
   --type llm \
   --provider watsonx \
   --api-key sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   --params api_base=https://us-south.ml.cloud.ibm.com,model_name=ibm/granite-4-h-small,project_id=my-project-id \
   --runtime podman
 
-# Create an OpenAI embedding connector
-ai-services connector create openai-embed \
+# Register an OpenAI embedding connector
+ai-services model create openai-embed \
+  --deployment-type remote \
   --type embedding \
   --provider openai \
   --api-key sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   --params model_name=text-embedding-3-small \
   --runtime podman
 
-# Create a hosted vLLM LLM connector (externally running vLLM server)
-ai-services connector create ext-vllm \
+# Register a hosted vLLM connector
+ai-services model create ext-vllm \
+  --deployment-type remote \
   --type llm \
   --provider hosted_vllm \
   --params api_base=http://vllm.example.com:8000/v1,model_name=ibm-granite/granite-3.3-8b-instruct \
@@ -2318,54 +2061,10 @@ ai-services connector create ext-vllm \
 
 ---
 
-#### List connectors
-
-Lists all registered remote model connectors from the `connectors` table. Use `ai-services model list` to list local model pods.
+#### Update a remote model's credentials
 
 ```
-ai-services connector list --runtime podman
-```
-
-| Flag | Short | Required | Description |
-|---|---|---|---|
-| `--type` | `-t` | No | Filter by connector type: `llm`, `embedding`, `reranker`. Omit for all |
-| `--provider` | `-p` | No | Filter by provider: `watsonx`, `hosted_vllm`, `openai` |
-| `--status` | | No | Filter by status: `connected`, `offline` |
-
-```bash
-# List all remote connectors
-ai-services connector list --runtime podman
-
-# List only LLM connectors
-ai-services connector list --type llm --runtime podman
-
-# List only WatsonX connectors
-ai-services connector list --provider watsonx --runtime podman
-
-# List only offline connectors
-ai-services connector list --status offline --runtime podman
-```
-
----
-
-#### Get connector details
-
-```
-ai-services connector info [name] --runtime podman
-```
-
-```bash
-ai-services connector info prod-watsonx --runtime podman
-```
-
----
-
-#### Update a connector
-
-Updates connector credentials. Re-runs the connectivity check before saving — returns an error if the check fails, leaving the existing record unchanged.
-
-```
-ai-services connector update [name] --runtime podman
+ai-services model update [name] --runtime podman
 ```
 
 | Flag | Short | Required | Description |
@@ -2374,28 +2073,9 @@ ai-services connector update [name] --runtime podman
 
 ```bash
 # Rotate the API key
-ai-services connector update prod-watsonx \
+ai-services model update prod-watsonx \
   --api-key sk-new-key-here \
   --runtime podman
-```
-
----
-
-#### Delete a connector
-
-```
-ai-services connector delete [name] --runtime podman
-```
-
-| Flag | Short | Required | Description |
-|---|---|---|---|
-| `-y` | | No | Skip confirmation prompt |
-
-```bash
-ai-services connector delete prod-watsonx --runtime podman
-
-# Skip confirmation
-ai-services connector delete prod-watsonx -y --runtime podman
 ```
 
 ---
@@ -2429,13 +2109,10 @@ curl -s http://litellm:4000/chat/completions \
 
 | Command | Maps to | Description |
 |---|---|---|
-| `ai-services model deploy [name]` | `POST /api/v1/models` | Deploy a local model pod |
-| `ai-services model list` | `GET /api/v1/models` | List deployed local models |
-| `ai-services model info [name]` | `GET /api/v1/models/:id` | Get full details of any model |
-| `ai-services model delete [name]` | `DELETE /api/v1/models/:id` | Undeploy a model, revoke its key, delete its row |
-| `ai-services connector create [name]` | `POST /api/v1/connectors/models` | Register a remote connector |
-| `ai-services connector list` | `GET /api/v1/connectors/models` | List all registered remote connectors |
-| `ai-services connector info [name]` | `GET /api/v1/connectors/models/:id` | Get full details of a connector |
-| `ai-services connector update [name]` | `PUT /api/v1/connectors/models/:id` | Update connector credentials |
-| `ai-services connector delete [name]` | `DELETE /api/v1/connectors/models/:id` | Delete connector, deregister LiteLLM route |
+| `ai-services model deploy [name]` | `POST /api/v1/models` (`deployment_type=local`) | Deploy a local model pod |
+| `ai-services model create [name] --deployment-type remote` | `POST /api/v1/models` (`deployment_type=remote`) | Register a remote model connector |
+| `ai-services model list` | `GET /api/v1/models` | List all models (local + remote) |
+| `ai-services model info [name]` | `GET /api/v1/models/:id` | Get full details of any model (local or remote) |
+| `ai-services model update [name]` | `PUT /api/v1/models/:id` | Update credentials of a remote model |
+| `ai-services model delete [name]` | `DELETE /api/v1/models/:id` | Undeploy/delete a model, revoke its key, delete its row |
 | `ai-services model litellm key [model-name]` | `GET /api/v1/models/keys?instance_id=<component_id>` | Print the per-model LiteLLM virtual key (local model or model connector) |

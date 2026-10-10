@@ -138,23 +138,17 @@ func registerWorkerRoutes(v1 *gin.RouterGroup, h *handlers.WorkerHandler, authMw
 }
 
 func registerModelRoutes(v1 *gin.RouterGroup, h *handlers.ModelHandler, authMw gin.HandlerFunc) {
-	// Model routes — POST/GET /api/v1/models, GET/DELETE /api/v1/models/:id
-	// GET /api/v1/models/keys?instance_id=<uuid>
+	// Polymorphic model routes — POST selects local/remote via deployment_type field.
+	// GET /api/v1/models/keys must be registered before /:id to avoid route shadowing.
 	models := v1.Group("models")
 	models.Use(authMw)
 	{
-		models.POST("", h.DeployModel)
+		models.POST("", h.CreateModel)
 		models.GET("", h.ListModels)
 		models.GET("/keys", h.GetModelKey)
 		models.GET("/:id", h.GetModel)
+		models.PUT("/:id", h.UpdateRemoteModel)
 		models.DELETE("/:id", h.UndeployModel)
-	}
-
-	// Model connector routes — POST /api/v1/connectors/models
-	connectors := v1.Group("connectors/models")
-	connectors.Use(authMw)
-	{
-		connectors.POST("", h.CreateConnector)
 	}
 }
 
