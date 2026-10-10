@@ -74,6 +74,8 @@ type ModelWorkerInfo struct {
 type ModelListItem struct {
 	ID             uuid.UUID         `json:"id"`
 	DeploymentType string            `json:"deployment_type"`
+	// ModelID is the LiteLLM route alias — pass this as the `model` field in LiteLLM API calls.
+	ModelID        string            `json:"model_id,omitempty"`
 	Name           string            `json:"name"`
 	Type           string            `json:"type"`
 	Provider       ModelProviderInfo `json:"provider"`
@@ -114,6 +116,8 @@ type ModelEndpoint struct {
 type GetModelResponse struct {
 	ID             uuid.UUID             `json:"id"`
 	DeploymentType string                `json:"deployment_type"`
+	// ModelID is the LiteLLM route alias — pass this as the `model` field in LiteLLM API calls.
+	ModelID        string                `json:"model_id,omitempty"`
 	Name           string                `json:"name"`
 	Type           string                `json:"type"`
 	Provider       ModelProviderInfo     `json:"provider"`

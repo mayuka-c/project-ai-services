@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 	texttemplate "text/template"
@@ -209,14 +210,18 @@ func (s *ModelService) deployLocal(ctx context.Context, req apimodels.CreateMode
 
 	// 5. Insert component row in Deploying state.
 	modelName, _ := req.Params["model"].(string)
+	routeID := buildRouteID(path.Base(modelName), req.ProviderID)
 	name := req.Name
 	createdBy := req.CreatedBy
 
 	component := &dbmodels.Component{
-		Type:      req.Type,
-		Provider:  req.ProviderID,
-		Status:    dbmodels.ComponentStatusDeploying,
-		Metadata:  map[string]any{"model": modelName},
+		Type:     req.Type,
+		Provider: req.ProviderID,
+		Status:   dbmodels.ComponentStatusDeploying,
+		Metadata: map[string]any{
+			"model":    modelName,
+			"model_id": routeID,
+		},
 		Name:      &name,
 		CreatedBy: &createdBy,
 		WorkerID:  workerID,
@@ -428,8 +433,22 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		return
 	}
 
-	// ── Step 6: mark Running ──────────────────────────────────────────────────
-	log("deployment complete; setting status Running")
+	// ── Step 6: append external LiteLLM endpoint, then mark Running ──────────
+	// DeployComponentPods already wrote {"type":"service","url":"http://pod:port"}
+	// into the DB. We fetch the current list and append the external entry so
+	// consumers know the public LiteLLM gateway URL for this model.
+	log("deployment complete; appending external endpoint and setting status Running")
+
+	current, fetchErr := s.componentRepo.GetByID(ctx, componentID)
+	if fetchErr == nil && current != nil {
+		updated := append(current.Endpoints, map[string]any{
+			"type": "external",
+			"url":  litellmURL(),
+		})
+		if err := s.componentRepo.UpdateEndpoints(ctx, componentID, updated); err != nil {
+			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to append external endpoint: %v", componentID, err)
+		}
+	}
 
 	if err := s.componentRepo.UpdateStatus(ctx, componentID, dbmodels.ComponentStatusRunning, "Model running"); err != nil {
 		logger.ErrorfCtx(ctx, "[modelmanager] component %s: failed to set Running status: %v", componentID, err)
@@ -872,9 +891,12 @@ func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*apimodels.G
 			createdBy = *c.CreatedBy
 		}
 
+		localModelID, _ := c.Metadata["model_id"].(string)
+
 		return &apimodels.GetModelResponse{
 			ID:             c.ID,
 			DeploymentType: "local",
+			ModelID:        localModelID,
 			Name:           name,
 			Type:           c.Type,
 			Provider: apimodels.ModelProviderInfo{
@@ -907,9 +929,12 @@ func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*apimodels.G
 		providerName = catalogConn.Name
 	}
 
+	remoteModelID, _ := connector.Metadata["model_id"].(string)
+
 	return &apimodels.GetModelResponse{
 		ID:             connector.ID,
 		DeploymentType: "remote",
+		ModelID:        remoteModelID,
 		Name:           connector.Name,
 		Type:           connector.Type,
 		Provider: apimodels.ModelProviderInfo{
@@ -994,11 +1019,16 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 		logger.InfofCtx(ctx, "[modelmanager] component %s: undeploy: "+msg, append([]any{c.ID}, args...)...)
 	}
 
-	modelName, _ := c.Metadata["model"].(string)
-	routeID := buildRouteID(modelName, c.Provider)
-	// Reconstruct the Caddy route ID using the same formula as deployAsync.
-	caddyRouteID := routeID + "--" + c.ID.String()[:8]
+	// model_id is the LiteLLM route alias stored in metadata at deploy time.
+	// Fall back to re-deriving it for any rows created before this field was added.
+	routeID, _ := c.Metadata["model_id"].(string)
+	if routeID == "" {
+		modelName, _ := c.Metadata["model"].(string)
+		routeID = buildRouteID(path.Base(modelName), c.Provider)
+	}
 
+	// Caddy route ID: routeID + component UUID short prefix (disambiguates concurrent deploys).
+	caddyRouteID := routeID + "--" + c.ID.String()[:8]
 	// Step 1: deregister Caddy routes (worker ingress + CP egress) for remote deploys.
 	if c.WorkerID != nil {
 		if workerName, ok := s.workerRegistry.WorkerNameByID(*c.WorkerID); ok && workerName != "" {
@@ -1130,9 +1160,12 @@ func (s *ModelService) toModelListItem(ctx context.Context, c dbmodels.Component
 		name = *c.Name
 	}
 
+	modelID, _ := c.Metadata["model_id"].(string)
+
 	return apimodels.ModelListItem{
 		ID:             c.ID,
 		DeploymentType: "local",
+		ModelID:        modelID,
 		Name:           name,
 		Type:           c.Type,
 		Provider: apimodels.ModelProviderInfo{
@@ -1154,9 +1187,12 @@ func (s *ModelService) connectorToListItem(conn dbmodels.Connector) apimodels.Mo
 		providerName = catalogConn.Name
 	}
 
+	modelID, _ := conn.Metadata["model_id"].(string)
+
 	return apimodels.ModelListItem{
 		ID:             conn.ID,
 		DeploymentType: "remote",
+		ModelID:        modelID,
 		Name:           conn.Name,
 		Type:           conn.Type,
 		Provider: apimodels.ModelProviderInfo{

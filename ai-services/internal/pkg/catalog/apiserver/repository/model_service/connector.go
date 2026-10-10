@@ -117,12 +117,17 @@ func (s *ModelService) createRemote(ctx context.Context, req apimodels.CreateMod
 	}
 
 	// Phase 6: persist the connector with sensitive fields stripped.
+	// model_id (the LiteLLM route alias) is added to metadata so consumers
+	// and teardown code can reference the route without re-deriving it.
+	safeMetadata := catalogutils.StripSensitiveFields(req.Params, catalogutils.SensitiveFieldsFromSchema(schema))
+	safeMetadata["model_id"] = routeID
+
 	connector := &dbmodels.Connector{
 		Name:      req.Name,
 		Type:      req.Type,
 		Provider:  req.ProviderID,
 		Status:    dbmodels.ConnectorStatusConnected,
-		Metadata:  catalogutils.StripSensitiveFields(req.Params, catalogutils.SensitiveFieldsFromSchema(schema)),
+		Metadata:  safeMetadata,
 		CreatedBy: req.CreatedBy,
 	}
 
@@ -190,9 +195,13 @@ func (s *ModelService) UpdateRemoteModel(ctx context.Context, id uuid.UUID, _ st
 		return nil, err
 	}
 
-	// Rebuild the route ID from existing connector metadata.
-	existingModelName, _ := connector.Metadata["model_name"].(string)
-	routeID := buildRouteID(path.Base(existingModelName), connector.Provider)
+	// Resolve the route ID — read model_id from metadata (written at create time).
+	// Fall back to re-deriving it for rows created before this field was added.
+	routeID, _ := connector.Metadata["model_id"].(string)
+	if routeID == "" {
+		existingModelName, _ := connector.Metadata["model_name"].(string)
+		routeID = buildRouteID(path.Base(existingModelName), connector.Provider)
+	}
 
 	// Delete the old LiteLLM route (best-effort — proceed even if it fails).
 	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
@@ -252,8 +261,13 @@ func (s *ModelService) UpdateRemoteModel(ctx context.Context, id uuid.UUID, _ st
 //  2. Delete the LiteLLM route.
 //  3. Delete the connector DB row (only if unlinked).
 func (s *ModelService) deleteRemote(ctx context.Context, connector *dbmodels.Connector) error {
-	modelName, _ := connector.Metadata["model_name"].(string)
-	routeID := buildRouteID(path.Base(modelName), connector.Provider)
+	// Read model_id from metadata (written at create time).
+	// Fall back to re-deriving it for rows created before this field was added.
+	routeID, _ := connector.Metadata["model_id"].(string)
+	if routeID == "" {
+		modelName, _ := connector.Metadata["model_name"].(string)
+		routeID = buildRouteID(path.Base(modelName), connector.Provider)
+	}
 
 	// Step 1: revoke and delete the virtual key.
 	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeConnector, connector.ID)

@@ -1215,6 +1215,10 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 		}
 	}
 
+	// Backfill model_id + external endpoint on the pre-deployed component row if absent.
+	// This covers components created before these fields were introduced.
+	s.backfillComponentEndpointMeta(ctx, existing, routeID)
+
 	// Generate a fresh per-application virtual key scoped to this LiteLLM route.
 	// The key name encodes the application ID so it is identifiable in LiteLLM's UI.
 	appKeyName := routeID + "--app-" + comp.DatabaseID.String()[:8]
@@ -1519,6 +1523,12 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 		logger.InfofCtx(ctx, "[app-deploy] model key persisted for component %s route=%s", comp.DatabaseID, routeID)
 	} else {
 		logger.InfofCtx(ctx, "[app-deploy] model key already exists for component %s route=%s; skipping insert", comp.DatabaseID, routeID)
+	}
+
+	// Persist model_id + external endpoint on the freshly deployed component row.
+	freshComp, fetchErr := s.ComponentRepo.GetByID(ctx, comp.DatabaseID)
+	if fetchErr == nil && freshComp != nil {
+		s.backfillComponentEndpointMeta(ctx, freshComp, routeID)
 	}
 
 	// 3. Generate a fresh per-application virtual key and inject into service Values.
@@ -2173,5 +2183,51 @@ func (s *ApplicationServiceBase) isComponentOrphaned(ctx context.Context, compon
 
 	return true
 }
+
+
+// backfillComponentEndpointMeta writes model_id into the component's metadata and appends
+// an "external" LiteLLM endpoint to its endpoints list — both only when absent, so the
+// function is safe to call on new and pre-existing rows alike.
+func (s *ApplicationServiceBase) backfillComponentEndpointMeta(ctx context.Context, c *models.Component, routeID string) {
+	updated := false
+
+	// 1. Write model_id into metadata if not already set.
+	if _, ok := c.Metadata["model_id"]; !ok {
+		if c.Metadata == nil {
+			c.Metadata = make(map[string]any)
+		}
+		c.Metadata["model_id"] = routeID
+		if err := s.ComponentRepo.Update(ctx, c); err != nil {
+			logger.WarningfCtx(ctx, "[app-deploy] component %s: failed to write model_id to metadata: %v", c.ID, err)
+		} else {
+			updated = true
+		}
+	}
+
+	// 2. Append "external" endpoint if not already present.
+	hasExternal := false
+	for _, ep := range c.Endpoints {
+		if t, _ := ep["type"].(string); t == "external" {
+			hasExternal = true
+			break
+		}
+	}
+	if !hasExternal {
+		endpoints := append(c.Endpoints, map[string]any{
+			"type": "external",
+			"url":  litellmURLApp(),
+		})
+		if err := s.ComponentRepo.UpdateEndpoints(ctx, c.ID, endpoints); err != nil {
+			logger.WarningfCtx(ctx, "[app-deploy] component %s: failed to append external endpoint: %v", c.ID, err)
+		} else {
+			updated = true
+		}
+	}
+
+	if updated {
+		logger.InfofCtx(ctx, "[app-deploy] component %s: backfilled model_id=%q and external endpoint", c.ID, routeID)
+	}
+}
+
 
 // Made with Bob
