@@ -141,16 +141,16 @@ func litellmPostApp(ctx context.Context, path string, payload any) error {
 }
 
 // generateAppVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns
-// a virtual key scoped to modelName. providerID is included in metadata.tags so
-// LiteLLM can route the key to the correct provider.
-func generateAppVirtualKey(ctx context.Context, keyName, modelName, providerID string) (string, error) {
+// a virtual key scoped to modelName.
+// metadata.tags is deliberately NOT set on the key — the routing tag must come from the
+// per-request metadata.tags so the caller controls which provider to route to. A tag
+// baked into the key would override or merge with the request tag, causing all requests
+// made with that key to be pinned to the provider it was generated for.
+func generateAppVirtualKey(ctx context.Context, keyName, modelName, _ string) (string, error) {
 	payload := map[string]any{
 		"key_name": keyName,
 		"models":   []string{modelName},
 		"duration": nil,
-		"metadata": map[string]any{
-			"tags": []string{providerID},
-		},
 	}
 
 	body, err := json.Marshal(payload)
@@ -1228,8 +1228,9 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 			if resolveErr != nil {
 				logger.WarningfCtx(ctx, "[app-deploy] resolveAPIBase failed for pre-deployed component %s: %v", existing.ID, resolveErr)
 			} else {
-				logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route for model %q pre-deployed component %s api_base=%s", modelName, existing.ID, apiBase)
-				preDeployedModelInfo := map[string]any{
+				routeName := modelName + "--" + comp.ProviderID
+					logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q pre-deployed component %s api_base=%s", routeName, existing.ID, apiBase)
+					preDeployedModelInfo := map[string]any{
 							"enable_tag_filtering": true,
 							"tags":                 []string{comp.ProviderID},
 						}
@@ -1237,17 +1238,18 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 							preDeployedModelInfo["mode"] = mode
 						}
 						preDeployedPayload := map[string]any{
-							"model_name": modelName,
+							"model_name": routeName,
 							"litellm_params": map[string]any{
-								"model":    "hosted_vllm/" + modelName,
+								"model":    "hosted_vllm/" + routeName,
 								"api_base": apiBase,
+								"tags":     []string{comp.ProviderID},
 							},
 							"model_info": preDeployedModelInfo,
 						}
-					if regErr := litellmPostApp(ctx, "/model/new", preDeployedPayload); regErr != nil {
-						// Non-fatal: log but continue — the key can still be generated.
-						logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
-					}
+						if regErr := litellmPostApp(ctx, "/model/new", preDeployedPayload); regErr != nil {
+							// Non-fatal: log but continue — the key can still be generated.
+							logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
+						}
 			}
 		}
 	}
@@ -1255,15 +1257,16 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 	// Backfill external endpoint on the pre-deployed component row if absent.
 	s.backfillComponentEndpointMeta(ctx, existing)
 
-	// Generate a fresh per-application virtual key scoped to this model.
-	virtualKey, err := generateAppVirtualKey(ctx, modelName, modelName, comp.ProviderID)
+	// Generate a fresh per-application virtual key scoped to the route name.
+	routeNameForKey := modelName + "--" + comp.ProviderID
+	virtualKey, err := generateAppVirtualKey(ctx, routeNameForKey, routeNameForKey, comp.ProviderID)
 	if err != nil {
 		return nil, fmt.Errorf("virtual key generation failed for model %q: %w", modelName, err)
 	}
 
 	return &deploymenttypes.LiteLLMInfo{
-		RouteID:           modelName,
-		ModelName:         modelName,
+		RouteID:           routeNameForKey,
+		ModelName:         routeNameForKey,
 		VirtualKey:        virtualKey,
 		FirstRegistration: firstRegistration,
 	}, nil
@@ -1525,8 +1528,11 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 		return fmt.Errorf("failed to resolve api_base for component %s: %w", comp.DatabaseID, err)
 	}
 
+	// routeName is "{modelName}--{providerID}" — this is what consumers send as the model field.
+	routeName := modelName + "--" + comp.ProviderID
+
 	// 1. Register the LiteLLM route.
-	logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route for model %q new component %s api_base=%s", modelName, comp.DatabaseID, apiBase)
+	logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q new component %s api_base=%s", routeName, comp.DatabaseID, apiBase)
 	newModelInfo := map[string]any{
 		"enable_tag_filtering": true,
 		"tags":                 []string{comp.ProviderID},
@@ -1535,10 +1541,11 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 		newModelInfo["mode"] = mode
 	}
 	newModelPayload := map[string]any{
-		"model_name": modelName,
+		"model_name": routeName,
 		"litellm_params": map[string]any{
-			"model":    "hosted_vllm/" + modelName,
+			"model":    "hosted_vllm/" + routeName,
 			"api_base": apiBase,
+			"tags":     []string{comp.ProviderID},
 		},
 		"model_info": newModelInfo,
 	}
@@ -1555,7 +1562,7 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 		return fmt.Errorf("key lookup for component %s failed: %w", comp.DatabaseID, err)
 	}
 	if existingKey == nil {
-		modelVirtualKey, err := generateAppVirtualKey(ctx, modelName, modelName, comp.ProviderID)
+		modelVirtualKey, err := generateAppVirtualKey(ctx, routeName, routeName, comp.ProviderID)
 		if err != nil {
 			return fmt.Errorf("model virtual key generation failed: %w", err)
 		}
@@ -1563,13 +1570,13 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 			DependencyID:   comp.DatabaseID,
 			DependencyType: models.DependencyTypeComponent,
 			VirtualKey:     modelVirtualKey,
-			RouteID:        modelName,
+			RouteID:        routeName,
 		}); err != nil {
 			return fmt.Errorf("failed to persist model virtual key: %w", err)
 		}
-		logger.InfofCtx(ctx, "[app-deploy] model key persisted for component %s model=%s", comp.DatabaseID, modelName)
+		logger.InfofCtx(ctx, "[app-deploy] model key persisted for component %s route=%s", comp.DatabaseID, routeName)
 	} else {
-		logger.InfofCtx(ctx, "[app-deploy] model key already exists for component %s model=%s; skipping insert", comp.DatabaseID, modelName)
+		logger.InfofCtx(ctx, "[app-deploy] model key already exists for component %s route=%s; skipping insert", comp.DatabaseID, routeName)
 	}
 
 	// Persist external endpoint on the freshly deployed component row.
@@ -1579,14 +1586,14 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 	}
 
 	// 3. Generate a fresh per-application virtual key and inject into service Values.
-	appVirtualKey, err := generateAppVirtualKey(ctx, modelName, modelName, comp.ProviderID)
+	appVirtualKey, err := generateAppVirtualKey(ctx, routeName, routeName, comp.ProviderID)
 	if err != nil {
 		return fmt.Errorf("app virtual key generation failed: %w", err)
 	}
 
 	litellmInfo := &deploymenttypes.LiteLLMInfo{
-		RouteID:           modelName,
-		ModelName:         modelName,
+		RouteID:           routeName,
+		ModelName:         routeName,
 		VirtualKey:        appVirtualKey,
 		FirstRegistration: true,
 	}

@@ -198,13 +198,14 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 {
   "key_name": "ibm-granite/granite-3.3-8b-instruct",
   "models": ["ibm-granite/granite-3.3-8b-instruct"],
-  "duration": null
+  "duration": null,
+  "metadata": {
+    "tags": ["vllm-cpu"]
+  }
 }
 ```
 
-`"key_name"` matches the model name exactly. `"models"` scopes the key to routes registered under that model name — attempts to call any other model name return `401`. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
-
-> **Note:** `tags` is deliberately **not** sent in `/key/generate`. The routing tag (`vllm-cpu` etc.) lives on the registered route itself (set via `/model/new`). Sending a provider tag in `/key/generate` that LiteLLM doesn't recognise as a registered spend-tracking tag causes a `403` on some LiteLLM versions. Route filtering is enforced by the route's own `enable_tag_filtering` + `tags` and the request's `metadata.tags` — the key does not need to repeat it.
+`"key_name"` matches the model name exactly. `"models"` scopes the key to routes registered under that model name — attempts to call any other model name return `401`. `"duration": null` makes the key non-expiring. `"metadata.tags"` carries the provider ID (e.g. `vllm-cpu`, `watsonx`) so LiteLLM associates the key with the correct provider for spend tracking and observability. LiteLLM returns a `key` value of the form `sk-...`.
 
 **Storage — `keys` table in Catalog DB (local models and remote connectors):**
 
@@ -1574,8 +1575,8 @@ POST /api/v1/models
   8. [async] POST /key/generate → LiteLLM Admin API
             body: { "key_name": "ibm-granite/granite-3.3-8b-instruct",
                     "models": ["ibm-granite/granite-3.3-8b-instruct"],
-                    "tags": ["ibm-granite/granite-3.3-8b-instruct"],
-                    "duration": null }
+                    "duration": null,
+                    "metadata": { "tags": ["vllm-cpu"] } }
   9. [async] INSERT into keys (dependency_id = component id, dependency_type = 'component', virtual_key,
                                route_id = 'ibm-granite/granite-3.3-8b-instruct')
  10. [async] Probe GET /health?model=ibm-granite/granite-3.3-8b-instruct → UPDATE components.status = 'Running' or 'Error'
@@ -1614,8 +1615,8 @@ POST /api/v1/models
   8. [async] POST /key/generate → LiteLLM Admin API
             body: { "key_name": "ibm-granite/granite-3.3-8b-instruct",
                     "models": ["ibm-granite/granite-3.3-8b-instruct"],
-                    "tags": ["ibm-granite/granite-3.3-8b-instruct"],
-                    "duration": null }
+                    "duration": null,
+                    "metadata": { "tags": ["vllm-spyre"] } }
   9. [async] INSERT into keys (dependency_id = component id, dependency_type = 'component', virtual_key,
                                route_id = 'ibm-granite/granite-3.3-8b-instruct')
  10. [async] Probe GET /health?model=ibm-granite/granite-3.3-8b-instruct → UPDATE components.status = 'Running' or 'Error'
@@ -1645,8 +1646,8 @@ POST /api/v1/models          (deployment_type=remote)
   4. Run connectivity probe via LiteLLM GET /health?model=ibm/granite-4-h-small → if fails, DELETE /model/delete and return 422
   5. POST /key/generate { key_name: "ibm/granite-4-h-small",
                           models: ["ibm/granite-4-h-small"],
-                          tags: ["ibm/granite-4-h-small"],
-                          duration: null } → per-model virtual key
+                          duration: null,
+                          metadata: { tags: ["watsonx"] } } → per-model virtual key
   6. INSERT into connectors (name='prod-watsonx', type=llm, provider=watsonx,
                              status='connected', created_by=<user>,
                              metadata={model_name: ...,        ← from request params.model_name
@@ -1685,8 +1686,8 @@ POST /api/v1/applications
               remote worker → register mTLS ingress on worker Caddy :8443
                             → register mTLS egress on CP Caddy :8080
                             → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>
-          → POST /model/new to LiteLLM (model_name=modelName, api_base=apiBase, tags=[modelName])
-        → generate per-app virtual key: POST /key/generate {key_name: modelName, models:[modelName], tags:[modelName]}
+          → POST /model/new to LiteLLM (model_name=modelName, api_base=apiBase, model_info.tags=[providerID])
+        → generate per-app virtual key: POST /key/generate {key_name: modelName, models:[modelName], duration:null, metadata:{tags:[providerID]}}
         → injectLiteLLMIntoServices:
             svc.Values["litellm"]["key"] = appVirtualKey
             svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"] → LiteLLM coordinates
@@ -1732,9 +1733,9 @@ POST /api/v1/applications
           local → apiBase = http://<pod-name>:8000
           remote → register mTLS ingress + egress Caddy routes
                  → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>
-      POST /model/new to LiteLLM (model_name=modelName, api_base=apiBase, tags=[modelName])
+      POST /model/new to LiteLLM (model_name=modelName, api_base=apiBase, model_info.tags=[providerID])
       KeyRepo.GetByDependency('component', componentID) → nil → generate model key → INSERT keys row
-      generate per-app virtual key → POST /key/generate {key_name: modelName, models:[modelName], tags:[modelName]}
+      generate per-app virtual key → POST /key/generate {key_name: modelName, models:[modelName], duration:null, metadata:{tags:[providerID]}}
       injectLiteLLMIntoServices → svc.Values["litellm"]["key"] = appVirtualKey
                                 → svc.Values["llm"]["host/port/prefixPath/model"] = LiteLLM coords
 
@@ -1819,7 +1820,7 @@ POST /api/v1/applications
   executeDeploymentAsync → resolveModelsAndPrepareKeys:
     modelName = connectors.metadata.model_name  (e.g. "ibm/granite-4-h-small")
     The route is already registered with LiteLLM at connector create time — no POST /model/new here.
-    generate per-app virtual key → POST /key/generate {key_name: modelName, models: [modelName], tags: [modelName]}
+    generate per-app virtual key → POST /key/generate {key_name: modelName, models: [modelName], duration: null, metadata: {tags: [providerID]}}
     injectLiteLLMIntoServices:
       svc.Values["litellm"]["key"] = appVirtualKey
       svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"=modelName] → LiteLLM coordinates

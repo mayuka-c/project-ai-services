@@ -408,27 +408,28 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
 	log("registering LiteLLM route for model %q api_base=%s", modelName, apiBase)
 
-	litellmModelID, err := s.registerLiteLLMRoute(ctx, modelName, req.ProviderID, apiBase, req.Type)
+	// routeName is "{modelName}--{providerID}" — this is what consumers use as the model field.
+	routeName, err := s.registerLiteLLMRoute(ctx, modelName, req.ProviderID, apiBase, req.Type)
 	if err != nil {
 		fail(fmt.Sprintf("LiteLLM route registration failed: %v", err))
 		return
 	}
 
 	// ── Step 5: generate and persist the per-model virtual key ────────────────
-	log("generating virtual key for model %q", modelName)
+	log("generating virtual key for route %q", routeName)
 
-	virtualKey, err := s.generateVirtualKey(ctx, modelName, req.ProviderID)
+	virtualKey, err := s.generateVirtualKey(ctx, routeName, req.ProviderID)
 	if err != nil {
 		fail(fmt.Sprintf("virtual key generation failed: %v", err))
 		return
 	}
 
-	// RouteID stores the LiteLLM-assigned model UUID — used by deleteLiteLLMRoute on undeploy.
+	// RouteID stores the route name ("{modelName}--{providerID}") — used by deleteLiteLLMRoute on undeploy.
 	if err := s.keyRepo.Insert(ctx, &dbmodels.Key{
 		DependencyID:   componentID,
 		DependencyType: dbmodels.DependencyTypeComponent,
 		VirtualKey:     virtualKey,
-		RouteID:        litellmModelID,
+		RouteID:        routeName,
 	}); err != nil {
 		fail(fmt.Sprintf("failed to persist virtual key: %v", err))
 		return
@@ -695,12 +696,14 @@ func (s *ModelService) allocateSpyreCards(
 
 // registerLiteLLMRoute calls POST /model/new on the LiteLLM Admin API.
 //
-//   - model_name:  the full model name from params.model (e.g. "ibm-granite/granite-3.3-8b-instruct")
-//   - model:       "hosted_vllm/{modelName}"
-//   - api_base:    internal pod URL or worker Caddy URL — must include /v1 suffix (hosted_vllm does not prepend it)
-//   - tags:        [providerID] — inside model_info, enables tag-based routing
-// Returns the LiteLLM-assigned model UUID from model_info.id in the response.
+// The route name is "{modelName}--{providerID}" (e.g. "ibm-granite/granite-3.3-8b-instruct--vllm-cpu").
+// Consumers pass this exact string as the model field. Tags are also set on the route
+// (both litellm_params.tags and model_info.tags) for observability and as a fallback
+// routing mechanism.
+// Returns the route name (used as RouteID for later deletion).
 func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, providerID, apiBase, componentType string) (string, error) {
+	routeName := modelName + "--" + providerID
+
 	modelInfo := map[string]any{
 		"enable_tag_filtering": true,
 		"tags":                 []string{providerID},
@@ -710,10 +713,11 @@ func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, prov
 	}
 
 	payload := map[string]any{
-		"model_name": modelName,
+		"model_name": routeName,
 		"litellm_params": map[string]any{
-			"model":    "hosted_vllm/" + modelName,
+			"model":    "hosted_vllm/" + routeName,
 			"api_base": apiBase,
+			"tags":     []string{providerID},
 		},
 		"model_info": modelInfo,
 	}
@@ -729,7 +733,7 @@ func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, prov
 	if result.ModelInfo.ID == "" {
 		return "", fmt.Errorf("/model/new response contained no model_info.id")
 	}
-	return result.ModelInfo.ID, nil
+	return routeName, nil
 }
 
 // litellmModeForType returns the LiteLLM model_info.mode value for the given
@@ -762,16 +766,16 @@ func (s *ModelService) deleteLiteLLMRoute(ctx context.Context, litellmModelID st
 }
 
 // generateVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns the
-// virtual key string scoped to modelName. providerID is included in metadata.tags so
-// LiteLLM can route the key to the correct provider.
-func (s *ModelService) generateVirtualKey(ctx context.Context, modelName, providerID string) (string, error) {
+// virtual key string scoped to modelName.
+// metadata.tags is deliberately NOT set on the key — the routing tag must come from the
+// per-request metadata.tags so the caller controls which provider to route to. A tag
+// baked into the key would override or merge with the request tag, causing all requests
+// made with that key to be pinned to the provider it was generated for.
+func (s *ModelService) generateVirtualKey(ctx context.Context, modelName, _ string) (string, error) {
 	payload := map[string]any{
 		"key_name": modelName,
 		"models":   []string{modelName},
 		"duration": nil,
-		"metadata": map[string]any{
-			"tags": []string{providerID},
-		},
 	}
 
 	body, err := json.Marshal(payload)
