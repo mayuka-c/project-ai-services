@@ -265,7 +265,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	}
 
 	modelName, _ := req.Params["model"].(string)
-	routeID := buildRouteID(modelName, req.ProviderID)
+	routeID := buildRouteID(path.Base(modelName), req.ProviderID)
 
 	// Caddy @id values must be unique across all deployments — two workers (or
 	// two deploys of the same model) must not share a Caddy route ID.
@@ -321,8 +321,17 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	//
 	// Local worker path:
 	//   LiteLLM reaches the vLLM pod directly via pod DNS name on plain HTTP.
-	var apiBase string
+	//   workerID is always non-nil (even for Local — it stores the Local worker's
+	//   DB UUID), so we check the resolved worker name to distinguish the two paths.
+	resolvedWorkerName := workerconstants.LocalWorkerName
 	if workerID != nil {
+		if name, _ := s.workerRegistry.WorkerInfoByID(ctx, *workerID); name != "" {
+			resolvedWorkerName = name
+		}
+	}
+
+	var apiBase string
+	if workerID != nil && resolvedWorkerName != workerconstants.LocalWorkerName {
 		remoteRT, ok := rt.(*remoteruntime.RemoteRuntime)
 		if !ok {
 			fail(fmt.Sprintf("expected RemoteRuntime for remote worker, got %T", rt))
@@ -391,8 +400,9 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		// LiteLLM api_base: plain HTTP to local CP Caddy egress :8080.
 		// CP Caddy matches the prefix and forwards the full path (no strip) to
 		// worker Caddy :8443 over mTLS. Worker Caddy strips the prefix, leaving
-		// /v1/... for the vLLM pod. The /v1 here is included so LiteLLM appends
-		// /chat/completions etc. at the right point in the path.
+		// the bare path for the vLLM pod.
+		// No /v1 suffix — LiteLLM appends the correct versioned path itself
+		// (/v1/chat/completions, /v1/embeddings, /v2/rerank, etc.).
 		caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
 		caddyHost := "ai-services--caddy"
 		if caddyAdminURL != "" {
@@ -400,10 +410,11 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 				caddyHost = u.Hostname()
 			}
 		}
-		apiBase = fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix)
+		apiBase = fmt.Sprintf("http://%s:%s%s", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix)
 	} else {
 		// Local deploy: LiteLLM reaches the vLLM pod directly via pod DNS name.
-		apiBase = fmt.Sprintf("http://%s:8000/v1", podHost)
+		// No /v1 suffix — LiteLLM appends the correct versioned path itself.
+		apiBase = fmt.Sprintf("http://%s:8000", podHost)
 	}
 
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
@@ -1048,9 +1059,11 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 
 	// Caddy route ID: routeID + component UUID short prefix (disambiguates concurrent deploys).
 	caddyRouteID := routeID + "--" + c.ID.String()[:8]
-	// Step 1: deregister Caddy routes (worker ingress + CP egress) for remote deploys.
+	// Step 1: deregister Caddy routes (worker ingress + CP egress) for remote deploys only.
+	// Local worker deployments go directly to the pod — no Caddy routes are registered for them.
 	if c.WorkerID != nil {
-		if workerName, ok := s.workerRegistry.WorkerNameByID(*c.WorkerID); ok && workerName != "" {
+		if workerName, ok := s.workerRegistry.WorkerNameByID(*c.WorkerID); ok &&
+			workerName != "" && workerName != workerconstants.LocalWorkerName {
 			// Unregister worker ingress route.
 			if rt, err := s.buildRuntime(ctx, c.WorkerID); err == nil {
 				if remoteRT, ok := rt.(*remoteruntime.RemoteRuntime); ok {

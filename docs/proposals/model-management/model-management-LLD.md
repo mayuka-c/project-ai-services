@@ -16,6 +16,7 @@
    - [Route Registration](#route-registration)
    - [Virtual Key Provisioning](#virtual-key-provisioning)
    - [WatsonX via Connector](#watsonx-via-connector)
+   - [Tokenize Passthrough](#tokenize-passthrough)
 4. [New Concepts](#4-new-concepts)
    - [4.1 Models](#41-models)
    - [4.2 Connectors](#42-connectors)
@@ -341,6 +342,86 @@ Content-Type: application/json
 | `api_base` | `params.api_base` |
 | `api_key` | `params.api_key` — passed to LiteLLM at registration; **never stored in Catalog DB** |
 | `project_id` | `params.project_id` |
+
+### Tokenize Passthrough
+
+LiteLLM does not natively proxy the vLLM `/tokenize` endpoint. This endpoint is used by consumer services to count tokens against a specific model's tokenizer — the result directly drives context-window budget calculations and prompt truncation. Because tokenization is model-specific (each model has its own vocabulary and BPE merges), each service must call `/tokenize` against the correct model's tokenizer.
+
+#### Services and their `/tokenize` dependency
+
+| Service | Tokenizer model used | Why |
+|---|---|---|
+| **chatbot** | LLM model | Token-budget context building (`query_vllm_payload`), history truncation, query rephrasing length calculation |
+| **summarize** | LLM model | Input token count, chunk sizing, merge-window validation |
+| **translate** | LLM model | Input length check, chunk budget calculation |
+| **extract** | LLM model | Prompt overhead calculation, schema-fit validation |
+| **chatbot** (query validation) | Embedding model | Measures query length against the embedding model's token limit |
+| **digitize** | Embedding model | Measures chunk length against the embedding model's token limit |
+
+#### LiteLLM passthrough configuration
+
+To make `/tokenize` reachable through the LiteLLM gateway, a **passthrough endpoint** must be registered **per route ID** — one for the LLM route and one for the embedding route. The passthrough is keyed on the route ID, not on individual pod instances. If multiple pod instances serve the same route ID (e.g. for redundancy), the `target` points to any one of them — LiteLLM load-balances inference calls across instances itself, but passthrough targets are static. LiteLLM forwards passthrough requests directly to the `target` URL without authentication or transformation.
+
+Because multiple route IDs would otherwise all register the same `/tokenize` path — causing conflicts — the path must be **scoped per route ID**:
+
+```
+/tokenize/<route-id>   →   http://<vllm-pod>:8000/tokenize
+```
+
+Consumer services set their tokenize base URL to `https://<litellm-host>/tokenize/<route-id>` and the existing code appends nothing further — [`tokenize_with_llm()`](services/common/llm_utils.py:626) posts directly to the full URL passed to it.
+
+Register a passthrough entry per route ID at deploy time:
+
+```bash
+# LLM model route
+curl -X POST "https://<litellm-host>/config/pass_through_endpoint" \
+  -H "Authorization: Bearer <LITELLM_MASTER_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "granite-3.3-8b-instruct--vllm-spyre-tokenize",
+    "path": "/tokenize/granite-3.3-8b-instruct--vllm-spyre",
+    "target": "http://<llm-pod-host>:8000/tokenize",
+    "methods": ["POST"],
+    "auth": false
+  }'
+
+# Embedding model route
+curl -X POST "https://<litellm-host>/config/pass_through_endpoint" \
+  -H "Authorization: Bearer <LITELLM_MASTER_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "bge-m3--vllm-spyre-tokenize",
+    "path": "/tokenize/bge-m3--vllm-spyre",
+    "target": "http://<emb-pod-host>:8000/tokenize",
+    "methods": ["POST"],
+    "auth": false
+  }'
+```
+
+| Field | Value |
+|---|---|
+| `id` | `<route-id>-tokenize` — unique per registered model route (e.g. `granite-3.3-8b-instruct--vllm-spyre-tokenize`) |
+| `path` | `/tokenize/<route-id>` — scoped path, unique per route, avoids conflicts when multiple models are registered |
+| `target` | Direct URL of the backing vLLM pod's `/tokenize` endpoint |
+| `methods` | `["POST"]` |
+| `auth` | `false` — no bearer token is forwarded to the upstream vLLM pod |
+
+#### Lifecycle
+
+Register the passthrough at the same time as the LiteLLM model route (`POST /model/new`). Deregister it when the model is undeployed, alongside the model route deletion (`DELETE /model/delete`).
+
+#### Consumer service configuration
+
+Each consumer service must be configured with the **route-scoped tokenize URL** for the model it measures against:
+
+| Config variable | Example value |
+|---|---|
+| `LLM_ENDPOINT` | `https://litellm:4000` (inference — unchanged) |
+| `LLM_TOKENIZE_ENDPOINT` | `https://litellm:4000/tokenize/granite-3.3-8b-instruct--vllm-spyre` |
+| `EMB_ENDPOINT` | `https://litellm:4000` (embeddings — unchanged) |
+| `EMB_TOKENIZE_ENDPOINT` | `https://litellm:4000/tokenize/bge-m3--vllm-spyre` |
+
+> **Note:** This requires a code change in [`tokenize_with_llm()`](services/common/llm_utils.py:626) — callers must pass the full scoped tokenize URL rather than the inference base URL. Alternatively, services can continue pointing their tokenize calls directly at the vLLM pod URL, bypassing LiteLLM entirely for `/tokenize`. Both approaches are valid; the scoped-path approach is preferred when all traffic must flow through the gateway.
 
 ---
 
