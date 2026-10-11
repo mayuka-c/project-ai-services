@@ -304,7 +304,7 @@ func (s *ModelService) rollbackConnectorRoute(ctx context.Context, modelName, vi
 // registerConnectorRoute calls POST /model/new for a remote connector.
 // modelName is the full model identifier (e.g. "ibm/granite-4-h-small") used directly
 // as LiteLLM model_name. litellm_params.model is "{provider_id}/{model_name}".
-// providerID (e.g. "watsonx") is passed as the top-level tag for tag-based routing.
+// providerID (e.g. "watsonx") is passed inside model_info for tag-based routing.
 func (s *ModelService) registerConnectorRoute(ctx context.Context, modelName, providerID string, params map[string]any) error {
 	litellmParams := make(map[string]any, len(params))
 	for k, v := range params {
@@ -315,10 +315,12 @@ func (s *ModelService) registerConnectorRoute(ctx context.Context, modelName, pr
 	litellmParams["model"] = fmt.Sprintf("%s/%v", providerID, params["model_name"])
 
 	payload := map[string]any{
-		"model_name":           modelName,
-		"litellm_params":       litellmParams,
-		"enable_tag_filtering": true,
-		"tags":                 []string{providerID},
+		"model_name":     modelName,
+		"litellm_params": litellmParams,
+		"model_info": map[string]any{
+			"enable_tag_filtering": true,
+			"tags":                 []string{providerID},
+		},
 	}
 
 	return s.litellmPost(ctx, "/model/new", payload)

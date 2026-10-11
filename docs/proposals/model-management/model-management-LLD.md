@@ -153,8 +153,10 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
     "model": "hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
     "api_base": "http://llm-52db58ac5a:8000/v1"
   },
-  "enable_tag_filtering": true,
-  "tags": ["vllm-cpu"]
+  "model_info": {
+    "enable_tag_filtering": true,
+    "tags": ["vllm-cpu"]
+  }
 }
 ```
 
@@ -162,7 +164,7 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 > - `model_name` is the full model name as configured in `params.model` — no provider suffix. This is exactly what consumer services pass in the `model` field.
 > - `model` uses the `hosted_vllm/<model-name>` prefix — LiteLLM infers the provider from the prefix. No separate `custom_llm_provider` field and no `api_key` are needed for local vLLM endpoints.
 > - `api_base` for **llm** and **embedding** routes **must** include a `/v1` suffix (e.g. `http://llm-52db58ac5a:8000/v1`). The `hosted_vllm` provider does not prepend it automatically — omitting it causes LiteLLM to call `/chat/completions` directly, which vLLM does not serve, resulting in a `404`. For **reranker** routes, use the **bare** base URL (no `/v1`) — the Cohere `ClientV2` constructs `/v2/rerank` itself from the base.
-> - `enable_tag_filtering` and `tags` are **top-level fields** on the `/model/new` request body, not nested inside `litellm_params`.
+> - `enable_tag_filtering` and `tags` are nested inside the **`model_info`** block on the `/model/new` request body — not at the top level and not inside `litellm_params`.
 > - `tags` carries the **provider ID** (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`). Consumer services pass the same provider ID in `metadata.tags` on inference requests so LiteLLM routes to the correct backend.
 > - For **embedding** and **reranker** component types, a `model_info` block is also included to tell LiteLLM the routing mode: `{ "model_info": { "mode": "embedding" } }` or `{ "model_info": { "mode": "rerank" } }`. This is omitted for `llm` type routes.
 
@@ -1914,7 +1916,7 @@ Routes are registered with `enable_tag_filtering: true` and a top-level `tags: [
 |---|---|---|
 | Consumer `model` field | `"ibm-granite/granite-3.3-8b-instruct--vllm-spyre"` | `"ibm-granite/granite-3.3-8b-instruct"` |
 | Provider communicated via | Encoded in model name string | `metadata.tags: ["vllm-cpu"]` in the request body |
-| `tags` field on `/model/new` | Inside `litellm_params` | Top-level field alongside `enable_tag_filtering: true` |
+| `tags` field on `/model/new` | Inside `litellm_params` | Inside `model_info` block (`model_info.tags`, `model_info.enable_tag_filtering`) |
 | Tag value | Full model name | Provider ID (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`) |
 | Stored in Catalog DB | `model_id` in `components.metadata` + derived string in `keys.route_id` | Only LiteLLM model UUID in `keys.route_id` |
 | Swap provider (e.g. cpu → spyre) | Consumer model name config must change | Consumer updates `metadata.tags` only — `model` field unchanged |

@@ -408,7 +408,8 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
 	log("registering LiteLLM route for model %q api_base=%s", modelName, apiBase)
 
-	if err := s.registerLiteLLMRoute(ctx, modelName, req.ProviderID, apiBase, req.Type); err != nil {
+	litellmModelID, err := s.registerLiteLLMRoute(ctx, modelName, req.ProviderID, apiBase, req.Type)
+	if err != nil {
 		fail(fmt.Sprintf("LiteLLM route registration failed: %v", err))
 		return
 	}
@@ -422,11 +423,12 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		return
 	}
 
+	// RouteID stores the LiteLLM-assigned model UUID — used by deleteLiteLLMRoute on undeploy.
 	if err := s.keyRepo.Insert(ctx, &dbmodels.Key{
 		DependencyID:   componentID,
 		DependencyType: dbmodels.DependencyTypeComponent,
 		VirtualKey:     virtualKey,
-		RouteID:        modelName,
+		RouteID:        litellmModelID,
 	}); err != nil {
 		fail(fmt.Sprintf("failed to persist virtual key: %v", err))
 		return
@@ -696,25 +698,38 @@ func (s *ModelService) allocateSpyreCards(
 //   - model_name:  the full model name from params.model (e.g. "ibm-granite/granite-3.3-8b-instruct")
 //   - model:       "hosted_vllm/{modelName}"
 //   - api_base:    internal pod URL or worker Caddy URL — must include /v1 suffix (hosted_vllm does not prepend it)
-//   - tags:        [providerID] — top-level, enables tag-based routing; consumers pass providerID in metadata.tags
-func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, providerID, apiBase, componentType string) error {
+//   - tags:        [providerID] — inside model_info, enables tag-based routing
+// Returns the LiteLLM-assigned model UUID from model_info.id in the response.
+func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, providerID, apiBase, componentType string) (string, error) {
+	modelInfo := map[string]any{
+		"enable_tag_filtering": true,
+		"tags":                 []string{providerID},
+	}
+	if mode := litellmModeForType(componentType); mode != "" {
+		modelInfo["mode"] = mode
+	}
+
 	payload := map[string]any{
 		"model_name": modelName,
 		"litellm_params": map[string]any{
 			"model":    "hosted_vllm/" + modelName,
 			"api_base": apiBase,
 		},
-		"enable_tag_filtering": true,
-		"tags":                 []string{providerID},
+		"model_info": modelInfo,
 	}
 
-	if mode := litellmModeForType(componentType); mode != "" {
-		payload["model_info"] = map[string]any{
-			"mode": mode,
-		}
+	var result struct {
+		ModelInfo struct {
+			ID string `json:"id"`
+		} `json:"model_info"`
 	}
-
-	return s.litellmPost(ctx, "/model/new", payload)
+	if err := s.litellmPostResult(ctx, "/model/new", payload, &result); err != nil {
+		return "", err
+	}
+	if result.ModelInfo.ID == "" {
+		return "", fmt.Errorf("/model/new response contained no model_info.id")
+	}
+	return result.ModelInfo.ID, nil
 }
 
 // litellmModeForType returns the LiteLLM model_info.mode value for the given
@@ -740,9 +755,10 @@ func litellmAPIVersionSuffix(componentType string) string {
 	return "/v1"
 }
 
-// deleteLiteLLMRoute calls DELETE /model/delete on the LiteLLM Admin API by model_name.
-func (s *ModelService) deleteLiteLLMRoute(ctx context.Context, modelName string) error {
-	return s.litellmPost(ctx, "/model/delete", map[string]any{"model_name": modelName})
+// deleteLiteLLMRoute calls POST /model/delete on the LiteLLM Admin API using the
+// LiteLLM-assigned model UUID (stored in keys.route_id at registration time).
+func (s *ModelService) deleteLiteLLMRoute(ctx context.Context, litellmModelID string) error {
+	return s.litellmPost(ctx, "/model/delete", map[string]any{"id": litellmModelID})
 }
 
 // generateVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns the
@@ -798,8 +814,14 @@ func (s *ModelService) revokeVirtualKey(ctx context.Context, virtualKey string) 
 	return s.litellmPost(ctx, "/key/delete", map[string]any{"keys": []string{virtualKey}})
 }
 
-// litellmPost marshals payload and POSTs it to the LiteLLM Admin API.
+// litellmPost marshals payload and POSTs it to the LiteLLM Admin API, discarding the response body.
 func (s *ModelService) litellmPost(ctx context.Context, path string, payload any) error {
+	return s.litellmPostResult(ctx, path, payload, nil)
+}
+
+// litellmPostResult marshals payload, POSTs it to the LiteLLM Admin API, and JSON-decodes
+// the response body into result (when result is non-nil).
+func (s *ModelService) litellmPostResult(ctx context.Context, path string, payload any, result any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal payload for %s: %w", path, err)
@@ -819,7 +841,14 @@ func (s *ModelService) litellmPost(ctx context.Context, path string, payload any
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s returned HTTP %d", path, resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s returned HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	if result != nil {
+		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+			return fmt.Errorf("failed to decode response from %s: %w", path, err)
+		}
 	}
 
 	return nil
@@ -1083,25 +1112,29 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 		}
 	}
 
-	// Step 2: deregister LiteLLM route.
-	log("deregistering LiteLLM route for model %q", modelName)
-	if err := s.deleteLiteLLMRoute(ctx, modelName); err != nil {
-		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to deregister model %q (continuing): %v", c.ID, modelName, err)
-	}
-
-	// Step 3: revoke virtual key.
+	// Step 2: deregister LiteLLM route + revoke virtual key.
+	// RouteID holds the LiteLLM-assigned model UUID stored at registration time.
 	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeComponent, c.ID)
 	if err != nil {
 		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to fetch virtual key (continuing): %v", c.ID, err)
 	}
 	if key != nil {
+		log("deregistering LiteLLM route id=%q for model %q", key.RouteID, modelName)
+		if err := s.deleteLiteLLMRoute(ctx, key.RouteID); err != nil {
+			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to deregister LiteLLM route (continuing): %v", c.ID, err)
+		}
 		log("revoking virtual key for model %q", modelName)
 		if err := s.revokeVirtualKey(ctx, key.VirtualKey); err != nil {
 			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to revoke virtual key (continuing): %v", c.ID, err)
 		}
-		// Step 3: delete keys row.
 		if err := s.keyRepo.DeleteByDependency(ctx, dbmodels.DependencyTypeComponent, c.ID); err != nil {
 			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to delete keys row (continuing): %v", c.ID, err)
+		}
+	} else {
+		// No key row — best-effort delete by model name as fallback.
+		log("no key row found; attempting LiteLLM route deregistration by model name %q", modelName)
+		if err := s.deleteLiteLLMRoute(ctx, modelName); err != nil {
+			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to deregister LiteLLM route (continuing): %v", c.ID, err)
 		}
 	}
 
