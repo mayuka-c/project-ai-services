@@ -1406,8 +1406,8 @@ func (s *ApplicationServiceBase) buildPostComponentHook(plan *deployment.Deploym
 func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deployment.DeploymentPlan, podHost string, componentID uuid.UUID, caddyRouteID string) (string, error) {
 	if plan.WorkerName == workerconstants.LocalWorkerName {
 		// Local: LiteLLM → vLLM pod directly.
-		// No /v1 suffix — LiteLLM appends the correct versioned path itself.
-		return fmt.Sprintf("http://%s:8000", podHost), nil
+		// /v1 is included because hosted_vllm does NOT prepend it automatically.
+		return fmt.Sprintf("http://%s:8000/v1", podHost), nil
 	}
 
 	// Remote worker — needs mTLS Caddy routes exactly as model_service does.
@@ -1468,7 +1468,9 @@ func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deplo
 	}
 
 	// LiteLLM api_base: plain HTTP to local CP Caddy egress :8080.
-	// No /v1 suffix — LiteLLM appends the correct versioned path itself.
+	// /v1 is included because hosted_vllm does NOT prepend it automatically.
+	// CP Caddy forwards the full path (prefix + /v1/...) to worker Caddy :8443,
+	// which strips the prefix and passes /v1/... through to vLLM :8000.
 	caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
 	caddyHost := "ai-services--caddy"
 	if caddyAdminURL != "" {
@@ -1476,7 +1478,7 @@ func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deplo
 			caddyHost = u.Hostname()
 		}
 	}
-	return fmt.Sprintf("http://%s:%s%s", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix), nil
+	return fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix), nil
 }
 
 // handleNewlyDeployedModel performs LiteLLM registration, DB key persistence, and per-app

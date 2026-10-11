@@ -387,11 +387,10 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		}
 
 		// LiteLLM api_base: plain HTTP to local CP Caddy egress :8080.
-		// CP Caddy matches the prefix and forwards the full path (no strip) to
-		// worker Caddy :8443 over mTLS. Worker Caddy strips the prefix, leaving
-		// the bare path for the vLLM pod.
-		// No /v1 suffix — LiteLLM appends the correct versioned path itself
-		// (/v1/chat/completions, /v1/embeddings, /v2/rerank, etc.).
+		// CP Caddy matches the prefix and forwards the full path (prefix + /v1/...) to
+		// worker Caddy :8443 over mTLS. Worker Caddy strips the path prefix, leaving
+		// /v1/... for the vLLM pod.
+		// /v1 is included in api_base because hosted_vllm does NOT prepend it automatically.
 		caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
 		caddyHost := "ai-services--caddy"
 		if caddyAdminURL != "" {
@@ -399,11 +398,11 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 				caddyHost = u.Hostname()
 			}
 		}
-		apiBase = fmt.Sprintf("http://%s:%s%s", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix)
+		apiBase = fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix)
 	} else {
 		// Local deploy: LiteLLM reaches the vLLM pod directly via pod DNS name.
-		// No /v1 suffix — LiteLLM appends the correct versioned path itself.
-		apiBase = fmt.Sprintf("http://%s:8000", podHost)
+		// /v1 is included because hosted_vllm does NOT prepend it automatically.
+		apiBase = fmt.Sprintf("http://%s:8000/v1", podHost)
 	}
 
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
@@ -696,7 +695,7 @@ func (s *ModelService) allocateSpyreCards(
 //
 //   - model_name:  the full model name from params.model (e.g. "ibm-granite/granite-3.3-8b-instruct")
 //   - model:       "hosted_vllm/{modelName}"
-//   - api_base:    internal pod URL or worker Caddy URL (no /v1 suffix)
+//   - api_base:    internal pod URL or worker Caddy URL — must include /v1 suffix (hosted_vllm does not prepend it)
 //   - tags:        [providerID] — top-level, enables tag-based routing; consumers pass providerID in metadata.tags
 func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, providerID, apiBase, componentType string) error {
 	payload := map[string]any{

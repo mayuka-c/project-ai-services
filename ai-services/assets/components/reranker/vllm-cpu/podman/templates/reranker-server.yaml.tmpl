@@ -25,14 +25,14 @@ spec:
       - /models/{{ .Values.model }}
       - --served-model-name
       - {{ .Values.model }}
-      - --port=8002
+      - --port=8000
       - --kv-cache-memory-bytes=0
       - --dtype=bfloat16
       - --max-model-len=1024
       livenessProbe:
         httpGet:
           path: /health
-          port: 8002
+          port: 8000
         initialDelaySeconds: 120
         periodSeconds: 30
         timeoutSeconds: 5
@@ -43,7 +43,7 @@ spec:
         limits:
           memory: "5Gi"
       ports:
-        - containerPort: 8002
+        - containerPort: 8000
       volumeMounts:
         - mountPath: /dev/shm
           name: dshm

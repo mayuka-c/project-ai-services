@@ -151,7 +151,7 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
   "model_name": "ibm-granite/granite-3.3-8b-instruct",
   "litellm_params": {
     "model": "hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
-    "api_base": "http://llm-52db58ac5a:8000"
+    "api_base": "http://llm-52db58ac5a:8000/v1"
   },
   "enable_tag_filtering": true,
   "tags": ["vllm-cpu"]
@@ -161,7 +161,7 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 > **Notes:**
 > - `model_name` is the full model name as configured in `params.model` — no provider suffix. This is exactly what consumer services pass in the `model` field.
 > - `model` uses the `hosted_vllm/<model-name>` prefix — LiteLLM infers the provider from the prefix. No separate `custom_llm_provider` field and no `api_key` are needed for local vLLM endpoints.
-> - `api_base` does **not** include a `/v1` suffix — LiteLLM appends the correct versioned path itself (`/v1/chat/completions`, `/v1/embeddings`, `/v2/rerank`, etc.).
+> - `api_base` **must** include a `/v1` suffix (e.g. `http://llm-52db58ac5a:8000/v1`). The `hosted_vllm` provider does not prepend it automatically — omitting it causes LiteLLM to call `/chat/completions` directly, which vLLM does not serve, resulting in a `404`.
 > - `enable_tag_filtering` and `tags` are **top-level fields** on the `/model/new` request body, not nested inside `litellm_params`.
 > - `tags` carries the **provider ID** (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`). Consumer services pass the same provider ID in `metadata.tags` on inference requests so LiteLLM routes to the correct backend.
 > - For **embedding** and **reranker** component types, a `model_info` block is also included to tell LiteLLM the routing mode: `{ "model_info": { "mode": "embedding" } }` or `{ "model_info": { "mode": "rerank" } }`. This is omitted for `llm` type routes.
