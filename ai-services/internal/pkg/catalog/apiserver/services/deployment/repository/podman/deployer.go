@@ -444,8 +444,9 @@ func (d *PodmanDeployer) deployComponent(ctx context.Context, hash string, comp 
 
 	if comp.PreDeployed {
 		logger.InfofCtx(ctx, "Component %s is pre-deployed (managed model reuse); skipping pod creation\n", comp.ComponentType)
-		// Endpoints were already populated by resolveModelComponent — just merge them.
-		d.mergeComponentEndpoints(ctx, comp, plan, mu)
+		// injectLiteLLMIntoServices already wrote the correct host/port/prefixPath into
+		// svc.Values during resolveModelsAndPrepareKeys — do NOT call mergeComponentEndpoints
+		// here, it would overwrite those values with the raw pod URL stored in comp.Endpoints.
 		return nil
 	}
 
