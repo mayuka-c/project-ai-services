@@ -762,15 +762,16 @@ func (s *ModelService) deleteLiteLLMRoute(ctx context.Context, litellmModelID st
 }
 
 // generateVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns the
-// virtual key string scoped to modelName.
-// providerID is intentionally not sent in tags here — the routing tag on the registered
-// route is sufficient for tag-based filtering. Sending an unrecognised tag in
-// /key/generate causes LiteLLM to return 403 on some versions.
-func (s *ModelService) generateVirtualKey(ctx context.Context, modelName, _ string) (string, error) {
+// virtual key string scoped to modelName. providerID is included in metadata.tags so
+// LiteLLM can route the key to the correct provider.
+func (s *ModelService) generateVirtualKey(ctx context.Context, modelName, providerID string) (string, error) {
 	payload := map[string]any{
 		"key_name": modelName,
 		"models":   []string{modelName},
 		"duration": nil,
+		"metadata": map[string]any{
+			"tags": []string{providerID},
+		},
 	}
 
 	body, err := json.Marshal(payload)

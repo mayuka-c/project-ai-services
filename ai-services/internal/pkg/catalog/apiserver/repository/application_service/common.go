@@ -141,15 +141,16 @@ func litellmPostApp(ctx context.Context, path string, payload any) error {
 }
 
 // generateAppVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns
-// a virtual key scoped to modelName.
-// providerID is intentionally not sent in tags — the routing tag on the registered
-// route is sufficient for tag-based filtering. Sending an unrecognised tag in
-// /key/generate causes LiteLLM to return 403 on some versions.
-func generateAppVirtualKey(ctx context.Context, keyName, modelName, _ string) (string, error) {
+// a virtual key scoped to modelName. providerID is included in metadata.tags so
+// LiteLLM can route the key to the correct provider.
+func generateAppVirtualKey(ctx context.Context, keyName, modelName, providerID string) (string, error) {
 	payload := map[string]any{
 		"key_name": keyName,
 		"models":   []string{modelName},
 		"duration": nil,
+		"metadata": map[string]any{
+			"tags": []string{providerID},
+		},
 	}
 
 	body, err := json.Marshal(payload)
