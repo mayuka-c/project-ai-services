@@ -215,8 +215,12 @@ func (d *PodmanDeployer) downloadModelsForDeployment(ctx context.Context, plan *
 func (d *PodmanDeployer) collectModelsFromPlan(ctx context.Context, plan *DeploymentPlan) map[string]bool {
 	modelSet := make(map[string]bool)
 
-	// Extract models from component params
+	// Extract models from component params — skip pre-deployed components,
+	// their model is already downloaded on the worker.
 	for _, comp := range plan.Components {
+		if comp.PreDeployed {
+			continue
+		}
 		// do not download models for watsonx
 		if strings.EqualFold(comp.ProviderID, "watsonx") {
 			logger.InfofCtx(ctx, "Skipping model download for provider: %s\n", comp.ProviderID)
@@ -304,8 +308,12 @@ func (d *PodmanDeployer) collectImagesFromPlan(ctx context.Context, plan *Deploy
 	// Include tool image which is used for all housekeeping tasks
 	imageSet[vars.ToolImage] = true
 
-	// Extract images from component templates
+	// Extract images from component templates — skip pre-deployed components,
+	// their image is already present on the worker.
 	for _, comp := range plan.Components {
+		if comp.PreDeployed {
+			continue
+		}
 		if err := d.extractImagesFromComponent(ctx, comp, imageSet); err != nil {
 			return nil, err
 		}
