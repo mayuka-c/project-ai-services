@@ -140,7 +140,7 @@ The LiteLLM DB runs on port **5433** to avoid conflict with the Catalog API's Po
 
 ### Route Registration
 
-When a model reaches `Running` status (pod healthy / connector validated), the platform registers a route via the LiteLLM Admin API.
+When a model reaches `Running` status (pod healthy / connector validated), the platform registers a route via the LiteLLM Admin API using **tag-based routing**. The provider suffix (`--vllm-spyre`, `--vllm-cpu`, etc.) is removed from the consumer-facing model identifier — consumer services call LiteLLM using the full model name as configured (e.g. `ibm-granite/granite-3.3-8b-instruct`), and LiteLLM selects a healthy route tagged with the provider ID.
 
 **Register (on deploy):**
 ```
@@ -148,25 +148,41 @@ POST http://litellm:4000/model/new
 Authorization: Bearer <LITELLM_MASTER_KEY>
 
 {
-  "model_name": "granite-3.3-8b-instruct--vllm-spyre",
+  "model_name": "ibm-granite/granite-3.3-8b-instruct",
   "litellm_params": {
     "model": "hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
-    "api_base": "http://my-rag-app--llm-granite:8000/v1"
-  }
+    "api_base": "http://llm-52db58ac5a:8000"
+  },
+  "enable_tag_filtering": true,
+  "tags": ["vllm-cpu"]
 }
 ```
 
-> **Note:** `model` uses the `hosted_vllm/<upstream-model-name>` prefix — LiteLLM infers the provider from the prefix. No separate `custom_llm_provider` field and no `api_key` are needed for local vLLM endpoints.
+> **Notes:**
+> - `model_name` is the full model name as configured in `params.model` — no provider suffix. This is exactly what consumer services pass in the `model` field.
+> - `model` uses the `hosted_vllm/<model-name>` prefix — LiteLLM infers the provider from the prefix. No separate `custom_llm_provider` field and no `api_key` are needed for local vLLM endpoints.
+> - `api_base` does **not** include a `/v1` suffix — LiteLLM appends the correct versioned path itself (`/v1/chat/completions`, `/v1/embeddings`, `/v2/rerank`, etc.).
+> - `enable_tag_filtering` and `tags` are **top-level fields** on the `/model/new` request body, not nested inside `litellm_params`.
+> - `tags` carries the **provider ID** (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`). Consumer services pass the same provider ID in `metadata.tags` on inference requests so LiteLLM routes to the correct backend.
+> - For **embedding** and **reranker** component types, a `model_info` block is also included to tell LiteLLM the routing mode: `{ "model_info": { "mode": "embedding" } }` or `{ "model_info": { "mode": "rerank" } }`. This is omitted for `llm` type routes.
 
 **Deregister (on undeploy):**
 ```
 DELETE http://litellm:4000/model/delete
 Authorization: Bearer <LITELLM_MASTER_KEY>
 
-{ "id": "granite-3.3-8b-instruct--vllm-spyre" }
+{ "model_name": "ibm-granite/granite-3.3-8b-instruct" }
 ```
 
-**Route ID convention:** The route ID registered in LiteLLM is `{model_name}--{provider}` (double-dash separator) — e.g. `granite-3.3-8b-instruct--vllm-spyre`. The double dash unambiguously separates the model name segment (which may itself contain single hyphens) from the provider segment. This is unique per deployed model and allows multiple models to coexist in the gateway simultaneously. Consumer services reference models by this ID.
+No UUID lookup needed — `model_name` is the stable, unique identifier for the route.
+
+**Tag-based routing convention:**
+
+Each registered route carries a single tag — the **provider ID** of the backing deployment (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`). The `model_name` is the full `params.model` value (e.g. `ibm-granite/granite-3.3-8b-instruct`, `BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`). Consumer services pass the model name in the `model` field and the provider ID in `metadata.tags` — LiteLLM selects a healthy route matching both. The provider identity is tracked via tags rather than being encoded in the model name.
+
+`enable_tag_filtering: true` is set on each route registration so LiteLLM enforces tag matching on every request — a request carrying `metadata.tags: ["vllm-cpu"]` will only reach routes tagged `vllm-cpu`.
+
+Since `model_name` is the full `params.model` value and is unique per model, there is no need to derive or store a route ID string in the Catalog DB.
 
 ### Virtual Key Provisioning
 
@@ -178,13 +194,14 @@ POST http://litellm:4000/key/generate
 Authorization: Bearer <LITELLM_MASTER_KEY>
 
 {
-  "key_name": "granite-3.3-8b-instruct--vllm-spyre",
-  "models": ["granite-3.3-8b-instruct--vllm-spyre"],
+  "key_name": "ibm-granite/granite-3.3-8b-instruct",
+  "models": ["ibm-granite/granite-3.3-8b-instruct"],
+  "tags": ["vllm-cpu"],
   "duration": null
 }
 ```
 
-`"key_name"` matches the route ID (`{model_name}--{provider}`). `"models"` scopes the key to that single route — attempts to call any other route with this key return `401`. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
+`"key_name"` matches the model name exactly. `"models"` scopes the key to routes registered under that model name — attempts to call any other model name return `401`. `"tags"` carries the **provider ID** (same value used in the route's top-level `tags` field) so LiteLLM's tag filtering applies consistently — the key can only reach routes tagged with the same provider ID. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
 
 **Storage — `keys` table in Catalog DB (local models and remote connectors):**
 
@@ -196,12 +213,13 @@ For remote connectors, the upstream credentials (`api_key` etc.) are still store
 
 ```sql
 -- After POST /key/generate succeeds for a local model:
+-- route_id stores the model name (= LiteLLM model_name = params.model).
 INSERT INTO keys (dependency_id, dependency_type, virtual_key, route_id)
-VALUES ('<components.id>', 'component', 'sk-...', 'granite-3.3-8b-instruct--vllm-spyre');
+VALUES ('<components.id>', 'component', 'sk-...', 'ibm-granite/granite-3.3-8b-instruct');
 
 -- After POST /key/generate succeeds for a remote model connector:
 INSERT INTO keys (dependency_id, dependency_type, virtual_key, route_id)
-VALUES ('<connectors.id>', 'connector', 'sk-...', 'granite-4-h-small--watsonx');
+VALUES ('<connectors.id>', 'connector', 'sk-...', 'ibm/granite-4-h-small');
 ```
 
 **Consumers of the virtual key:**
@@ -235,19 +253,24 @@ The `keys` array is the list of virtual key values (not key names) to revoke. On
 
 **Usage by consumer services:**
 
-Consumer services call the LiteLLM gateway with the per-model virtual key as a standard bearer token:
+Consumer services call the LiteLLM gateway with the per-model virtual key as a standard bearer token, passing the **provider ID** in `metadata.tags` so LiteLLM routes to the correct backend:
 
 ```
 POST http://litellm:4000/chat/completions
 Authorization: Bearer <virtual-key>
 
 {
-  "model": "granite-3.3-8b-instruct--vllm-spyre",
-  "messages": [{ "role": "user", "content": "Hello" }]
+  "model": "ibm-granite/granite-3.3-8b-instruct",
+  "messages": [{ "role": "user", "content": "Hello" }],
+  "metadata": {
+    "tags": ["vllm-cpu"]
+  }
 }
 ```
 
-Each consumer service fetches only the key(s) for the model(s) it uses via `GET /api/v1/models/keys?instance_id=<component_id>`. A service using granite does not fetch the key for an embedding model — principle of least privilege. The virtual key is the **only credential** needed for model access, regardless of whether the backing provider is a local vLLM pod or an external WatsonX connector.
+The `model` field is the **full model name** as configured — no provider suffix. `metadata.tags` carries the provider ID, which must match the tag on the registered route. LiteLLM uses `enable_tag_filtering` to enforce this — only routes tagged `vllm-cpu` are eligible to serve this request. Consumer services never need to embed the provider in the model name; only the `metadata.tags` field changes if the provider changes.
+
+Each consumer service fetches only the key(s) for the model(s) it uses via `GET /api/v1/models/keys?instance_id=<component_id>`. A service using an LLM does not fetch the key for an embedding model — principle of least privilege. The virtual key is the **only credential** needed for model access, regardless of whether the backing provider is a local vLLM pod or an external WatsonX connector.
 
 ### Probe Check
 
@@ -259,11 +282,11 @@ After every route registration, `modelmanager` fires a health probe against the 
 **Probe request:**
 
 ```
-GET http://litellm:4000/health?model=<route-id>
+GET http://litellm:4000/health?model=ibm-granite/granite-3.3-8b-instruct
 Authorization: Bearer <LITELLM_MASTER_KEY>
 ```
 
-The `model` query parameter is the route ID registered in the previous step (e.g. `granite-3.3-8b-instruct--vllm-spyre`).
+The `model` query parameter is the `model_name` registered in the previous step (i.e. the full model name from `params.model`, e.g. `ibm-granite/granite-3.3-8b-instruct`).
 
 **Healthy response — set `status = Running` (local) / `connected` (connector):**
 
@@ -326,13 +349,15 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 Content-Type: application/json
 
 {
-  "model_name": "granite-4-h-small--watsonx",
+  "model_name": "ibm/granite-4-h-small",
   "litellm_params": {
     "model": "watsonx/ibm/granite-4-h-small",
     "api_base": "https://us-south.ml.cloud.ibm.com",
     "api_key": "<params.api_key>",
     "project_id": "<params.project_id>"
-  }
+  },
+  "enable_tag_filtering": true,
+  "tags": ["watsonx"]
 }
 ```
 
@@ -360,38 +385,38 @@ LiteLLM does not natively proxy the vLLM `/tokenize` endpoint. This endpoint is 
 
 #### LiteLLM passthrough configuration
 
-To make `/tokenize` reachable through the LiteLLM gateway, a **passthrough endpoint** must be registered **per route ID** — one for the LLM route and one for the embedding route. The passthrough is keyed on the route ID, not on individual pod instances. If multiple pod instances serve the same route ID (e.g. for redundancy), the `target` points to any one of them — LiteLLM load-balances inference calls across instances itself, but passthrough targets are static. LiteLLM forwards passthrough requests directly to the `target` URL without authentication or transformation.
+To make `/tokenize` reachable through the LiteLLM gateway, a **passthrough endpoint** must be registered **per model** — one for the LLM model and one for the embedding model. The passthrough is keyed on the model name, not on individual pod instances. If multiple pod instances serve the same model (e.g. for redundancy), the `target` points to any one of them — LiteLLM load-balances inference calls across instances itself, but passthrough targets are static. LiteLLM forwards passthrough requests directly to the `target` URL without authentication or transformation.
 
-Because multiple route IDs would otherwise all register the same `/tokenize` path — causing conflicts — the path must be **scoped per route ID**:
+Because multiple models would otherwise all register the same `/tokenize` path — causing conflicts — the path must be **scoped per model name**:
 
 ```
-/tokenize/<route-id>   →   http://<vllm-pod>:8000/tokenize
+/tokenize/<sanitised-model-name>   →   http://<vllm-pod>:8000/tokenize
 ```
 
-Consumer services set their tokenize base URL to `https://<litellm-host>/tokenize/<route-id>` and the existing code appends nothing further — [`tokenize_with_llm()`](services/common/llm_utils.py:626) posts directly to the full URL passed to it.
+The model name is sanitised for use as a URL path segment (slashes replaced with dashes). Consumer services set their tokenize base URL to `https://<litellm-host>/tokenize/<sanitised-model-name>` and the existing code appends nothing further — [`tokenize_with_llm()`](services/common/llm_utils.py:626) posts directly to the full URL passed to it.
 
-Register a passthrough entry per route ID at deploy time:
+Register a passthrough entry per model at deploy time:
 
 ```bash
-# LLM model route
+# LLM model (ibm-granite/granite-3.3-8b-instruct → sanitised: ibm-granite-granite-3.3-8b-instruct)
 curl -X POST "https://<litellm-host>/config/pass_through_endpoint" \
   -H "Authorization: Bearer <LITELLM_MASTER_KEY>" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "granite-3.3-8b-instruct--vllm-spyre-tokenize",
-    "path": "/tokenize/granite-3.3-8b-instruct--vllm-spyre",
+    "id": "ibm-granite-granite-3.3-8b-instruct-tokenize",
+    "path": "/tokenize/ibm-granite-granite-3.3-8b-instruct",
     "target": "http://<llm-pod-host>:8000/tokenize",
     "methods": ["POST"],
     "auth": false
   }'
 
-# Embedding model route
+# Embedding model (BAAI/bge-m3 → sanitised: BAAI-bge-m3)
 curl -X POST "https://<litellm-host>/config/pass_through_endpoint" \
   -H "Authorization: Bearer <LITELLM_MASTER_KEY>" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "bge-m3--vllm-spyre-tokenize",
-    "path": "/tokenize/bge-m3--vllm-spyre",
+    "id": "BAAI-bge-m3-tokenize",
+    "path": "/tokenize/BAAI-bge-m3",
     "target": "http://<emb-pod-host>:8000/tokenize",
     "methods": ["POST"],
     "auth": false
@@ -400,8 +425,8 @@ curl -X POST "https://<litellm-host>/config/pass_through_endpoint" \
 
 | Field | Value |
 |---|---|
-| `id` | `<route-id>-tokenize` — unique per registered model route (e.g. `granite-3.3-8b-instruct--vllm-spyre-tokenize`) |
-| `path` | `/tokenize/<route-id>` — scoped path, unique per route, avoids conflicts when multiple models are registered |
+| `id` | `<sanitised-model-name>-tokenize` — unique per model (e.g. `ibm-granite-granite-3.3-8b-instruct-tokenize`) |
+| `path` | `/tokenize/<sanitised-model-name>` — scoped path, unique per model, avoids conflicts when multiple models are registered |
 | `target` | Direct URL of the backing vLLM pod's `/tokenize` endpoint |
 | `methods` | `["POST"]` |
 | `auth` | `false` — no bearer token is forwarded to the upstream vLLM pod |
@@ -412,14 +437,14 @@ Register the passthrough at the same time as the LiteLLM model route (`POST /mod
 
 #### Consumer service configuration
 
-Each consumer service must be configured with the **route-scoped tokenize URL** for the model it measures against:
+Each consumer service must be configured with the **model-scoped tokenize URL** for the model it measures against:
 
 | Config variable | Example value |
 |---|---|
 | `LLM_ENDPOINT` | `https://litellm:4000` (inference — unchanged) |
-| `LLM_TOKENIZE_ENDPOINT` | `https://litellm:4000/tokenize/granite-3.3-8b-instruct--vllm-spyre` |
+| `LLM_TOKENIZE_ENDPOINT` | `https://litellm:4000/tokenize/ibm-granite-granite-3.3-8b-instruct` |
 | `EMB_ENDPOINT` | `https://litellm:4000` (embeddings — unchanged) |
-| `EMB_TOKENIZE_ENDPOINT` | `https://litellm:4000/tokenize/bge-m3--vllm-spyre` |
+| `EMB_TOKENIZE_ENDPOINT` | `https://litellm:4000/tokenize/BAAI-bge-m3` |
 
 > **Note:** This requires a code change in [`tokenize_with_llm()`](services/common/llm_utils.py:626) — callers must pass the full scoped tokenize URL rather than the inference base URL. Alternatively, services can continue pointing their tokenize calls directly at the vLLM pod URL, bypassing LiteLLM entirely for `/tokenize`. Both approaches are valid; the scoped-path approach is preferred when all traffic must flow through the gateway.
 
@@ -696,7 +721,7 @@ CREATE TABLE keys (
     dependency_id   UUID            NOT NULL,   -- components.id or connectors.id
     dependency_type dependency_type NOT NULL CHECK (dependency_type IN ('component', 'connector')),
     virtual_key     TEXT            NOT NULL,   -- 'sk-...' value — treated as a secret; never logged
-    route_id        VARCHAR(255)    NOT NULL,   -- LiteLLM route ID, e.g. 'granite-3.3-8b-instruct--vllm-spyre'
+    route_id        VARCHAR(255)    NOT NULL,   -- model name = LiteLLM model_name, e.g. 'ibm-granite/granite-3.3-8b-instruct'
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
@@ -830,7 +855,7 @@ erDiagram
         UUID            dependency_id      "components.id or connectors.id (no FK)"
         dependency_type dependency_type    "component | connector"
         TEXT        virtual_key        "sk-… bearer token; never logged"
-        VARCHAR_255 route_id           "LiteLLM route ID"
+        VARCHAR_255 route_id           "model name = LiteLLM model_name"
         TIMESTAMPTZ created_at
     }
 
@@ -1404,7 +1429,7 @@ The `modelmanager` package validates `params` against the provider's asset schem
 ```json
 {
   "component_id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f",
-  "route_id": "granite-3.3-8b-instruct--vllm-spyre",
+  "route_id": "ibm-granite/granite-3.3-8b-instruct",
   "virtual_key": "sk-WJIFUdKHNK8Jv9Iqa8Bn9w"
 }
 ```
@@ -1516,14 +1541,18 @@ POST /api/v1/models
   4. Return 202 { id: components.id }
   5. [async] LocalRuntime.CreatePod → Render vllm-server.yaml.tmpl → podman kube play
   6. [async] Poll InspectPod until liveness probe passes
-  7. [async] POST /model/new to LiteLLM (model_name="granite-3.3-8b-instruct--vllm-spyre",
-                                        model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
-                                        api_base="http://<pod-name>:8000/v1")
-             route_id = "{sanitised model_name}--{provider_id}"  (e.g. granite-3.3-8b-instruct--vllm-spyre)
+  7. [async] POST /model/new to LiteLLM (model_name="ibm-granite/granite-3.3-8b-instruct",
+                                       model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
+                                       api_base="http://<pod-name>:8000",
+                                       tags=["ibm-granite/granite-3.3-8b-instruct"])
   8. [async] POST /key/generate → LiteLLM Admin API
-             body: { "key_name": "<route_id>", "models": ["<route_id>"], "duration": null }
-  9. [async] INSERT into keys (dependency_id = component id, dependency_type = 'component', virtual_key, route_id)
- 10. [async] Probe GET /health?model=<route_id> → UPDATE components.status = 'Running' or 'Error'
+            body: { "key_name": "ibm-granite/granite-3.3-8b-instruct",
+                    "models": ["ibm-granite/granite-3.3-8b-instruct"],
+                    "tags": ["ibm-granite/granite-3.3-8b-instruct"],
+                    "duration": null }
+  9. [async] INSERT into keys (dependency_id = component id, dependency_type = 'component', virtual_key,
+                               route_id = 'ibm-granite/granite-3.3-8b-instruct')
+ 10. [async] Probe GET /health?model=ibm-granite/granite-3.3-8b-instruct → UPDATE components.status = 'Running' or 'Error'
 ```
 
 ### Flow: Deploy vLLM (Podman + Spyre) — Remote Worker (`worker_selector=lpar-1`)
@@ -1552,14 +1581,18 @@ POST /api/v1/models
        WorkerGateway sends COMMAND_TYPE_CREATE_POD over gRPC stream to Worker Daemon
        Daemon: podman kube play vllm-server.yaml → pod starts on worker LPAR
   6. [async] Poll InspectPod (via gRPC COMMAND_TYPE_INSPECT_POD) until liveness probe passes
-  7. [async] POST /model/new to LiteLLM (model_name="granite-3.3-8b-instruct--vllm-spyre",
-                                        model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
-                                        api_base="https://worker-caddy-lpar-1:443/v1")
-             route_id = "{sanitised model_name}--{provider_id}"  (e.g. granite-3.3-8b-instruct--vllm-spyre)
+  7. [async] POST /model/new to LiteLLM (model_name="ibm-granite/granite-3.3-8b-instruct",
+                                       model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
+                                       api_base="http://ai-services--caddy:8080/worker/lpar-1/models/<caddyRouteID>",
+                                       tags=["ibm-granite/granite-3.3-8b-instruct"])
   8. [async] POST /key/generate → LiteLLM Admin API
-             body: { "key_name": "<route_id>", "models": ["<route_id>"], "duration": null }
-  9. [async] INSERT into keys (dependency_id = component id, dependency_type = 'component', virtual_key, route_id)
- 10. [async] Probe GET /health?model=<route_id> → UPDATE components.status = 'Running' or 'Error'
+            body: { "key_name": "ibm-granite/granite-3.3-8b-instruct",
+                    "models": ["ibm-granite/granite-3.3-8b-instruct"],
+                    "tags": ["ibm-granite/granite-3.3-8b-instruct"],
+                    "duration": null }
+  9. [async] INSERT into keys (dependency_id = component id, dependency_type = 'component', virtual_key,
+                               route_id = 'ibm-granite/granite-3.3-8b-instruct')
+ 10. [async] Probe GET /health?model=ibm-granite/granite-3.3-8b-instruct → UPDATE components.status = 'Running' or 'Error'
 ```
 
 ### Flow: Register WatsonX Connector — remote (no pod)
@@ -1577,21 +1610,25 @@ POST /api/v1/models          (deployment_type=remote)
   1. Validate request fields (name uniqueness, required params)
   2. No pod, no pre-flight resource check
   3. POST /model/new to LiteLLM Gateway (passing sensitive params, e.g. api_key, directly — never stored in Catalog DB)
-             route_id = "{last path segment of params.model_name}--{provider_id}"  (e.g. granite-4-h-small--watsonx)
-             body: { model_name: route_id,
-                     litellm_params: { model:      "watsonx/ibm/granite-4-h-small",   ← "{provider_id}/{params.model_name}"
-                                       api_base:   params.api_base,
-                                       api_key:    params.api_key,
-                                       project_id: params.project_id } }
-  4. Run connectivity probe via LiteLLM GET /health?model=<route_id> → if fails, DELETE /model/delete and return 422
-  5. POST /key/generate {key_name: route_id, models: [route_id], duration: null} → per-model virtual key
+            body: { model_name: "ibm/granite-4-h-small",
+                    litellm_params: { model:      "watsonx/ibm/granite-4-h-small",
+                                      api_base:   params.api_base,
+                                      api_key:    params.api_key,
+                                      project_id: params.project_id,
+                                      tags:       ["ibm/granite-4-h-small"] } }
+  4. Run connectivity probe via LiteLLM GET /health?model=ibm/granite-4-h-small → if fails, DELETE /model/delete and return 422
+  5. POST /key/generate { key_name: "ibm/granite-4-h-small",
+                          models: ["ibm/granite-4-h-small"],
+                          tags: ["ibm/granite-4-h-small"],
+                          duration: null } → per-model virtual key
   6. INSERT into connectors (name='prod-watsonx', type=llm, provider=watsonx,
                              status='connected', created_by=<user>,
                              metadata={model_name: ...,        ← from request params.model_name
                                        api_base: ...,      ← from request params.api_base
                                        project_id: ...})       ← from request params.project_id
                                                                ← api_key (format: password) stripped, not stored
-  7. INSERT into keys (dependency_id=connectors.id, dependency_type='connector', virtual_key, route_id)
+  7. INSERT into keys (dependency_id=connectors.id, dependency_type='connector', virtual_key,
+                       route_id='ibm/granite-4-h-small')
      (on failure in 5–7: revoke key, DELETE /model/delete, remove connectors row → 500)
   8. Return 201 { id: connectors.id }
 ```
@@ -1618,12 +1655,12 @@ POST /api/v1/applications
         → KeyRepo.GetByComponentID → nil (no key yet) → firstRegistration = true
           → extract podHost from stored service endpoint
           → resolveAPIBase:
-              local worker → apiBase = http://<pod-name>:8000/v1
+              local worker → apiBase = http://<pod-name>:8000
               remote worker → register mTLS ingress on worker Caddy :8443
                             → register mTLS egress on CP Caddy :8080
-                            → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>/v1
-          → POST /model/new to LiteLLM (model_name=routeID, api_base=apiBase)
-        → generate per-app virtual key: POST /key/generate {key_name: routeID--app-<appID[:8]>, models:[routeID]}
+                            → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>
+          → POST /model/new to LiteLLM (model_name=modelName, api_base=apiBase, tags=[modelName])
+        → generate per-app virtual key: POST /key/generate {key_name: modelName, models:[modelName], tags:[modelName]}
         → injectLiteLLMIntoServices:
             svc.Values["litellm"]["key"] = appVirtualKey
             svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"] → LiteLLM coordinates
@@ -1635,7 +1672,7 @@ POST /api/v1/applications
     render summarize-api.yaml.tmpl → volume + volumeMount for litellm-secret included
                                     → LLM_API_KEY exported from /etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY
                                     → LLM_ENDPOINT = http://<litellm-host>:<port><prefixPath>
-                                    → LLM_MODEL = routeID (e.g. granite-3-3-8b--vllm-cpu)
+                                    → LLM_MODEL = modelName (e.g. ibm-granite/granite-3.3-8b-instruct)
 ```
 
 ---
@@ -1663,16 +1700,15 @@ POST /api/v1/applications
   PostComponentHook (called by deployer after all component pods up, before services):
     handleNewlyDeployedModel:
       modelName from comp.Params["model"]
-      routeID = buildAppRouteID(modelName, providerID)
-      caddyRouteID = routeID + "--" + componentID[:8]
+      caddyRouteID = modelName + "--" + componentID[:8]
       podHost from comp.Endpoints["llm"]["host"]
       resolveAPIBase:
-          local → apiBase = http://<pod-name>:8000/v1
+          local → apiBase = http://<pod-name>:8000
           remote → register mTLS ingress + egress Caddy routes
-                 → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>/v1
-      POST /model/new to LiteLLM (model_name=routeID, api_base=apiBase)
+                 → apiBase = http://ai-services--caddy:8080/worker/<name>/models/<caddyRouteID>
+      POST /model/new to LiteLLM (model_name=modelName, api_base=apiBase, tags=[modelName])
       KeyRepo.GetByDependency('component', componentID) → nil → generate model key → INSERT keys row
-      generate per-app virtual key → POST /key/generate {key_name: routeID--app-<appID[:8]>}
+      generate per-app virtual key → POST /key/generate {key_name: modelName, models:[modelName], tags:[modelName]}
       injectLiteLLMIntoServices → svc.Values["litellm"]["key"] = appVirtualKey
                                 → svc.Values["llm"]["host/port/prefixPath/model"] = LiteLLM coords
 
@@ -1755,13 +1791,12 @@ POST /api/v1/applications
     INSERT service_dependencies (service_id, dependency_type='connector', dependency_id=<connector id>)
 
   executeDeploymentAsync → resolveModelsAndPrepareKeys:
-    routeID = "{last path segment of connectors.metadata.model_name}--{connectors.provider}"
-              (e.g. granite-4-h-small--watsonx). The route is already registered with
-              LiteLLM at connector create time, so there is no POST /model/new here.
-    generate per-app virtual key → POST /key/generate {key_name: routeID--app-<appID[:8]>, models: [routeID]}
+    modelName = connectors.metadata.model_name  (e.g. "ibm/granite-4-h-small")
+    The route is already registered with LiteLLM at connector create time — no POST /model/new here.
+    generate per-app virtual key → POST /key/generate {key_name: modelName, models: [modelName], tags: [modelName]}
     injectLiteLLMIntoServices:
       svc.Values["litellm"]["key"] = appVirtualKey
-      svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"=routeID] → LiteLLM coordinates
+      svc.Values["llm"]["host"] / ["port"] / ["prefixPath"] / ["model"=modelName] → LiteLLM coordinates
 
   deployServices:
     identical to the local-model path. The service only talks to LiteLLM and cannot tell
@@ -1776,12 +1811,12 @@ POST /api/v1/applications
 DELETE /api/v1/models/:id
 
   Server loads components row by id
-  route_id = "{sanitised model_name}-{provider}"  (derived from components.metadata)
+  modelName = components.metadata["model"]  (e.g. "ibm-granite/granite-3.3-8b-instruct")
   worker_id = components.worker_id  (NULL = control-plane; else workerRegistry.WorkerInfoByID → name)
 
   1. Verify created_by=user
   2. Return 202
-  3. [async] DELETE /model/delete from LiteLLM Gateway (deregisters the route)
+  3. [async] DELETE /model/delete { "model_name": modelName } from LiteLLM Gateway (deregisters the route)
   4. [async] DELETE /key/delete from LiteLLM Admin API (revokes the per-model virtual key)
   5. [async] DELETE keys row WHERE dependency_type = 'component' AND dependency_id = :id
   6. [async] StopPod → DeletePod
@@ -1797,10 +1832,10 @@ DELETE /api/v1/models/:id          (resolves to connectors table — same handle
 
   Server loads connectors row by id; checks no service_dependencies reference it → 409 if any
 
-  route_id = "{sanitised model_name}-{provider}"  (derived from connectors.metadata)
+  modelName = connectors.metadata["model_name"]  (e.g. "ibm/granite-4-h-small")
 
   1. Verify created_by=user
-  2. DELETE /model/delete from LiteLLM Gateway (removes route + upstream credentials from LiteLLM DB)
+  2. DELETE /model/delete { "model_name": modelName } from LiteLLM Gateway (removes route + upstream credentials from LiteLLM DB)
   3. POST /key/delete on LiteLLM (revokes the per-model virtual key)
   4. DELETE keys row WHERE dependency_type='connector' AND dependency_id = :id
   5. DELETE connectors row
@@ -1845,11 +1880,23 @@ The API layer distinguishes user-created components from infrastructure componen
 
 `connector_status.connected` means the last connectivity probe reached the endpoint with valid credentials. UI status display: green = `connected`, red = `offline`. Local model status uses `component_status` (`Running` / `Deploying` / `Error`).
 
-### 8. LiteLLM Route ID = `{model_name}--{provider}` (double-dash separator)
+### 8. Tag-Based Routing — Provider ID in Tags, Not in Model Name
 
-Registering routes under a `{model_name}--{provider}` ID (e.g. `granite-3.3-8b-instruct--vllm-spyre`) uniquely identifies each deployed model in the gateway and allows multiple models to coexist simultaneously. The double-dash separator (`--`) is chosen deliberately: model names commonly contain single hyphens (e.g. `granite-3.3-8b-instruct`), so a single dash would be ambiguous when parsing the route ID back into its components. The same ID is used for deregistration at delete time.
+Routes are registered with `enable_tag_filtering: true` and a top-level `tags: [<provider-id>]` (e.g. `["vllm-cpu"]`). Consumer services call LiteLLM using the full model name as configured (e.g. `ibm-granite/granite-3.3-8b-instruct`) and pass the provider ID in `metadata.tags` — the provider suffix is never encoded in the model name.
 
-The `litellm_params.model` field uses the `hosted_vllm/<upstream-model-name>` prefix (e.g. `hosted_vllm/ibm-granite/granite-3.3-8b-instruct`). LiteLLM infers the provider from this prefix — no separate `custom_llm_provider` field is required, and no `api_key` is needed for local vLLM endpoints.
+| Property | Old | New |
+|---|---|---|
+| Consumer `model` field | `"ibm-granite/granite-3.3-8b-instruct--vllm-spyre"` | `"ibm-granite/granite-3.3-8b-instruct"` |
+| Provider communicated via | Encoded in model name string | `metadata.tags: ["vllm-cpu"]` in the request body |
+| `tags` field on `/model/new` | Inside `litellm_params` | Top-level field alongside `enable_tag_filtering: true` |
+| Tag value | Full model name | Provider ID (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`) |
+| Stored in Catalog DB | `model_id` in `components.metadata` + derived string in `keys.route_id` | Only LiteLLM model UUID in `keys.route_id` |
+| Swap provider (e.g. cpu → spyre) | Consumer model name config must change | Consumer updates `metadata.tags` only — `model` field unchanged |
+| Deregister call | `{ "id": "ibm-granite-granite-3.3-8b-instruct--vllm-spyre" }` | `{ "model_name": "ibm-granite/granite-3.3-8b-instruct" }` |
+
+The LiteLLM-assigned model UUID (returned by `POST /model/new`) is stored in `keys.route_id` and is the only identifier needed for deregistration and key revocation. The `model_name` in `POST /model/new` is the full model name from `params.model`; the top-level `tags` array carries the provider ID. They are set independently — `model_name` never changes when the provider changes, only `tags` does.
+
+The `litellm_params.model` field uses the `hosted_vllm/<upstream-model-name>` prefix. LiteLLM infers the provider from this prefix — no separate `custom_llm_provider` field is required, and no `api_key` is needed for local vLLM endpoints.
 
 ### 9. Pre-flight Returns All Violations, Not Just First
 
@@ -1872,8 +1919,8 @@ Each application receives a unique LiteLLM virtual key scoped to the model's rou
 
 When registering a LiteLLM route during application create (both pre-deployed and new-deploy paths), the `api_base` is resolved by `resolveAPIBase`:
 
-- **Local worker**: `http://<pod-name>:8000/v1` — LiteLLM and the vLLM pod share the same Podman network; direct DNS is sufficient.
-- **Remote worker**: two Caddy routes are registered (mTLS ingress on worker Caddy `:8443`, mTLS egress on CP Caddy `:8080`) and `api_base = http://ai-services--caddy:8080/worker/<workerName>/models/<caddyRouteID>/v1`. LiteLLM calls the CP Caddy egress which tunnels over mTLS to the worker. The `caddyRouteID = routeID + "--" + componentID[:8]` ensures route uniqueness per deployment.
+- **Local worker**: `http://<pod-name>:8000` — LiteLLM and the vLLM pod share the same Podman network; direct DNS is sufficient.
+- **Remote worker**: two Caddy routes are registered (mTLS ingress on worker Caddy `:8443`, mTLS egress on CP Caddy `:8080`) and `api_base = http://ai-services--caddy:8080/worker/<workerName>/models/<caddyRouteID>`. LiteLLM calls the CP Caddy egress which tunnels over mTLS to the worker. The `caddyRouteID = modelName + "--" + componentID[:8]` ensures Caddy route uniqueness per deployment while keeping the LiteLLM `model_name` clean.
 
 This mirrors the exact same logic used by `model_service.deployAsync`.
 

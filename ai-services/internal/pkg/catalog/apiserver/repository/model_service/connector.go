@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"regexp"
 
 	"github.com/google/uuid"
@@ -89,17 +88,18 @@ func (s *ModelService) createRemote(ctx context.Context, req apimodels.CreateMod
 	}
 
 	// Phase 3: register the LiteLLM route.
+	// modelName is the full model identifier from params (e.g. "ibm/granite-4-h-small").
+	// It is used directly as the LiteLLM model_name — no sanitisation or provider suffix.
 	modelName, _ := req.Params["model_name"].(string)
-	routeID := buildRouteID(path.Base(modelName), req.ProviderID)
 
-	if err := s.registerConnectorRoute(ctx, routeID, req.ProviderID, req.Params); err != nil {
+	if err := s.registerConnectorRoute(ctx, modelName, req.ProviderID, req.Params); err != nil {
 		return nil, fmt.Errorf("LiteLLM route registration failed: %w", err)
 	}
 
 	// Phase 4: probe the route; roll back on failure.
-	if probeErr := s.probeLiteLLMRoute(ctx, routeID); probeErr != nil {
-		if delErr := s.deleteLiteLLMRoute(ctx, routeID); delErr != nil {
-			logger.WarningfCtx(ctx, "failed to delete LiteLLM route %q after failed probe: %v", routeID, delErr)
+	if probeErr := s.probeLiteLLMRoute(ctx, modelName); probeErr != nil {
+		if delErr := s.deleteLiteLLMRoute(ctx, modelName); delErr != nil {
+			logger.WarningfCtx(ctx, "failed to delete LiteLLM route for model %q after failed probe: %v", modelName, delErr)
 		}
 
 		return nil, &ValidationError{
@@ -108,19 +108,16 @@ func (s *ModelService) createRemote(ctx context.Context, req apimodels.CreateMod
 		}
 	}
 
-	// Phase 5: generate the per-model virtual key scoped to this route.
-	virtualKey, err := s.generateVirtualKey(ctx, routeID)
+	// Phase 5: generate the per-model virtual key scoped to this model.
+	virtualKey, err := s.generateVirtualKey(ctx, modelName, req.ProviderID)
 	if err != nil {
-		s.rollbackConnectorRoute(ctx, routeID, "")
+		s.rollbackConnectorRoute(ctx, modelName, "")
 
 		return nil, fmt.Errorf("virtual key generation failed: %w", err)
 	}
 
 	// Phase 6: persist the connector with sensitive fields stripped.
-	// model_id (the LiteLLM route alias) is added to metadata so consumers
-	// and teardown code can reference the route without re-deriving it.
 	safeMetadata := catalogutils.StripSensitiveFields(req.Params, catalogutils.SensitiveFieldsFromSchema(schema))
-	safeMetadata["model_id"] = routeID
 
 	connector := &dbmodels.Connector{
 		Name:      req.Name,
@@ -132,7 +129,7 @@ func (s *ModelService) createRemote(ctx context.Context, req apimodels.CreateMod
 	}
 
 	if err := s.connectorRepo.Insert(ctx, connector); err != nil {
-		s.rollbackConnectorRoute(ctx, routeID, virtualKey)
+		s.rollbackConnectorRoute(ctx, modelName, virtualKey)
 
 		return nil, fmt.Errorf("failed to persist connector: %w", err)
 	}
@@ -142,12 +139,12 @@ func (s *ModelService) createRemote(ctx context.Context, req apimodels.CreateMod
 		DependencyID:   connector.ID,
 		DependencyType: dbmodels.DependencyTypeConnector,
 		VirtualKey:     virtualKey,
-		RouteID:        routeID,
+		RouteID:        modelName,
 	}); err != nil {
 		if _, delErr := s.connectorRepo.DeleteIfUnlinked(ctx, connector.ID, dbmodels.DependencyTypeConnector); delErr != nil {
 			logger.WarningfCtx(ctx, "failed to delete connector %s after key insert failure: %v", connector.ID, delErr)
 		}
-		s.rollbackConnectorRoute(ctx, routeID, virtualKey)
+		s.rollbackConnectorRoute(ctx, modelName, virtualKey)
 
 		return nil, fmt.Errorf("failed to persist virtual key: %w", err)
 	}
@@ -195,28 +192,23 @@ func (s *ModelService) UpdateRemoteModel(ctx context.Context, id uuid.UUID, _ st
 		return nil, err
 	}
 
-	// Resolve the route ID — read model_id from metadata (written at create time).
-	// Fall back to re-deriving it for rows created before this field was added.
-	routeID, _ := connector.Metadata["model_id"].(string)
-	if routeID == "" {
-		existingModelName, _ := connector.Metadata["model_name"].(string)
-		routeID = buildRouteID(path.Base(existingModelName), connector.Provider)
-	}
+	// modelName is the full model identifier stored in metadata at create time.
+	existingModelName, _ := connector.Metadata["model_name"].(string)
 
 	// Delete the old LiteLLM route (best-effort — proceed even if it fails).
-	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
-		logger.WarningfCtx(ctx, "UpdateRemoteModel: failed to delete old LiteLLM route %q (continuing): %v", routeID, err)
+	if err := s.deleteLiteLLMRoute(ctx, existingModelName); err != nil {
+		logger.WarningfCtx(ctx, "UpdateRemoteModel: failed to delete old LiteLLM route for model %q (continuing): %v", existingModelName, err)
 	}
 
 	// Re-register with new params.
-	if err := s.registerConnectorRoute(ctx, routeID, connector.Provider, req.Params); err != nil {
+	if err := s.registerConnectorRoute(ctx, existingModelName, connector.Provider, req.Params); err != nil {
 		return nil, fmt.Errorf("LiteLLM route re-registration failed: %w", err)
 	}
 
 	// Probe the new route; roll back on failure.
-	if probeErr := s.probeLiteLLMRoute(ctx, routeID); probeErr != nil {
-		if delErr := s.deleteLiteLLMRoute(ctx, routeID); delErr != nil {
-			logger.WarningfCtx(ctx, "UpdateRemoteModel: failed to delete LiteLLM route %q after failed probe: %v", routeID, delErr)
+	if probeErr := s.probeLiteLLMRoute(ctx, existingModelName); probeErr != nil {
+		if delErr := s.deleteLiteLLMRoute(ctx, existingModelName); delErr != nil {
+			logger.WarningfCtx(ctx, "UpdateRemoteModel: failed to delete LiteLLM route for model %q after failed probe: %v", existingModelName, delErr)
 		}
 		return nil, &ValidationError{
 			Code:    http.StatusUnprocessableEntity,
@@ -261,13 +253,8 @@ func (s *ModelService) UpdateRemoteModel(ctx context.Context, id uuid.UUID, _ st
 //  2. Delete the LiteLLM route.
 //  3. Delete the connector DB row (only if unlinked).
 func (s *ModelService) deleteRemote(ctx context.Context, connector *dbmodels.Connector) error {
-	// Read model_id from metadata (written at create time).
-	// Fall back to re-deriving it for rows created before this field was added.
-	routeID, _ := connector.Metadata["model_id"].(string)
-	if routeID == "" {
-		modelName, _ := connector.Metadata["model_name"].(string)
-		routeID = buildRouteID(path.Base(modelName), connector.Provider)
-	}
+	// modelName is the full model identifier stored in metadata at create time.
+	modelName, _ := connector.Metadata["model_name"].(string)
 
 	// Step 1: revoke and delete the virtual key.
 	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeConnector, connector.ID)
@@ -284,8 +271,8 @@ func (s *ModelService) deleteRemote(ctx context.Context, connector *dbmodels.Con
 	}
 
 	// Step 2: deregister LiteLLM route.
-	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
-		logger.WarningfCtx(ctx, "[modelmanager] connector %s: failed to deregister LiteLLM route %q (continuing): %v", connector.ID, routeID, err)
+	if err := s.deleteLiteLLMRoute(ctx, modelName); err != nil {
+		logger.WarningfCtx(ctx, "[modelmanager] connector %s: failed to deregister LiteLLM route for model %q (continuing): %v", connector.ID, modelName, err)
 	}
 
 	// Step 3: delete the connector row.
@@ -303,22 +290,22 @@ func (s *ModelService) deleteRemote(ctx context.Context, connector *dbmodels.Con
 }
 
 // rollbackConnectorRoute best-effort revokes the virtual key (if any) and deletes the LiteLLM route.
-func (s *ModelService) rollbackConnectorRoute(ctx context.Context, routeID, virtualKey string) {
+func (s *ModelService) rollbackConnectorRoute(ctx context.Context, modelName, virtualKey string) {
 	if virtualKey != "" {
 		if err := s.revokeVirtualKey(ctx, virtualKey); err != nil {
-			logger.WarningfCtx(ctx, "failed to revoke virtual key for route %q during rollback: %v", routeID, err)
+			logger.WarningfCtx(ctx, "failed to revoke virtual key for model %q during rollback: %v", modelName, err)
 		}
 	}
-	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
-		logger.WarningfCtx(ctx, "failed to delete LiteLLM route %q during rollback: %v", routeID, err)
+	if err := s.deleteLiteLLMRoute(ctx, modelName); err != nil {
+		logger.WarningfCtx(ctx, "failed to delete LiteLLM route for model %q during rollback: %v", modelName, err)
 	}
 }
 
 // registerConnectorRoute calls POST /model/new for a remote connector.
-// litellm_params.model is "{provider_id}/{params.model_name}"; every other param
-// (api_base, api_key, project_id, ...) is passed through unchanged.
-// model_info.id is set to the route ID so the route can be removed via /model/delete.
-func (s *ModelService) registerConnectorRoute(ctx context.Context, routeID, providerID string, params map[string]any) error {
+// modelName is the full model identifier (e.g. "ibm/granite-4-h-small") used directly
+// as LiteLLM model_name. litellm_params.model is "{provider_id}/{model_name}".
+// providerID (e.g. "watsonx") is passed as the top-level tag for tag-based routing.
+func (s *ModelService) registerConnectorRoute(ctx context.Context, modelName, providerID string, params map[string]any) error {
 	litellmParams := make(map[string]any, len(params))
 	for k, v := range params {
 		if k != "model_name" {
@@ -328,18 +315,19 @@ func (s *ModelService) registerConnectorRoute(ctx context.Context, routeID, prov
 	litellmParams["model"] = fmt.Sprintf("%s/%v", providerID, params["model_name"])
 
 	payload := map[string]any{
-		"model_name":     routeID,
-		"litellm_params": litellmParams,
-		"model_info":     map[string]any{"id": routeID},
+		"model_name":           modelName,
+		"litellm_params":       litellmParams,
+		"enable_tag_filtering": true,
+		"tags":                 []string{providerID},
 	}
 
 	return s.litellmPost(ctx, "/model/new", payload)
 }
 
-// probeLiteLLMRoute calls GET /health?model=<routeID> and returns an error unless
+// probeLiteLLMRoute calls GET /health?model=<modelName> and returns an error unless
 // LiteLLM reports at least one healthy endpoint and no unhealthy ones.
-func (s *ModelService) probeLiteLLMRoute(ctx context.Context, routeID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, litellmURL()+"/health?model="+url.QueryEscape(routeID), nil)
+func (s *ModelService) probeLiteLLMRoute(ctx context.Context, modelName string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, litellmURL()+"/health?model="+url.QueryEscape(modelName), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create health request: %w", err)
 	}

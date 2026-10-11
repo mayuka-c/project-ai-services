@@ -82,10 +82,11 @@ func sanitiseRouteSegmentApp(s string) string {
 	return strings.Trim(s, "-")
 }
 
-// buildAppRouteID returns the LiteLLM route ID for a model component.
-// Convention: {sanitised_model_name}--{provider_id}
-func buildAppRouteID(modelName, providerID string) string {
-	return sanitiseRouteSegmentApp(modelName) + "--" + sanitiseRouteSegmentApp(providerID)
+// sanitiseCaddyRouteIDApp is the canonical alias used for Caddy route ID construction
+// in application_service. It replaces non-alphanumeric/hyphen chars (e.g. "/") with
+// hyphens, collapses runs of hyphens, and strips leading/trailing hyphens.
+func sanitiseCaddyRouteIDApp(s string) string {
+	return sanitiseRouteSegmentApp(s)
 }
 
 // litellmModeForTypeApp returns the LiteLLM model_info.mode value for the given
@@ -129,11 +130,12 @@ func litellmPostApp(ctx context.Context, path string, payload any) error {
 }
 
 // generateAppVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns
-// a virtual key scoped to the given routeID.
-func generateAppVirtualKey(ctx context.Context, appRouteKeyName, routeID string) (string, error) {
+// a virtual key scoped to modelName, tagged with providerID for tag-based routing.
+func generateAppVirtualKey(ctx context.Context, keyName, modelName, providerID string) (string, error) {
 	payload := map[string]any{
-		"key_name": appRouteKeyName,
-		"models":   []string{routeID},
+		"key_name": keyName,
+		"models":   []string{modelName},
+		"tags":     []string{providerID},
 		"duration": nil,
 	}
 
@@ -1176,8 +1178,6 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 	modelName, _ := existing.Metadata["model"].(string)
 	comp.ModelName = modelName
 
-	routeID := buildAppRouteID(modelName, comp.ProviderID)
-
 	// Check whether this component already has a LiteLLM key → was already registered.
 	existingKey, err := s.KeyRepo.GetByDependency(ctx, models.DependencyTypeComponent, existing.ID)
 	if err != nil {
@@ -1208,46 +1208,43 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 		if podHost == "" {
 			logger.WarningfCtx(ctx, "[app-deploy] component %s has no service endpoint; skipping LiteLLM route registration", existing.ID)
 		} else {
-			caddyRouteID := routeID + "--" + existing.ID.String()[:8]
+			caddyRouteID := sanitiseCaddyRouteIDApp(modelName) + "--" + existing.ID.String()[:8]
 			apiBase, resolveErr := s.resolveAPIBase(ctx, plan, podHost, existing.ID, caddyRouteID)
 			if resolveErr != nil {
 				logger.WarningfCtx(ctx, "[app-deploy] resolveAPIBase failed for pre-deployed component %s: %v", existing.ID, resolveErr)
 			} else {
-				logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for pre-deployed component %s api_base=%s", routeID, existing.ID, apiBase)
+				logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route for model %q pre-deployed component %s api_base=%s", modelName, existing.ID, apiBase)
 				preDeployedPayload := map[string]any{
-						"model_name": routeID,
+						"model_name": modelName,
 						"litellm_params": map[string]any{
 							"model":    "hosted_vllm/" + modelName,
 							"api_base": apiBase,
 						},
+						"enable_tag_filtering": true,
+						"tags":                 []string{comp.ProviderID},
 					}
-				if mode := litellmModeForTypeApp(comp.ComponentType); mode != "" {
-					preDeployedPayload["model_info"] = map[string]any{
-						"mode": mode,
+					if mode := litellmModeForTypeApp(comp.ComponentType); mode != "" {
+						preDeployedPayload["model_info"] = map[string]any{"mode": mode}
 					}
-				}
-				if regErr := litellmPostApp(ctx, "/model/new", preDeployedPayload); regErr != nil {
-					// Non-fatal: log but continue — the key can still be generated.
-					logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
-				}
+					if regErr := litellmPostApp(ctx, "/model/new", preDeployedPayload); regErr != nil {
+						// Non-fatal: log but continue — the key can still be generated.
+						logger.WarningfCtx(ctx, "[app-deploy] LiteLLM route registration failed (will retry on next deploy): %v", regErr)
+					}
 			}
 		}
 	}
 
-	// Backfill model_id + external endpoint on the pre-deployed component row if absent.
-	// This covers components created before these fields were introduced.
-	s.backfillComponentEndpointMeta(ctx, existing, routeID)
+	// Backfill external endpoint on the pre-deployed component row if absent.
+	s.backfillComponentEndpointMeta(ctx, existing)
 
-	// Generate a fresh per-application virtual key scoped to this LiteLLM route.
-	// The key name encodes the application ID so it is identifiable in LiteLLM's UI.
-	appKeyName := routeID + "--app-" + comp.DatabaseID.String()[:8]
-	virtualKey, err := generateAppVirtualKey(ctx, appKeyName, routeID)
+	// Generate a fresh per-application virtual key scoped to this model.
+	virtualKey, err := generateAppVirtualKey(ctx, modelName, modelName, comp.ProviderID)
 	if err != nil {
-		return nil, fmt.Errorf("virtual key generation failed for route %q: %w", routeID, err)
+		return nil, fmt.Errorf("virtual key generation failed for model %q: %w", modelName, err)
 	}
 
 	return &deploymenttypes.LiteLLMInfo{
-		RouteID:           routeID,
+		RouteID:           modelName,
 		ModelName:         modelName,
 		VirtualKey:        virtualKey,
 		FirstRegistration: firstRegistration,
@@ -1488,8 +1485,7 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 		modelName, _ = comp.Values["model"].(string)
 	}
 
-	routeID := buildAppRouteID(modelName, comp.ProviderID)
-	caddyRouteID := routeID + "--" + comp.DatabaseID.String()[:8]
+	caddyRouteID := sanitiseCaddyRouteIDApp(modelName) + "--" + comp.DatabaseID.String()[:8]
 
 	// Derive pod host from the endpoint the deployer populated.
 	podHost := ""
@@ -1509,18 +1505,18 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 	}
 
 	// 1. Register the LiteLLM route.
-	logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route %q for new component %s api_base=%s", routeID, comp.DatabaseID, apiBase)
+	logger.InfofCtx(ctx, "[app-deploy] registering LiteLLM route for model %q new component %s api_base=%s", modelName, comp.DatabaseID, apiBase)
 	newModelPayload := map[string]any{
-		"model_name": routeID,
+		"model_name": modelName,
 		"litellm_params": map[string]any{
 			"model":    "hosted_vllm/" + modelName,
 			"api_base": apiBase,
 		},
+		"enable_tag_filtering": true,
+		"tags":                 []string{comp.ProviderID},
 	}
 	if mode := litellmModeForTypeApp(comp.ComponentType); mode != "" {
-		newModelPayload["model_info"] = map[string]any{
-			"mode": mode,
-		}
+		newModelPayload["model_info"] = map[string]any{"mode": mode}
 	}
 	if err := litellmPostApp(ctx, "/model/new", newModelPayload); err != nil {
 		return fmt.Errorf("LiteLLM route registration failed: %w", err)
@@ -1535,7 +1531,7 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 		return fmt.Errorf("key lookup for component %s failed: %w", comp.DatabaseID, err)
 	}
 	if existingKey == nil {
-		modelVirtualKey, err := generateAppVirtualKey(ctx, routeID, routeID)
+		modelVirtualKey, err := generateAppVirtualKey(ctx, modelName, modelName, comp.ProviderID)
 		if err != nil {
 			return fmt.Errorf("model virtual key generation failed: %w", err)
 		}
@@ -1543,38 +1539,37 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 			DependencyID:   comp.DatabaseID,
 			DependencyType: models.DependencyTypeComponent,
 			VirtualKey:     modelVirtualKey,
-			RouteID:        routeID,
+			RouteID:        modelName,
 		}); err != nil {
 			return fmt.Errorf("failed to persist model virtual key: %w", err)
 		}
-		logger.InfofCtx(ctx, "[app-deploy] model key persisted for component %s route=%s", comp.DatabaseID, routeID)
+		logger.InfofCtx(ctx, "[app-deploy] model key persisted for component %s model=%s", comp.DatabaseID, modelName)
 	} else {
-		logger.InfofCtx(ctx, "[app-deploy] model key already exists for component %s route=%s; skipping insert", comp.DatabaseID, routeID)
+		logger.InfofCtx(ctx, "[app-deploy] model key already exists for component %s model=%s; skipping insert", comp.DatabaseID, modelName)
 	}
 
-	// Persist model_id + external endpoint on the freshly deployed component row.
+	// Persist external endpoint on the freshly deployed component row.
 	freshComp, fetchErr := s.ComponentRepo.GetByID(ctx, comp.DatabaseID)
 	if fetchErr == nil && freshComp != nil {
-		s.backfillComponentEndpointMeta(ctx, freshComp, routeID)
+		s.backfillComponentEndpointMeta(ctx, freshComp)
 	}
 
 	// 3. Generate a fresh per-application virtual key and inject into service Values.
-	appKeyName := routeID + "--app-" + plan.ApplicationID.String()[:8]
-	appVirtualKey, err := generateAppVirtualKey(ctx, appKeyName, routeID)
+	appVirtualKey, err := generateAppVirtualKey(ctx, modelName, modelName, comp.ProviderID)
 	if err != nil {
 		return fmt.Errorf("app virtual key generation failed: %w", err)
 	}
 
 	litellmInfo := &deploymenttypes.LiteLLMInfo{
-		RouteID:           routeID,
+		RouteID:           modelName,
 		ModelName:         modelName,
 		VirtualKey:        appVirtualKey,
 		FirstRegistration: true,
 	}
 	s.injectLiteLLMIntoServices(ctx, plan, comp, litellmInfo)
 
-	logger.InfofCtx(ctx, "[app-deploy] new component %s/%s: LiteLLM route=%s key persisted, app key injected",
-		comp.ComponentType, comp.ProviderID, routeID)
+	logger.InfofCtx(ctx, "[app-deploy] new component %s/%s: LiteLLM model=%s key persisted, app key injected",
+		comp.ComponentType, comp.ProviderID, modelName)
 
 	return nil
 }
@@ -2215,23 +2210,10 @@ func (s *ApplicationServiceBase) isComponentOrphaned(ctx context.Context, compon
 // backfillComponentEndpointMeta writes model_id into the component's metadata and appends
 // an "external" LiteLLM endpoint to its endpoints list — both only when absent, so the
 // function is safe to call on new and pre-existing rows alike.
-func (s *ApplicationServiceBase) backfillComponentEndpointMeta(ctx context.Context, c *models.Component, routeID string) {
+func (s *ApplicationServiceBase) backfillComponentEndpointMeta(ctx context.Context, c *models.Component) {
 	updated := false
 
-	// 1. Write model_id into metadata if not already set.
-	if _, ok := c.Metadata["model_id"]; !ok {
-		if c.Metadata == nil {
-			c.Metadata = make(map[string]any)
-		}
-		c.Metadata["model_id"] = routeID
-		if err := s.ComponentRepo.Update(ctx, c); err != nil {
-			logger.WarningfCtx(ctx, "[app-deploy] component %s: failed to write model_id to metadata: %v", c.ID, err)
-		} else {
-			updated = true
-		}
-	}
-
-	// 2. Append "external" endpoint if not already present.
+	// Append "external" endpoint if not already present.
 	hasExternal := false
 	for _, ep := range c.Endpoints {
 		if t, _ := ep["type"].(string); t == "external" {
@@ -2252,7 +2234,7 @@ func (s *ApplicationServiceBase) backfillComponentEndpointMeta(ctx context.Conte
 	}
 
 	if updated {
-		logger.InfofCtx(ctx, "[app-deploy] component %s: backfilled model_id=%q and external endpoint", c.ID, routeID)
+		logger.InfofCtx(ctx, "[app-deploy] component %s: backfilled external endpoint", c.ID)
 	}
 }
 

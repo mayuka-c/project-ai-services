@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"regexp"
 	"strings"
 	texttemplate "text/template"
@@ -64,24 +63,16 @@ var validModelTypes = map[string]bool{
 	"reranker":  true,
 }
 
-// sanitiseRouteSegment replaces any character that is not a letter, digit, or hyphen with
-// a single hyphen, and collapses runs of three or more hyphens down to one.
-// Double hyphens are preserved — they are the segment separator used in route IDs
-// and pod names throughout the platform (e.g. "granite-3.3-8b-instruct--vllm-cpu").
-func sanitiseRouteSegment(s string) string {
+// sanitiseCaddyRouteID returns a Caddy-safe route ID by replacing any character that is
+// not a letter, digit, or hyphen with a single hyphen, collapsing runs of 3+ hyphens to
+// one (while preserving "--"), and trimming leading/trailing hyphens.
+// Used only for Caddy route IDs — not for LiteLLM model_name.
+func sanitiseCaddyRouteID(s string) string {
 	re := regexp.MustCompile(allowedRouteChars)
 	s = re.ReplaceAllString(s, "-")
-	// Collapse triple-or-more hyphens to a single hyphen, but leave "--" intact.
 	tripleHyphen := regexp.MustCompile(`-{3,}`)
 	s = tripleHyphen.ReplaceAllString(s, "-")
 	return strings.Trim(s, "-")
-}
-
-// buildRouteID returns the LiteLLM route ID for a model.
-// Convention (matches config.yaml): {sanitised_model_name}--{provider_id}
-// Example: "granite-3.3-8b-instruct--vllm-cpu"
-func buildRouteID(modelName, providerID string) string {
-	return sanitiseRouteSegment(modelName) + "--" + sanitiseRouteSegment(providerID)
 }
 
 // ModelService implements the model-deploy business logic:
@@ -210,7 +201,6 @@ func (s *ModelService) deployLocal(ctx context.Context, req apimodels.CreateMode
 
 	// 5. Insert component row in Deploying state.
 	modelName, _ := req.Params["model"].(string)
-	routeID := buildRouteID(path.Base(modelName), req.ProviderID)
 	name := req.Name
 	createdBy := req.CreatedBy
 
@@ -219,8 +209,7 @@ func (s *ModelService) deployLocal(ctx context.Context, req apimodels.CreateMode
 		Provider: req.ProviderID,
 		Status:   dbmodels.ComponentStatusDeploying,
 		Metadata: map[string]any{
-			"model":    modelName,
-			"model_id": routeID,
+			"model": modelName,
 		},
 		Name:      &name,
 		CreatedBy: &createdBy,
@@ -265,13 +254,12 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	}
 
 	modelName, _ := req.Params["model"].(string)
-	routeID := buildRouteID(path.Base(modelName), req.ProviderID)
 
 	// Caddy @id values must be unique across all deployments — two workers (or
 	// two deploys of the same model) must not share a Caddy route ID.
-	// Append the component UUID short prefix to disambiguate while keeping the
-	// ID human-readable. The routeID itself (used for LiteLLM) stays unchanged.
-	caddyRouteID := routeID + "--" + componentID.String()[:8]
+	// Append the component UUID short prefix to disambiguate. The LiteLLM
+	// model_name is modelName itself — no sanitisation or provider suffix needed.
+	caddyRouteID := sanitiseCaddyRouteID(modelName) + "--" + componentID.String()[:8]
 
 	// Build the runtime once — reused for image pull, model download, and pod creation.
 	rt, err := s.buildRuntime(ctx, workerID)
@@ -418,17 +406,17 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 	}
 
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
-	log("registering LiteLLM route %q api_base=%s", routeID, apiBase)
+	log("registering LiteLLM route for model %q api_base=%s", modelName, apiBase)
 
-	if err := s.registerLiteLLMRoute(ctx, routeID, modelName, apiBase, req.Type); err != nil {
+	if err := s.registerLiteLLMRoute(ctx, modelName, req.ProviderID, apiBase, req.Type); err != nil {
 		fail(fmt.Sprintf("LiteLLM route registration failed: %v", err))
 		return
 	}
 
 	// ── Step 5: generate and persist the per-model virtual key ────────────────
-	log("generating virtual key for route %q", routeID)
+	log("generating virtual key for model %q", modelName)
 
-	virtualKey, err := s.generateVirtualKey(ctx, routeID)
+	virtualKey, err := s.generateVirtualKey(ctx, modelName, req.ProviderID)
 	if err != nil {
 		fail(fmt.Sprintf("virtual key generation failed: %v", err))
 		return
@@ -438,7 +426,7 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 		DependencyID:   componentID,
 		DependencyType: dbmodels.DependencyTypeComponent,
 		VirtualKey:     virtualKey,
-		RouteID:        routeID,
+		RouteID:        modelName,
 	}); err != nil {
 		fail(fmt.Sprintf("failed to persist virtual key: %v", err))
 		return
@@ -638,7 +626,7 @@ func (s *ModelService) deployModelPod(ctx context.Context, componentID uuid.UUID
 	// If no endpoint was extracted (e.g. template has no ports), fall back to a
 	// deterministic name derived from the model name — same convention as the
 	// templates themselves use.
-	return sanitiseRouteSegment(fmt.Sprintf("vllm-%s", strings.ReplaceAll(modelName, "/", "-"))), nil
+	return sanitiseCaddyRouteID(fmt.Sprintf("vllm-%s", strings.ReplaceAll(modelName, "/", "-"))), nil
 }
 
 // allocateSpyreCards checks whether the component's pod templates declare any Spyre card
@@ -705,18 +693,19 @@ func (s *ModelService) allocateSpyreCards(
 
 // registerLiteLLMRoute calls POST /model/new on the LiteLLM Admin API.
 //
-// The payload matches config.yaml exactly:
-//   - model_name:  "{sanitised_model_name}--{provider_id}"  (double-dash separator)
-//   - model:       "hosted_vllm/{modelName}"  (provider prefix inline — no separate custom_llm_provider field)
-//   - api_base:    internal pod URL or worker Caddy URL
-//   - api_key absent for local vLLM (open endpoint, no auth required)
-func (s *ModelService) registerLiteLLMRoute(ctx context.Context, routeID, modelName, apiBase, componentType string) error {
+//   - model_name:  the full model name from params.model (e.g. "ibm-granite/granite-3.3-8b-instruct")
+//   - model:       "hosted_vllm/{modelName}"
+//   - api_base:    internal pod URL or worker Caddy URL (no /v1 suffix)
+//   - tags:        [providerID] — top-level, enables tag-based routing; consumers pass providerID in metadata.tags
+func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, providerID, apiBase, componentType string) error {
 	payload := map[string]any{
-		"model_name": routeID,
+		"model_name": modelName,
 		"litellm_params": map[string]any{
 			"model":    "hosted_vllm/" + modelName,
 			"api_base": apiBase,
 		},
+		"enable_tag_filtering": true,
+		"tags":                 []string{providerID},
 	}
 
 	if mode := litellmModeForType(componentType); mode != "" {
@@ -741,17 +730,18 @@ func litellmModeForType(componentType string) string {
 	}
 }
 
-// deleteLiteLLMRoute calls DELETE /model/delete on the LiteLLM Admin API.
-func (s *ModelService) deleteLiteLLMRoute(ctx context.Context, routeID string) error {
-	return s.litellmPost(ctx, "/model/delete", map[string]any{"id": routeID})
+// deleteLiteLLMRoute calls DELETE /model/delete on the LiteLLM Admin API by model_name.
+func (s *ModelService) deleteLiteLLMRoute(ctx context.Context, modelName string) error {
+	return s.litellmPost(ctx, "/model/delete", map[string]any{"model_name": modelName})
 }
 
 // generateVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns the
-// virtual key string.
-func (s *ModelService) generateVirtualKey(ctx context.Context, routeID string) (string, error) {
+// virtual key string scoped to modelName with providerID as the routing tag.
+func (s *ModelService) generateVirtualKey(ctx context.Context, modelName, providerID string) (string, error) {
 	payload := map[string]any{
-		"key_name": routeID,
-		"models":   []string{routeID},
+		"key_name": modelName,
+		"models":   []string{modelName},
+		"tags":     []string{providerID},
 		"duration": nil,
 	}
 
@@ -1049,16 +1039,12 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 		logger.InfofCtx(ctx, "[modelmanager] component %s: undeploy: "+msg, append([]any{c.ID}, args...)...)
 	}
 
-	// model_id is the LiteLLM route alias stored in metadata at deploy time.
-	// Fall back to re-deriving it for any rows created before this field was added.
-	routeID, _ := c.Metadata["model_id"].(string)
-	if routeID == "" {
-		modelName, _ := c.Metadata["model"].(string)
-		routeID = buildRouteID(path.Base(modelName), c.Provider)
-	}
+	// modelName is the full model identifier stored in metadata at deploy time
+	// (e.g. "ibm-granite/granite-3.3-8b-instruct"). It is the LiteLLM model_name.
+	modelName, _ := c.Metadata["model"].(string)
 
-	// Caddy route ID: routeID + component UUID short prefix (disambiguates concurrent deploys).
-	caddyRouteID := routeID + "--" + c.ID.String()[:8]
+	// Caddy route ID: sanitised modelName + component UUID short prefix (disambiguates concurrent deploys).
+	caddyRouteID := sanitiseCaddyRouteID(modelName) + "--" + c.ID.String()[:8]
 	// Step 1: deregister Caddy routes (worker ingress + CP egress) for remote deploys only.
 	// Local worker deployments go directly to the pod — no Caddy routes are registered for them.
 	if c.WorkerID != nil {
@@ -1085,18 +1071,18 @@ func (s *ModelService) undeployAsync(ctx context.Context, c *dbmodels.Component)
 	}
 
 	// Step 2: deregister LiteLLM route.
-	log("deregistering LiteLLM route %q", routeID)
-	if err := s.deleteLiteLLMRoute(ctx, routeID); err != nil {
-		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to deregister route %q (continuing): %v", c.ID, routeID, err)
+	log("deregistering LiteLLM route for model %q", modelName)
+	if err := s.deleteLiteLLMRoute(ctx, modelName); err != nil {
+		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to deregister model %q (continuing): %v", c.ID, modelName, err)
 	}
 
-	// Step 2: revoke virtual key.
+	// Step 3: revoke virtual key.
 	key, err := s.keyRepo.GetByDependency(ctx, dbmodels.DependencyTypeComponent, c.ID)
 	if err != nil {
 		logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to fetch virtual key (continuing): %v", c.ID, err)
 	}
 	if key != nil {
-		log("revoking virtual key for route %q", routeID)
+		log("revoking virtual key for model %q", modelName)
 		if err := s.revokeVirtualKey(ctx, key.VirtualKey); err != nil {
 			logger.WarningfCtx(ctx, "[modelmanager] component %s: failed to revoke virtual key (continuing): %v", c.ID, err)
 		}
