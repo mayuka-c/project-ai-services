@@ -261,8 +261,21 @@ func (p *DeploymentPlanner) processComponent(
 func (p *DeploymentPlanner) calculateAndAllocateSpyreCards(ctx context.Context, plan *DeploymentPlan, workerName string) error {
 	totalRequired := 0
 
-	// Calculate total required Spyre cards from all components
+	// Calculate total required Spyre cards from all components.
+	// Skip components that are already running (pre-deployed) — they already
+	// have hardware allocated and must not be counted again.
 	for _, comp := range plan.Components {
+		if !comp.PreDeployed && p.componentRepo != nil {
+			modelName, _ := comp.Params["model"].(string)
+			existing, err := p.componentRepo.GetRunningByTypeProviderAndModel(ctx, comp.ComponentType, comp.ProviderID, modelName)
+			if err == nil && existing != nil {
+				comp.PreDeployed = true
+			}
+		}
+		if comp.PreDeployed {
+			logger.InfofCtx(ctx, "Component %s/%s is pre-deployed, skipping Spyre card allocation\n", comp.ComponentType, comp.ProviderID)
+			continue
+		}
 		required, err := p.getRequiredSpyreCardsForComponent(ctx, comp, plan)
 		if err != nil {
 			return fmt.Errorf("failed to get Spyre card requirements for component %s: %w", comp.ComponentType, err)
