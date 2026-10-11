@@ -57,6 +57,7 @@
     - [14.2 Connector Commands](#142-connector-commands)
     - [14.3 LiteLLM Gateway Commands](#143-litellm-gateway-commands)
     - [14.4 Command Summary](#144-command-summary)
+15. [Key Rotation](#15-key-rotation)
 
 ---
 
@@ -749,7 +750,8 @@ CREATE TABLE keys (
     dependency_type dependency_type NOT NULL CHECK (dependency_type IN ('component', 'connector')),
     virtual_key     TEXT            NOT NULL,   -- 'sk-...' value — treated as a secret; never logged
     route_id        VARCHAR(255)    NOT NULL,   -- model name = LiteLLM model_name, e.g. 'ibm-granite/granite-3.3-8b-instruct'
-    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()   -- set on every key rotation
 );
 
 CREATE INDEX idx_keys_dependency ON keys (dependency_type, dependency_id);
@@ -769,9 +771,12 @@ CREATE INDEX idx_keys_dependency ON keys (dependency_type, dependency_id);
 | `Insert(key)` | `INSERT INTO keys (dependency_id, dependency_type, virtual_key, route_id)` |
 | `GetByDependency(type, id)` | `SELECT … FROM keys WHERE dependency_type = $1 AND dependency_id = $2` |
 | `GetByRouteID(routeID)` | `SELECT … FROM keys WHERE route_id = $1` |
+| `UpdateVirtualKey(type, id, newKey)` | `UPDATE keys SET virtual_key = $3, updated_at = NOW() WHERE dependency_type = $1 AND dependency_id = $2` |
 | `DeleteByDependency(type, id)` | `DELETE FROM keys WHERE dependency_type = $1 AND dependency_id = $2` |
 
 > The `virtual_key` column stores the raw `sk-...` bearer token. It is never returned in list responses or logs. It is accessible via the authenticated `GET /api/v1/models/keys?instance_id=<component_id>` endpoint.
+
+> **Key rotation.** When a virtual key is rotated (see §15), `UpdateVirtualKey` must be called to overwrite the old `sk-...` value **before** the old key is revoked on LiteLLM. This ensures `GET /api/v1/models/keys` never serves a revoked token. The `updated_at` timestamp records when the last rotation occurred and can be used by future scheduled rotation jobs to detect stale keys.
 
 **Per-application virtual keys** are a separate concept from the per-model key above. Each application that deploys or reuses a managed model receives its own freshly generated LiteLLM virtual key scoped to the same route. This key is **not stored in the DB** — it is written into a Podman Secret (`litellm-secret-<instance-slug>`) that is mounted into the service pod at deploy time. The pod reads it from `/etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY` and exports it as `LLM_API_KEY` (or `EMB_API_KEY` for embedding) before starting the server process.
 
@@ -2255,7 +2260,7 @@ ai-services model litellm key granite-llm --runtime podman
 curl -s http://litellm:4000/chat/completions \
   -H "Authorization: Bearer $(ai-services model litellm key granite-llm --runtime podman)" \
   -H "Content-Type: application/json" \
-  -d '{"model":"granite-3.3-8b-instruct--vllm-spyre","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"ibm-granite/granite-3.3-8b-instruct","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 > The key is fetched from `GET /api/v1/models/keys?instance_id=<component_id>` and is **never logged** by the CLI. `instance_id` can be a local model (`components.id`) or a remote model connector (`connectors.id`). The server looks in `components` first, then `connectors`, and returns the matching `keys` row.
@@ -2273,3 +2278,68 @@ curl -s http://litellm:4000/chat/completions \
 | `ai-services model update [name]` | `PUT /api/v1/models/:id` | Update credentials of a remote model |
 | `ai-services model delete [name]` | `DELETE /api/v1/models/:id` | Undeploy/delete a model, revoke its key, delete its row |
 | `ai-services model litellm key [model-name]` | `GET /api/v1/models/keys?instance_id=<component_id>` | Print the per-model LiteLLM virtual key (local model or model connector) |
+
+---
+
+## 15. Key Rotation
+
+Virtual keys issued by the LiteLLM Gateway have no built-in expiry (they are generated with `"duration": null`). Key rotation is the process of generating a replacement key for a model's route and revoking the old one. This is necessary when a key is suspected to be compromised, when access policy changes, or as a routine operational hygiene step.
+
+### When to rotate
+
+- A `sk-...` key is leaked or exposed in logs / source control.
+- An operator is offboarded and held a copy of the key.
+- Routine rotation policy (e.g. every 90 days).
+- After a `PUT /api/v1/models/:id` credential update for a remote connector (the existing per-model key remains valid until explicitly rotated).
+
+### How rotation works
+
+Rotation is a two-step operation against the LiteLLM Admin API:
+
+1. **Generate a new key** — `POST /key/generate` with the same `key_name`, `models`, and `metadata.tags` as the original.
+2. **Delete the old key** — `POST /key/delete` with the old key value.
+
+The Catalog DB `keys` row must be updated to reflect the new `virtual_key` value after step 1 completes, before step 2 revokes the old one (so that `GET /api/v1/models/keys` never serves a revoked key).
+
+### Rotation procedure (manual — via LiteLLM Admin API)
+
+> Replace `$LITELLM_KEY` with the LiteLLM master key and `$OLD_KEY` with the value returned by `GET /api/v1/models/keys?instance_id=<id>` before rotation begins.
+
+**Step 1 — Generate a new key:**
+
+```bash
+curl -k -X POST 'https://litellm-api.10.20.185.165.nip.io/key/generate' \
+  -H "Authorization: Bearer $LITELLM_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "key_name": "ibm-granite/granite-3.3-8b-instruct--vllm-spyre",
+    "models": ["ibm-granite/granite-3.3-8b-instruct--vllm-spyre"],
+    "metadata": {
+      "tags": ["vllm-spyre"]
+    }
+  }'
+```
+
+> The response body contains the new `key` value (e.g. `"key": "sk-NewKeyValue..."`). Save this before proceeding.
+
+**Step 2 — Update the Catalog DB `keys` row** with the new key value (UPDATE directly or via a future `POST /api/v1/models/:id/rotate-key` endpoint — see §13 Future Considerations).
+
+**Step 3 — Delete the old key:**
+
+```bash
+curl -k -X POST 'https://litellm-api.10.20.185.165.nip.io/key/delete' \
+  -H "Authorization: Bearer $LITELLM_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "keys": ["sk-BcfZgJlmvQdDnsK-DFvRBg"]
+  }'
+```
+
+> Always complete step 2 before step 3. Reversing the order leaves a window where `GET /api/v1/models/keys` returns a key that LiteLLM has already revoked.
+
+### Planned automation
+
+Manual rotation via raw LiteLLM API calls is the current approach. The following are tracked as future work (see §13):
+
+- **Connector Key Rotation** — a scheduled validation job that proactively detects stale keys and triggers rotation before they impact deployed models.
+- **`POST /api/v1/models/:id/rotate-key`** — a first-class Catalog API endpoint that performs the generate → DB update → delete sequence atomically and updates `keys.virtual_key` in one operation.

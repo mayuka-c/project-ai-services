@@ -1,8 +1,7 @@
 # Proposal: Service–Model Contracts
 
-- **Status**: Draft
-- **Author**: Mayuka Chatterjee
-- **Created**: 2025-01-31
+- **Status:** Draft / Proposal
+- **Created**: October 2026
 - **Prerequisite**: [model-profiles.md](./model-profiles.md) — the profile vocabulary
   (`standard`, `balanced`, `compact-4k`, `compact-8k`, `compact-16k`, `minimal`) used
   throughout this document is defined there and must be implemented first.
@@ -94,7 +93,7 @@ models:
   - componentType: <llm | embedding | reranker>
     supported:
       - modelId: <huggingface model id>     # must match a const in the component's values.schema.json oneOf
-        profiles: [<profile-id>, ...]       # one or more ids from profiles.yaml; first is default
+        profile: <profile-id>               # exactly one id from properties.profile.profiles; resolved automatically at deploy time
         default: true                       # optional — marks the pre-selected model in the UI
 ```
 
@@ -103,11 +102,10 @@ models:
 - `modelId` must match a `const` value already declared in the component's
   `values.schema.json` `oneOf`. The contract narrows, never extends, the
   component's known model list.
-- `profiles` is a list of one or more profile IDs, each of which must exactly
-  match an `id` in the component provider's `profiles.yaml`. A single-element
-  list means no profile choice is exposed to the user. A multi-element list
-  produces a profile dropdown scoped to that model's allowed set; the first
-  entry is the pre-selected default.
+- `profile` is a single string that must exactly match an `id` in the component
+  provider's `properties.profile.profiles`. It is injected automatically at
+  deploy time — the user never selects a profile when deploying through a
+  service. No profile dropdown is shown.
 - Exactly one entry per `componentType` may set `default: true`. If omitted,
   the first entry is treated as the default.
 - For component types with a single validated model and profile (embedding,
@@ -132,10 +130,10 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [standard]
+        profile: standard
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [standard]
+        profile: standard
 ```
 
 #### `services/summarize/metadata.yaml`
@@ -148,17 +146,16 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [standard]
+        profile: standard
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [standard]
+        profile: standard
 ```
 
 #### `services/extract/metadata.yaml`
 
 Extract is a short-context, structured-output workload — 1 card.
-`compact-4k` (4,096 tokens, batch 32) is used on RHAIIS 3.6+;
-`minimal` (3,072 tokens, batch 16) is the legacy 3.3–3.5 option.
+`compact-4k` (4,096 tokens, batch 32) is used on RHAIIS 3.6+.
 
 ```yaml
 # Added to services/extract/metadata.yaml
@@ -166,12 +163,12 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [compact-4k]
+        profile: compact-4k
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [compact-4k]
+        profile: compact-4k
       - modelId: meta-llama/Llama-3.1-8B-Instruct
-        profiles: [compact-4k]
+        profile: compact-4k
 ```
 
 #### `services/translate/metadata.yaml`
@@ -185,17 +182,17 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [compact-4k]
+        profile: compact-4k
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [compact-4k]
+        profile: compact-4k
 ```
 
 #### `services/similarity/metadata.yaml`
 
 Similarity depends on `embedding` and `reranker`, not `llm`. Both have a
-single validated model, so there is no profile choice to expose. The contract
-still declares them explicitly so the backend can enforce the constraint.
+single validated model and profile — the contract declares them explicitly
+so the backend can enforce the constraint.
 
 ```yaml
 # Added to services/similarity/metadata.yaml
@@ -203,12 +200,12 @@ models:
   - componentType: embedding
     supported:
       - modelId: ibm-granite/granite-embedding-278m-multilingual
-        profiles: [standard]
+        profile: standard
         default: true
   - componentType: reranker
     supported:
       - modelId: BAAI/bge-reranker-v2-m3
-        profiles: [standard]
+        profile: standard
         default: true
 ```
 
@@ -290,7 +287,7 @@ and [`bundle/validate/metadata/bundle.go`](../../ai-services/internal/pkg/catalo
 2. The `modelId` exists as a `const` in the corresponding embedded component's
    `values.schema.json` — a BYOS service bundle cannot declare models the
    platform does not know about.
-3. The `profile` ID exists in the component provider's `profiles.yaml`.
+3. The `profile` ID exists in the component provider's `properties.profile.profiles`.
 4. The `profile` ID appears in that model's `x-profiles` list — the
    `(model, profile)` combination is a validated configuration per the
    hardware-profile proposal.
@@ -315,16 +312,17 @@ type ServiceModelContract struct {
 }
 
 type ServiceModelEntry struct {
-    ModelID string `yaml:"modelId"`
-    Profiles []string `yaml:"profiles"`
-    Default bool   `yaml:"default"`
+    ModelID  string `yaml:"modelId"`
+    Profile  string `yaml:"profile"`
+    Default  bool   `yaml:"default"`
 }
 ```
 
 The `parseServiceMetadataYAML` function already decodes and validates the
 struct — the cross-reference checks against the embedded component schema and
-`profiles.yaml` are added as additional validation steps after the existing
-field checks, using the same `validators.ValidationError` return convention.
+`properties.profile.profiles` are added as additional validation steps after
+the existing field checks, using the same `validators.ValidationError` return
+convention.
 
 ---
 
@@ -335,7 +333,7 @@ field checks, using the same `validators.ValidationError` return convention.
 | `assets/services/*/metadata.yaml` | Add `models:` section (5 services: chat, summarize, extract, translate, similarity) |
 | Catalog backend — deploy-options endpoint | Filter model `oneOf` list by service contract before returning schema |
 | Catalog backend — param resolution | Inject `profile` from service contract before template render |
-| Bundle upload validator — `ServiceMetadataYAML` | Add `Models []ServiceModelContract` field; cross-check each `modelId` and `profile` against the embedded component schema and `profiles.yaml` (BYOS only — embedded assets are trusted) |
+| Bundle upload validator — `ServiceMetadataYAML` | Add `Models []ServiceModelContract` field; cross-check each `modelId` and `profile` against the embedded component schema and `properties.profile.profiles` (BYOS only — embedded assets are trusted) |
 | `assets/components/llm/vllm-spyre/*/values.schema.json` | No change — remains the source of truth for model metadata |
 | Templates | No change — already consume the flat profile params from the hardware-profile proposal |
 | `DeployOptionsProvider.Schema` URL | Gains `?service=<id>` query param so the backend can apply contract filtering |
@@ -388,17 +386,19 @@ context of a service:
 /api/v1/components/llm/providers/vllm-spyre/params?runtime=podman&service=extract
 ```
 
-### `profiles` field (list, not scalar)
+### `profile` field (single string)
 
-The contract field is `profiles: [<id>, ...]` — a list, not a scalar. A
-single-element list means no profile choice is shown. A multi-element list
-produces a profile dropdown for that model, with the first entry as default.
+The contract field is `profile: <id>` — a single string, not a list. The
+service contract prescribes exactly one profile per model; the user never
+selects a profile in the service deploy flow, so there is no reason to allow
+more than one. The profile dropdown (defined in the hardware-profile proposal)
+is only shown in standalone model deployment outside any service context.
 
 ---
 
-## 9. Updated service contracts (profiles list)
+## 9. Service contracts — complete reference
 
-The per-service YAML blocks from §4.2 are updated to use `profiles` (list).
+All per-service YAML blocks use `profile` (single string).
 
 #### `services/chat/metadata.yaml`
 ```yaml
@@ -406,10 +406,10 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [standard]
+        profile: standard
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [standard]
+        profile: standard
 ```
 
 #### `services/summarize/metadata.yaml`
@@ -418,10 +418,10 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [standard]
+        profile: standard
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [standard]
+        profile: standard
 ```
 
 #### `services/extract/metadata.yaml`
@@ -430,12 +430,12 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [compact-4k]
+        profile: compact-4k
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [compact-4k]
+        profile: compact-4k
       - modelId: meta-llama/Llama-3.1-8B-Instruct
-        profiles: [compact-4k]
+        profile: compact-4k
 ```
 
 #### `services/translate/metadata.yaml`
@@ -444,10 +444,10 @@ models:
   - componentType: llm
     supported:
       - modelId: ibm-granite/granite-4.1-8b-fp8
-        profiles: [compact-4k]
+        profile: compact-4k
         default: true
       - modelId: ibm-granite/granite-3.3-8b-instruct
-        profiles: [compact-4k]
+        profile: compact-4k
 ```
 
 #### `services/similarity/metadata.yaml`
@@ -456,12 +456,12 @@ models:
   - componentType: embedding
     supported:
       - modelId: ibm-granite/granite-embedding-278m-multilingual
-        profiles: [standard]
+        profile: standard
         default: true
   - componentType: reranker
     supported:
       - modelId: BAAI/bge-reranker-v2-m3
-        profiles: [standard]
+        profile: standard
         default: true
 ```
 
@@ -486,7 +486,7 @@ models:
    `{ "model": "ibm-granite/granite-4.1-8b-fp8" }`.
 8. Backend validator checks `modelId` is in service contract → pass.
 9. Backend param resolver looks up `(extract, granite-4.1-8b-fp8)` →
-   `profiles[0] = compact-4k`.
+    `profile = compact-4k`.
 10. Profile resolver expands `compact-4k` →
     `numCards=1, maxModelLen=4096, maxBatchSize=32, memory="100Gi", shmSize="64Mi"`.
 11. Podman pod starts with 1 Spyre card, 100 GB memory, 4K context window.

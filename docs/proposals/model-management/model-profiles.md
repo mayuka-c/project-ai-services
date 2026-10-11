@@ -1,8 +1,7 @@
 # Proposal: Model Hardware Profiles
 
-- **Status**: Draft
-- **Author**: Mayuka Chatterjee
-- **Created**: 2025-01-31
+- **Status:** Draft / Proposal
+- **Created**: October 2026
 
 ---
 
@@ -105,125 +104,35 @@ validated configuration so no naming distinction is needed:
 
 ---
 
-## 3. Solution: Named profiles as shared data, models reference by ID
+## 3. Solution: Named profiles embedded in `values.schema.json`, models reference by ID
 
 ### 3.1 Design
 
-A **profile** is a named, globally-unique preset in a provider-level
-`profiles.yaml` file. Each model entry in `values.schema.json` references only
-the profile IDs it supports via an `x-profiles` list — it does not embed the
-hardware parameters. This means:
+A **profile** is a named, globally-unique preset defined inside `properties.profile`
+in `values.schema.json` as a `profiles` array. Each model entry's `oneOf` references
+only the profile IDs it supports via an `x-profiles` list. No separate `profiles.yaml`
+file is needed.
 
-- Hardware params are defined **once** in `profiles.yaml` — no duplication when
-  multiple models share the same configuration (e.g. `standard` is used by
-  Granite-3.3, Granite-4.1, Llama, and Mistral for RAG inferencing).
-- `values.schema.json` stays readable — model entries carry `"x-profiles": ["standard", "compact-4k"]`
-  rather than inline param blocks.
+This means:
+
+- Hardware params are defined **once** inside `properties.profile.profiles` — no
+  duplication when multiple models share the same configuration (e.g. `standard`
+  is used by Granite-3.3, Granite-4.1, Llama, and Mistral for RAG inferencing).
+- Everything lives in one file — the profile definitions sit inside the `profile`
+  property that they configure, making `values.schema.json` fully self-contained.
 - Service contracts (§ in `service-model-contracts.md`) reference profile IDs
   directly by their stable global name — `profile: compact-4k` is unambiguous
   regardless of which model is selected.
-- Adding a new IBM-validated configuration is a single new entry in
-  `profiles.yaml` — no template or schema changes needed.
+- Adding a new IBM-validated configuration is a new entry in
+  `properties.profile.profiles` — no separate file to create.
 
-### 3.2 `llm/vllm-spyre/profiles.yaml` — both `podman/` and `openshift/`
+### 3.2 `llm/vllm-spyre/values.schema.json` — both `podman/` and `openshift/`
 
-`params` keys match `values.yaml` exactly — flat camelCase. `numCards`,
-`memory`, and `shmSize` are new keys that will be added to `values.yaml` as
-part of this proposal; their value format matches the template usage (`"200Gi"`
-string for memory, integer for card count).
-
-```yaml
-# assets/components/llm/vllm-spyre/podman/profiles.yaml
-# assets/components/llm/vllm-spyre/openshift/profiles.yaml
-#
-# Source: IBM Spyre for Power — Supported use cases
-# https://www.ibm.com/docs/en/ibm-spyre-for-power?topic=cases-supported-use
-# Last updated: 2026-09-22
-
-profiles:
-  - id: standard
-    default: true
-    title: "Standard  (4 cards · 32K context · batch 32)"
-    description: >
-      Full 4-card RAG inferencing configuration. Validated for all supported
-      LLMs (Granite-3.3, Granite-4.1-fp8, Llama-3.1-8B, Mistral-Small-24B,
-      Ministral-14b-BF16).
-    params:
-      numCards: 4
-      maxModelLen: 32768
-      maxBatchSize: 32
-      memory: "200Gi"
-      shmSize: "2Gi"
-
-  - id: balanced
-    title: "Balanced  (2 cards · 8K context · batch 32)"
-    description: >
-      2-card mid-context configuration. Validated for Mistral-Small-24B entity
-      extraction and Ministral-14b-BF16 entity extraction 2-card option.
-    params:
-      numCards: 2
-      maxModelLen: 8192
-      maxBatchSize: 32
-      memory: "150Gi"
-      shmSize: "2Gi"
-
-  - id: compact-4k
-    title: "Compact  (1 card · 4K context · batch 32)"
-    description: >
-      Single-card short-context configuration. Validated for Granite-3.3,
-      Granite-4.1-fp8, and Llama-3.1-8B entity extraction (RHAIIS 3.6);
-      Ministral-14b-BF16 entity extraction 1-card option.
-    params:
-      numCards: 1
-      maxModelLen: 4096
-      maxBatchSize: 32
-      memory: "100Gi"
-      shmSize: "64Mi"
-
-  - id: compact-8k
-    title: "Compact  (1 card · 8K context · batch 16)"
-    description: >
-      Single-card 8K context configuration. Validated for Granite-vision-3.3-2b
-      entity extraction 1-card option.
-    params:
-      numCards: 1
-      maxModelLen: 8192
-      maxBatchSize: 16
-      memory: "100Gi"
-      shmSize: "2Gi"
-
-  - id: compact-16k
-    title: "Compact  (1 card · 16K context · batch 16)"
-    description: >
-      Single-card 16K context configuration. Validated for Granite-vision-3.3-2b
-      entity extraction 2nd hardware option.
-    params:
-      numCards: 1
-      maxModelLen: 16384
-      maxBatchSize: 16
-      memory: "100Gi"
-      shmSize: "2Gi"
-
-  - id: minimal
-    title: "Minimal  (1 card · 3K context · batch 16)"
-    description: >
-      Smallest single-card configuration. Validated for Granite-3.3,
-      Granite-4.1-fp8, and Llama-3.1-8B entity extraction on RHAIIS 3.3–3.5.
-      Superseded by compact-4k on RHAIIS 3.6.
-    params:
-      numCards: 1
-      maxModelLen: 3072
-      maxBatchSize: 16
-      memory: "100Gi"
-      shmSize: "64Mi"
-```
-
-### 3.3 `values.schema.json` — models reference profiles by ID
-
-Each model's `oneOf` entry in `values.schema.json` gains an `x-profiles` list
-— the IDs of the profiles from `profiles.yaml` that are valid for that model.
-The backend reads this list to build the profile dropdown and to validate the
-`profile` param at deploy time.
+Profile definitions are stored inside `properties.profile` as a `profiles` array,
+co-located with the field they configure. `params` keys match `values.yaml` exactly
+— flat camelCase. `numCards`, `memory`, and `shmSize` are new keys added to
+`values.yaml` as part of this proposal; their value format matches the template
+usage (`"200Gi"` string for memory, integer for card count).
 
 ```json
 {
@@ -278,8 +187,46 @@ The backend reads this list to build the profile dropdown and to validate the
       "type": "string",
       "title": "Deployment profile",
       "description": "Hardware sizing preset — options depend on the selected model.",
-      "x-profile-source": "profiles.yaml",
-      "x-profile-filter": "model"
+      "x-profile-filter": "model",
+      "profiles": [
+        {
+          "id": "standard",
+          "default": true,
+          "title": "Standard  (4 cards · 32K context · batch 32)",
+          "description": "Full 4-card RAG inferencing configuration. Validated for all supported LLMs (Granite-3.3, Granite-4.1-fp8, Llama-3.1-8B, Mistral-Small-24B, Ministral-14b-BF16).",
+          "params": { "numCards": 4, "maxModelLen": 32768, "maxBatchSize": 32, "memory": "200Gi", "shmSize": "2Gi" }
+        },
+        {
+          "id": "balanced",
+          "title": "Balanced  (2 cards · 8K context · batch 32)",
+          "description": "2-card mid-context configuration. Validated for Mistral-Small-24B entity extraction and Ministral-14b-BF16 entity extraction 2-card option.",
+          "params": { "numCards": 2, "maxModelLen": 8192, "maxBatchSize": 32, "memory": "150Gi", "shmSize": "2Gi" }
+        },
+        {
+          "id": "compact-4k",
+          "title": "Compact  (1 card · 4K context · batch 32)",
+          "description": "Single-card short-context configuration. Validated for Granite-3.3, Granite-4.1-fp8, and Llama-3.1-8B entity extraction (RHAIIS 3.6); Ministral-14b-BF16 entity extraction 1-card option.",
+          "params": { "numCards": 1, "maxModelLen": 4096, "maxBatchSize": 32, "memory": "100Gi", "shmSize": "64Mi" }
+        },
+        {
+          "id": "compact-8k",
+          "title": "Compact  (1 card · 8K context · batch 16)",
+          "description": "Single-card 8K context configuration. Validated for Granite-vision-3.3-2b entity extraction 1-card option.",
+          "params": { "numCards": 1, "maxModelLen": 8192, "maxBatchSize": 16, "memory": "100Gi", "shmSize": "2Gi" }
+        },
+        {
+          "id": "compact-16k",
+          "title": "Compact  (1 card · 16K context · batch 16)",
+          "description": "Single-card 16K context configuration. Validated for Granite-vision-3.3-2b entity extraction 2nd hardware option.",
+          "params": { "numCards": 1, "maxModelLen": 16384, "maxBatchSize": 16, "memory": "100Gi", "shmSize": "2Gi" }
+        },
+        {
+          "id": "minimal",
+          "title": "Minimal  (1 card · 3K context · batch 16)",
+          "description": "Smallest single-card configuration. Validated for Granite-3.3, Granite-4.1-fp8, and Llama-3.1-8B entity extraction on RHAIIS 3.3–3.5. Superseded by compact-4k on RHAIIS 3.6.",
+          "params": { "numCards": 1, "maxModelLen": 3072, "maxBatchSize": 16, "memory": "100Gi", "shmSize": "64Mi" }
+        }
+      ]
     },
     "apiKey": {
       "type": "string",
@@ -290,81 +237,129 @@ The backend reads this list to build the profile dropdown and to validate the
 }
 ```
 
-> `x-profile-filter: "model"` tells the backend to intersect the full
-> `profiles.yaml` list with the selected model's `x-profiles` array before
-> returning the profile `oneOf` options to the UI. The user first picks a model;
-> the profile dropdown then shows only the profiles valid for that model.
+> `x-profile-filter: "model"` tells the backend to intersect the `profiles`
+> array (inside `properties.profile`) with the selected model's `x-profiles`
+> array before returning the profile `oneOf` options to the UI. The user first
+> picks a model; the profile dropdown then shows only the profiles valid for
+> that model.
 
-### 3.4 `llm/vllm-cpu/profiles.yaml` — both `podman/` and `openshift/`
+### 3.3 `llm/vllm-cpu/values.schema.json` — both `podman/` and `openshift/`
 
 CPU has no cards. Profile names follow context window only.
 
-```yaml
-# assets/components/llm/vllm-cpu/podman/profiles.yaml
-# assets/components/llm/vllm-cpu/openshift/profiles.yaml
-profiles:
-  - id: standard
-    default: true
-    title: "Standard  (8K context · batch 32)"
-    description: Default CPU token-budget configuration for most workloads.
-    params:
-      maxNumBatchedTokens: 8096
-      maxModelLen: 8096
-      maxBatchSize: 32
-
-  - id: compact-3k
-    title: "Compact  (3K context · batch 16)"
-    description: Reduced token-budget for short-context CPU workloads.
-    params:
-      maxNumBatchedTokens: 3072
-      maxModelLen: 3072
-      maxBatchSize: 16
+```json
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model": { "...": "..." },
+    "profile": {
+      "type": "string",
+      "title": "Deployment profile",
+      "x-profile-filter": "model",
+      "profiles": [
+        {
+          "id": "standard",
+          "default": true,
+          "title": "Standard  (8K context · batch 32)",
+          "description": "Default CPU token-budget configuration for most workloads.",
+          "params": { "maxNumBatchedTokens": 8096, "maxModelLen": 8096, "maxBatchSize": 32 }
+        },
+        {
+          "id": "compact-3k",
+          "title": "Compact  (3K context · batch 16)",
+          "description": "Reduced token-budget for short-context CPU workloads.",
+          "params": { "maxNumBatchedTokens": 3072, "maxModelLen": 3072, "maxBatchSize": 16 }
+        }
+      ]
+    },
+    "apiKey": { "...": "..." }
+  }
+}
 ```
 
-### 3.5 `reranker/vllm-spyre/profiles.yaml`
+### 3.4 `reranker/vllm-spyre/values.schema.json`
 
-Single validated configuration — no dropdown shown in the UI.
-`params` keys match `reranker/vllm-spyre/podman/values.yaml`; `numCards`,
-`memory`, `shmSize` are new keys added by this proposal.
+Single validated configuration — no dropdown shown in the UI (backend omits the
+`profile` field from the returned schema entirely when only one profile is defined).
 
-```yaml
-# assets/components/reranker/vllm-spyre/podman/profiles.yaml
-# assets/components/reranker/vllm-spyre/openshift/profiles.yaml
-profiles:
-  - id: standard
-    default: true
-    title: "Standard  (1 card · 8K context · batch 4)"
-    description: >
-      Single validated configuration for bge-reranker-v2-m3.
-      IBM Spyre docs: Reranker row.
-    params:
-      numCards: 1
-      maxModelLen: 8192
-      maxBatchSize: 4
-      memory: "50Gi"
-      shmSize: "64Mi"
+```json
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model": {
+      "type": "string",
+      "title": "Reranker model",
+      "oneOf": [
+        {
+          "const": "BAAI/bge-reranker-v2-m3",
+          "title": "bge-reranker-v2-m3",
+          "description": "...",
+          "x-profiles": ["standard"]
+        }
+      ],
+      "default": "BAAI/bge-reranker-v2-m3"
+    },
+    "profile": {
+      "type": "string",
+      "title": "Deployment profile",
+      "x-profile-filter": "model",
+      "profiles": [
+        {
+          "id": "standard",
+          "default": true,
+          "title": "Standard  (1 card · 8K context · batch 4)",
+          "description": "Single validated configuration for bge-reranker-v2-m3.",
+          "params": { "numCards": 1, "maxModelLen": 8192, "maxBatchSize": 4, "memory": "50Gi", "shmSize": "64Mi" }
+        }
+      ]
+    }
+  }
+}
 ```
 
-### 3.6 `embedding/vllm-cpu/profiles.yaml`
+### 3.5 `embedding/vllm-cpu/values.schema.json`
 
 Single validated configuration — no dropdown shown in the UI.
-`params` keys match `embedding/vllm-cpu/podman/values.yaml`; `memory`
-is a new key added by this proposal.
 
-```yaml
-# assets/components/embedding/vllm-cpu/podman/profiles.yaml
-# assets/components/embedding/vllm-cpu/openshift/profiles.yaml
-profiles:
-  - id: standard
-    default: true
-    title: "Standard  (512 context · batch 256)"
-    description: >
-      Single validated configuration for Granite Embedding and
-      Multilingual-E5 models.
-    params:
-      maxModelLen: 512
-      maxBatchSize: 256
-      memory: "50Gi"
+```json
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model": {
+      "type": "string",
+      "title": "Embedding model",
+      "oneOf": [
+        {
+          "const": "ibm-granite/granite-embedding-278m-multilingual",
+          "title": "granite-embedding-278m-multilingual",
+          "description": "...",
+          "x-profiles": ["standard"]
+        }
+      ],
+      "default": "ibm-granite/granite-embedding-278m-multilingual"
+    },
+    "profile": {
+      "type": "string",
+      "title": "Deployment profile",
+      "x-profile-filter": "model",
+      "profiles": [
+        {
+          "id": "standard",
+          "default": true,
+          "title": "Standard  (512 context · batch 256)",
+          "description": "Single validated configuration for Granite Embedding and Multilingual-E5 models.",
+          "params": { "maxModelLen": 512, "maxBatchSize": 256, "memory": "50Gi" }
+        }
+      ]
+    }
+  }
+}
 ```
 
 ---
@@ -374,14 +369,15 @@ profiles:
 ### 4.1 `values.yaml` — remove derived fields, no `profile` default
 
 The individual parameter fields (`maxModelLen`, `maxBatchSize`, etc.) are
-removed from `values.yaml` because they are now authoritative in `profiles.yaml`.
+removed from `values.yaml` because they are now authoritative in
+`properties.profile.profiles` inside `values.schema.json`.
 No `profile` default is written here — the hardware params are already encoded
 inside each model's `x-profiles` list in `values.schema.json`, so a static
 `"standard"` default in `values.yaml` would be incorrect for models that don't
 support `standard` (e.g. `granite-vision-3.3-2b` only supports `compact-8k` /
 `compact-16k`). The backend resolves the default at deploy time by selecting the
-first profile in the chosen model's `x-profiles` list that has `default: true`
-in `profiles.yaml` (see §5.4).
+first profile in the chosen model's `x-profiles` list that has `"default": true`
+in `properties.profile.profiles` (see §5.4).
 
 **`llm/vllm-spyre/podman/values.yaml`**
 ```yaml
@@ -440,15 +436,16 @@ apiKey: ""
 # all hardware params are derived from profiles.yaml at render time
 ```
 
-### 4.2 `values.schema.json` — profile stub + model `x-profiles`
+### 4.2 `values.schema.json` — profile definitions + model `x-profiles`
 
-The `profile` field is already shown in full in §3.3. In the checked-in file
-it is a stub — `x-profile-source` and `x-profile-filter` signal the backend
-to build the `oneOf` dynamically. Each model's `oneOf` entry carries
-`x-profiles` listing only the profile IDs valid for that model.
+The `profile` field and its embedded `profiles` array are shown in §3.2.
+The checked-in file is self-contained — `properties.profile.profiles` holds all
+profile data and `x-profile-filter` signals the backend to build the `oneOf`
+dynamically. Each model's `oneOf` entry carries `x-profiles` listing only the
+profile IDs valid for that model.
 
-The backend uses these two extension fields to:
-1. Load the full list from `profiles.yaml` (`x-profile-source`).
+The backend uses these extension fields to:
+1. Read the full list from `properties.profile.profiles` in the schema it already holds — no extra file read.
 2. Intersect it with the selected model's `x-profiles` array (`x-profile-filter: "model"`).
 3. Return only the intersected set as the `oneOf` for the `profile` field.
 
@@ -458,7 +455,7 @@ the `profile` field from the returned schema entirely — no dropdown is shown.
 ### 4.3 Templates — read from resolved profile values
 
 The template no longer contains if/else branches for profiles. The backend
-resolves the selected profile from `profiles.yaml` and merges its `params` into
+resolves the selected profile from `properties.profile.profiles` and merges its `params` into
 the values map before rendering. The template references these as ordinary
 `.Values.*` keys.
 
@@ -584,34 +581,39 @@ type Profile struct {
 }
 ```
 
-### 5.2 `loadProfiles()` — new private helper on `CatalogProvider`
+### 5.2 `loadProfilesFromSchema()` — new private helper
 
-A new private helper reads `profiles.yaml` from the provider's runtime
-directory using the same `itemFS` and `resolveRuntimeType` pattern already
-used by [`LoadComponentValues()`](../../ai-services/internal/pkg/catalog/catalog.go):
+A new private helper extracts the `profiles` array from inside `properties.profile`
+in the already-parsed `values.schema.json` map. No extra file read is needed — the
+schema is already in memory when this is called.
 
 ```go
-func (p *CatalogProvider) loadProfiles(componentType, providerID string) ([]types.Profile, error) {
-    runtimePath, _   := p.resolveRuntimeType("")
-    componentKey     := fmt.Sprintf("%s/%s", componentType, providerID)
-    componentPath, _ := p.GetCatalogItemPath(componentKey)
-    itemFS, _        := p.GetItemFS(componentKey)
-
-    profilesPath := filepath.Join(componentPath, runtimePath, "profiles.yaml")
-    data, err := fs.ReadFile(itemFS, profilesPath)
-    if errors.Is(err, fs.ErrNotExist) {
+func loadProfilesFromSchema(schema map[string]any) ([]types.Profile, error) {
+    props, _ := schema["properties"].(map[string]any)
+    profileField, _ := props["profile"].(map[string]any)
+    raw, ok := profileField["profiles"]
+    if !ok {
         return nil, nil // no profiles defined for this provider — not an error
     }
-    if err != nil {
-        return nil, fmt.Errorf("failed to read profiles.yaml: %w", err)
+    entries, ok := raw.([]any)
+    if !ok {
+        return nil, fmt.Errorf("properties.profile.profiles must be an array")
     }
-    var wrapper struct {
-        Profiles []types.Profile `yaml:"profiles"`
+    profiles := make([]types.Profile, 0, len(entries))
+    for _, e := range entries {
+        m, ok := e.(map[string]any)
+        if !ok {
+            continue
+        }
+        var pr types.Profile
+        // marshal back to JSON and unmarshal into the typed struct
+        b, _ := json.Marshal(m)
+        if err := json.Unmarshal(b, &pr); err != nil {
+            return nil, fmt.Errorf("failed to parse profile entry: %w", err)
+        }
+        profiles = append(profiles, pr)
     }
-    if err := yaml.Unmarshal(data, &wrapper); err != nil {
-        return nil, fmt.Errorf("failed to parse profiles.yaml: %w", err)
-    }
-    return wrapper.Profiles, nil
+    return profiles, nil
 }
 ```
 
@@ -622,7 +624,7 @@ already reads and returns `values.schema.json`. After decoding the schema, it
 is extended to inject the filtered profile `oneOf` before returning.
 
 The injection logic:
-1. Loads the full `profiles.yaml` list via `loadProfiles()`.
+1. Calls `loadProfilesFromSchema(schema)` — reads `properties.profile.profiles` from the already-decoded schema map; no extra file read.
 2. Reads the selected model's `x-profiles` list from the model's `oneOf` entry.
 3. Intersects: keeps only profiles whose `id` appears in the model's `x-profiles`.
 4. Injects the filtered list as the `oneOf` on the `profile` field.
@@ -630,7 +632,7 @@ The injection logic:
 
 ```go
 // After decoding values.schema.json into `schema`:
-allProfiles, err := p.loadProfiles(componentType, providerID)
+allProfiles, err := loadProfilesFromSchema(schema)
 if err == nil && len(allProfiles) > 0 {
     props, _ := schema["properties"].(map[string]any)
 
@@ -712,7 +714,7 @@ The extension is inserted **after** the existing `argParams` merge so
 // pr.Default == true selects the first profile in profiles.yaml marked default.
 // This is model-aware because GetComponentProviderParams already constrained
 // which profiles are valid for the chosen model.
-profiles, err := p.loadProfiles(componentType, providerID)
+profiles, err := loadProfilesFromSchema(schema) // schema was decoded from values.schema.json earlier in this function
 if err != nil {
     return nil, fmt.Errorf("failed to load profiles: %w", err)
 }
@@ -811,7 +813,7 @@ request.
 
 | # | Layer | File | What it enforces |
 |---|---|---|---|
-| 1 | Schema validation | `values.schema.json` (profile `oneOf` injected from `profiles.yaml`) | `profile` must be one of the declared profile IDs; unknown keys rejected → HTTP 400 |
+| 1 | Schema validation | `values.schema.json` (`properties.profile.profiles` + `x-profiles` per model) | `profile` must be one of the declared profile IDs; unknown keys rejected → HTTP 400 |
 | 2 | Param merge | `LoadComponentValues()` | Profile params merged into values map; user cannot override individual hardware fields |
 | 3 | Spyre pre-check | `planner.go` `calculateAndAllocateSpyreCards()` | Template pre-rendered to read `ai-services.io/llm--spyre-cards` annotation; deploy rejected if host lacks free cards → HTTP 422 |
 | 4 | Pod annotation | `vllm-server.yaml.tmpl` | `ai-services.io/llm--spyre-cards: "{{ .Values.numCards }}"` — authoritative signal for card allocator |
@@ -825,33 +827,29 @@ request.
 
 | File | Change |
 |---|---|
-| `components/llm/vllm-spyre/podman/profiles.yaml` | **New** — profile definitions for Spyre LLM Podman |
-| `components/llm/vllm-spyre/openshift/profiles.yaml` | **New** — profile definitions for Spyre LLM OpenShift |
-| `components/llm/vllm-cpu/podman/profiles.yaml` | **New** — profile definitions for CPU LLM Podman |
-| `components/llm/vllm-cpu/openshift/profiles.yaml` | **New** — profile definitions for CPU LLM OpenShift |
-| `components/reranker/vllm-spyre/podman/profiles.yaml` | **New** — single-profile definition for Spyre reranker |
-| `components/reranker/vllm-spyre/openshift/profiles.yaml` | **New** — single-profile definition for Spyre reranker |
-| `components/embedding/vllm-cpu/podman/profiles.yaml` | **New** — single-profile definition for embedding |
-| `components/embedding/vllm-cpu/openshift/profiles.yaml` | **New** — single-profile definition for embedding |
-| `components/llm/vllm-spyre/podman/values.yaml` | Remove `maxModelLen`/`maxBatchSize`; add `profile: "standard"` |
-| `components/llm/vllm-spyre/openshift/values.yaml` | Remove resource params; add `profile: "standard"` |
-| `components/llm/vllm-cpu/podman/values.yaml` | Remove `maxNumBatchedTokens`/`maxModelLen`/`maxBatchSize`; add `profile: "standard"` |
-| `components/llm/vllm-cpu/openshift/values.yaml` | Same |
-| `components/llm/vllm-spyre/podman/values.schema.json` | Add `profile` stub with `x-profile-source` |
+| `components/llm/vllm-spyre/podman/values.schema.json` | Add `profiles` array inside `properties.profile` with `x-profile-filter`; add `x-profiles` to each model `oneOf` entry |
 | `components/llm/vllm-spyre/openshift/values.schema.json` | Same |
-| `components/llm/vllm-cpu/podman/values.schema.json` | Same |
+| `components/llm/vllm-cpu/podman/values.schema.json` | Add `profiles` array inside `properties.profile`; add `x-profiles` to each model `oneOf` entry |
 | `components/llm/vllm-cpu/openshift/values.schema.json` | Same |
+| `components/reranker/vllm-spyre/podman/values.schema.json` | Add single-entry `profiles` array inside `properties.profile` |
+| `components/reranker/vllm-spyre/openshift/values.schema.json` | Same |
+| `components/embedding/vllm-cpu/podman/values.schema.json` | Add single-entry `profiles` array inside `properties.profile` |
+| `components/embedding/vllm-cpu/openshift/values.schema.json` | Same |
+| `components/llm/vllm-spyre/podman/values.yaml` | Remove `maxModelLen`/`maxBatchSize` |
+| `components/llm/vllm-spyre/openshift/values.yaml` | Remove resource params |
+| `components/llm/vllm-cpu/podman/values.yaml` | Remove `maxNumBatchedTokens`/`maxModelLen`/`maxBatchSize` |
+| `components/llm/vllm-cpu/openshift/values.yaml` | Same |
 | `components/llm/vllm-spyre/podman/templates/vllm-server.yaml.tmpl` | Replace 8 hardcoded occurrences with `.Values.*` keys |
 | `components/llm/vllm-spyre/openshift/templates/instruct-inferenceservice.yaml` | Replace args + resource values |
 | `components/llm/vllm-cpu/podman/templates/vllm-server.yaml.tmpl` | Replace 3 CLI flag values |
 | `components/llm/vllm-cpu/openshift/templates/instruct-inferenceservice.yaml` | Replace args values |
 | `components/llm/vllm-spyre/podman/metadata.yaml` | Add `profiles` resource map |
 | `components/llm/vllm-spyre/openshift/metadata.yaml` | Add `profiles` resource map |
-| Catalog backend — asset loader | Add `LoadProfiles()`, profile schema injection, profile param merge |
+| Catalog backend — asset loader | Add `loadProfilesFromSchema()`, profile schema injection, profile param merge |
 
 ---
 
-## 8. Why profiles as data rather than template branches
+## 8. Why profiles in `values.schema.json` rather than template branches or a separate file
 
 The previous approach put profile resolution as if/else branches at the top of
 each Go template. This has two problems:
@@ -861,12 +859,22 @@ each Go template. This has two problems:
 2. **Profile definitions are duplicated** across podman and openshift variants
    of the same component since both need the same if/else logic.
 
-With `profiles.yaml` as data:
-- Adding a profile is a YAML change to `profiles.yaml`, reviewed as data.
-- Both `podman/` and `openshift/` within a component can share the same
-  `profiles.yaml` (or have their own if they diverge — the file is co-located).
-- The template body is stable and does not grow with each new profile.
-- The validated parameter set is visible to both humans and tooling in one place.
+An intermediate approach used a separate `profiles.yaml` file alongside
+`values.schema.json`. Embedding the definitions directly in `values.schema.json`
+improves on that by:
+
+- **One file per provider** — `values.schema.json` is already the authoritative
+  source for field definitions, validation rules, and UI rendering hints.
+  Profile data belongs there too; there is no reason to split it out.
+- **No extra file read** — the backend already decodes `values.schema.json`;
+  `loadProfilesFromSchema()` reads `properties.profile.profiles` from the parsed
+  map with zero additional I/O.
+- **Atomic changes** — adding a new profile and extending a model's `x-profiles`
+  list is a single commit to one file, not two coordinated changes across
+  `profiles.yaml` and `values.schema.json`.
+- **Schema tooling compatible** — `x-` prefixed keys are ignored by JSON Schema
+  validators, so the file remains valid and can be linted by existing tooling.
+- The template body stays stable and does not grow with each new profile.
 
 ---
 
@@ -901,7 +909,7 @@ The following changes are required in the LLD once profiling is introduced. Each
 ### §6.1 Model Endpoints — `POST /api/v1/models`
 - `profile` is added as an accepted field in the request `params` object for local providers (`vllm-cpu`, `vllm-spyre`).
 - Valid profile values are model-dependent — the schema returns only the profiles listed in the selected model's `x-profiles` array; the validator rejects any value not in that set → HTTP 400.
-- The endpoint's schema validation delegates to the provider's `values.schema.json` (whose `profile` `oneOf` is injected from `profiles.yaml` at serve time) — no handler-level change needed.
+- The endpoint's schema validation delegates to the provider's `values.schema.json` (whose `profile` `oneOf` is injected from `properties.profile.profiles` at serve time) — no handler-level change needed.
 
 ### §7.1 Deploy a Local Model — request body example
 - The example request body gains `"profile": "compact-4k"` under `params`:
