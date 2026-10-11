@@ -46,6 +46,9 @@ type ComponentRepository interface {
 	// GetRunningByTypeAndProvider returns the first managed component (created_by IS NOT NULL)
 	// that has the given type and provider and is in Running status, or (nil, nil) if none exists.
 	GetRunningByTypeAndProvider(ctx context.Context, componentType, provider string) (*models.Component, error)
+	// GetRunningByTypeProviderAndModel returns the first managed component that matches
+	// type, provider, AND metadata->>'model' (the model name param), or (nil, nil) if none exists.
+	GetRunningByTypeProviderAndModel(ctx context.Context, componentType, provider, modelName string) (*models.Component, error)
 }
 
 // ApplicationRef is a lightweight struct for applications linked to a component.
@@ -523,6 +526,34 @@ func (r *componentRepo) GetRunningByTypeAndProvider(ctx context.Context, compone
 	rows, err := r.pool.Query(ctx, query, componentType, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query running component for %s/%s: %w", componentType, provider, err)
+	}
+	defer rows.Close()
+
+	components, err := collectComponents(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(components) == 0 {
+		return nil, nil
+	}
+	return &components[0], nil
+}
+
+// GetRunningByTypeProviderAndModel returns the first managed component with the given type,
+// provider, and model name (matched against metadata->>'model') that is in Running status.
+func (r *componentRepo) GetRunningByTypeProviderAndModel(ctx context.Context, componentType, provider, modelName string) (*models.Component, error) {
+	query := selectComponentColumns + `
+		WHERE type                    = $1
+		  AND provider                = $2
+		  AND metadata->>'model'      = $3
+		  AND status                  = 'Running'
+		  AND created_by IS NOT NULL
+		ORDER BY created_at DESC
+		LIMIT 1`
+
+	rows, err := r.pool.Query(ctx, query, componentType, provider, modelName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query running component for %s/%s/%s: %w", componentType, provider, modelName, err)
 	}
 	defer rows.Close()
 

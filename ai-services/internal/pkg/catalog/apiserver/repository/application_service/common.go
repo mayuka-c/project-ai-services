@@ -759,11 +759,16 @@ func (s *ApplicationServiceBase) insertComponentRecords(
 	}
 
 	for hash, comp := range plan.Components {
-		// For managed-model types, check whether a running instance already exists.
+		// For managed-model types, check whether a running instance already exists
+		// matching type + provider + model name.
 		if managedModelTypes[comp.ComponentType] {
-			existing, lookupErr := s.ComponentRepo.GetRunningByTypeAndProvider(ctx, comp.ComponentType, comp.ProviderID)
+			modelName, _ := comp.Params["model"].(string)
+			if modelName == "" {
+				modelName, _ = comp.Values["model"].(string)
+			}
+			existing, lookupErr := s.ComponentRepo.GetRunningByTypeProviderAndModel(ctx, comp.ComponentType, comp.ProviderID, modelName)
 			if lookupErr != nil {
-				return nil, fmt.Errorf("failed to look up running component for %s/%s: %w", comp.ComponentType, comp.ProviderID, lookupErr)
+				return nil, fmt.Errorf("failed to look up running component for %s/%s/%s: %w", comp.ComponentType, comp.ProviderID, modelName, lookupErr)
 			}
 			if existing != nil {
 				// Reuse the existing component — no new DB row needed.
@@ -967,7 +972,41 @@ func (s *ApplicationServiceBase) resolveRuntimeForCreateApplication(ctx context.
 		req.WorkerName = workerconstants.LocalWorkerName
 	}
 
+	// If every component in the request is a managed model type that already has a
+	// running instance, no new pods need to be scheduled — skip the worker connectivity
+	// check. The worker might be offline but the reuse path never talks to it.
+	// Use the Local worker to resolve the runtime type (always available on the CP).
+	if s.allComponentsPreDeployed(ctx, req) {
+		rt, err := s.DeploymentPlanner.ResolveRuntimeType(ctx, workerconstants.LocalWorkerName)
+		if err == nil {
+			return rt, nil
+		}
+	}
+
 	return s.DeploymentPlanner.ResolveRuntimeType(ctx, req.WorkerName)
+}
+
+// allComponentsPreDeployed returns true when every component declared in the request
+// is a managed model type (llm/embedding/reranker) with a running instance already
+// in the DB — meaning no new pod deployment is needed and the target worker does not
+// need to be connected.
+func (s *ApplicationServiceBase) allComponentsPreDeployed(ctx context.Context, req *apimodels.CreateApplicationRequest) bool {
+	if s.ComponentRepo == nil {
+		return false
+	}
+	for _, svc := range req.Services {
+		for _, comp := range svc.Components {
+			if !managedModelTypes[comp.ComponentType] {
+				return false
+			}
+			modelName, _ := comp.Params["model"].(string)
+			existing, err := s.ComponentRepo.GetRunningByTypeProviderAndModel(ctx, comp.ComponentType, comp.ProviderID, modelName)
+			if err != nil || existing == nil {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *ApplicationServiceBase) validateCreateApplicationRequest(
