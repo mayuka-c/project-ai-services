@@ -196,12 +196,13 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 {
   "key_name": "ibm-granite/granite-3.3-8b-instruct",
   "models": ["ibm-granite/granite-3.3-8b-instruct"],
-  "tags": ["vllm-cpu"],
   "duration": null
 }
 ```
 
-`"key_name"` matches the model name exactly. `"models"` scopes the key to routes registered under that model name — attempts to call any other model name return `401`. `"tags"` carries the **provider ID** (same value used in the route's top-level `tags` field) so LiteLLM's tag filtering applies consistently — the key can only reach routes tagged with the same provider ID. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
+`"key_name"` matches the model name exactly. `"models"` scopes the key to routes registered under that model name — attempts to call any other model name return `401`. `"duration": null` makes the key non-expiring. LiteLLM returns a `key` value of the form `sk-...`.
+
+> **Note:** `tags` is deliberately **not** sent in `/key/generate`. The routing tag (`vllm-cpu` etc.) lives on the registered route itself (set via `/model/new`). Sending a provider tag in `/key/generate` that LiteLLM doesn't recognise as a registered spend-tracking tag causes a `403` on some LiteLLM versions. Route filtering is enforced by the route's own `enable_tag_filtering` + `tags` and the request's `metadata.tags` — the key does not need to repeat it.
 
 **Storage — `keys` table in Catalog DB (local models and remote connectors):**
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -130,12 +131,14 @@ func litellmPostApp(ctx context.Context, path string, payload any) error {
 }
 
 // generateAppVirtualKey calls POST /key/generate on the LiteLLM Admin API and returns
-// a virtual key scoped to modelName, tagged with providerID for tag-based routing.
-func generateAppVirtualKey(ctx context.Context, keyName, modelName, providerID string) (string, error) {
+// a virtual key scoped to modelName.
+// providerID is intentionally not sent in tags — the routing tag on the registered
+// route is sufficient for tag-based filtering. Sending an unrecognised tag in
+// /key/generate causes LiteLLM to return 403 on some versions.
+func generateAppVirtualKey(ctx context.Context, keyName, modelName, _ string) (string, error) {
 	payload := map[string]any{
 		"key_name": keyName,
 		"models":   []string{modelName},
-		"tags":     []string{providerID},
 		"duration": nil,
 	}
 
@@ -158,7 +161,8 @@ func generateAppVirtualKey(ctx context.Context, keyName, modelName, providerID s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("key/generate returned HTTP %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("key/generate returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	var result struct {
