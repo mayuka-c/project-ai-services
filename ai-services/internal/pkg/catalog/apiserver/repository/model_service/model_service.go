@@ -715,7 +715,7 @@ func (s *ModelService) registerLiteLLMRoute(ctx context.Context, modelName, prov
 	payload := map[string]any{
 		"model_name": routeName,
 		"litellm_params": map[string]any{
-			"model":    "hosted_vllm/" + routeName,
+			"model":    "hosted_vllm/" + modelName, // bare model name — vLLM does not know the provider suffix
 			"api_base": apiBase,
 			"tags":     []string{providerID},
 		},
