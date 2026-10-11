@@ -103,6 +103,16 @@ func litellmModeForTypeApp(componentType string) string {
 	}
 }
 
+// litellmAPIVersionSuffixApp returns the api_base path suffix for a given component type.
+// llm and embedding need "/v1" because hosted_vllm does not prepend it automatically.
+// Reranker uses a bare base URL — the Cohere ClientV2 constructs "/v2/rerank" itself.
+func litellmAPIVersionSuffixApp(componentType string) string {
+	if componentType == "reranker" {
+		return ""
+	}
+	return "/v1"
+}
+
 // litellmPostApp POSTs a JSON payload to the LiteLLM Admin API.
 func litellmPostApp(ctx context.Context, path string, payload any) error {
 	body, err := json.Marshal(payload)
@@ -1213,7 +1223,7 @@ func (s *ApplicationServiceBase) resolveModelComponent(ctx context.Context, plan
 			logger.WarningfCtx(ctx, "[app-deploy] component %s has no service endpoint; skipping LiteLLM route registration", existing.ID)
 		} else {
 			caddyRouteID := sanitiseCaddyRouteIDApp(modelName) + "--" + existing.ID.String()[:8]
-			apiBase, resolveErr := s.resolveAPIBase(ctx, plan, podHost, existing.ID, caddyRouteID)
+			apiBase, resolveErr := s.resolveAPIBase(ctx, plan, podHost, existing.ID, caddyRouteID, comp.ComponentType)
 			if resolveErr != nil {
 				logger.WarningfCtx(ctx, "[app-deploy] resolveAPIBase failed for pre-deployed component %s: %v", existing.ID, resolveErr)
 			} else {
@@ -1403,11 +1413,12 @@ func (s *ApplicationServiceBase) buildPostComponentHook(plan *deployment.Deploym
 //
 // podHost is the pod DNS name / IP returned by the deployer (e.g. "llm-<slug>").
 // componentID is used to build a unique Caddy route ID per deployment.
-func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deployment.DeploymentPlan, podHost string, componentID uuid.UUID, caddyRouteID string) (string, error) {
+// componentType drives the api_base suffix: llm/embedding get "/v1"; reranker gets "" (bare base).
+func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deployment.DeploymentPlan, podHost string, componentID uuid.UUID, caddyRouteID, componentType string) (string, error) {
 	if plan.WorkerName == workerconstants.LocalWorkerName {
 		// Local: LiteLLM → vLLM pod directly.
-		// /v1 is included because hosted_vllm does NOT prepend it automatically.
-		return fmt.Sprintf("http://%s:8000/v1", podHost), nil
+		// /v1 for llm/embedding; reranker uses bare base (Cohere SDK appends /v2/rerank itself).
+		return fmt.Sprintf("http://%s:8000%s", podHost, litellmAPIVersionSuffixApp(componentType)), nil
 	}
 
 	// Remote worker — needs mTLS Caddy routes exactly as model_service does.
@@ -1468,9 +1479,9 @@ func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deplo
 	}
 
 	// LiteLLM api_base: plain HTTP to local CP Caddy egress :8080.
-	// /v1 is included because hosted_vllm does NOT prepend it automatically.
-	// CP Caddy forwards the full path (prefix + /v1/...) to worker Caddy :8443,
-	// which strips the prefix and passes /v1/... through to vLLM :8000.
+	// /v1 for llm/embedding; reranker uses bare base (Cohere SDK appends /v2/rerank itself).
+	// CP Caddy forwards the full path (prefix + suffix/...) to worker Caddy :8443,
+	// which strips the prefix and passes the remainder through to vLLM :8000.
 	caddyAdminURL := utils.GetEnv(proxy.CaddyAdminURLEnvVar, "")
 	caddyHost := "ai-services--caddy"
 	if caddyAdminURL != "" {
@@ -1478,7 +1489,7 @@ func (s *ApplicationServiceBase) resolveAPIBase(ctx context.Context, plan *deplo
 			caddyHost = u.Hostname()
 		}
 	}
-	return fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix), nil
+	return fmt.Sprintf("http://%s:%s%s%s", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix, litellmAPIVersionSuffixApp(componentType)), nil
 }
 
 // handleNewlyDeployedModel performs LiteLLM registration, DB key persistence, and per-app
@@ -1505,7 +1516,7 @@ func (s *ApplicationServiceBase) handleNewlyDeployedModel(ctx context.Context, p
 	}
 
 	// Resolve the correct api_base (local pod DNS or CP Caddy egress for remote workers).
-	apiBase, err := s.resolveAPIBase(ctx, plan, podHost, comp.DatabaseID, caddyRouteID)
+	apiBase, err := s.resolveAPIBase(ctx, plan, podHost, comp.DatabaseID, caddyRouteID, comp.ComponentType)
 	if err != nil {
 		return fmt.Errorf("failed to resolve api_base for component %s: %w", comp.DatabaseID, err)
 	}

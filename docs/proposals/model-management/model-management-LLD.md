@@ -161,7 +161,7 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 > **Notes:**
 > - `model_name` is the full model name as configured in `params.model` — no provider suffix. This is exactly what consumer services pass in the `model` field.
 > - `model` uses the `hosted_vllm/<model-name>` prefix — LiteLLM infers the provider from the prefix. No separate `custom_llm_provider` field and no `api_key` are needed for local vLLM endpoints.
-> - `api_base` **must** include a `/v1` suffix (e.g. `http://llm-52db58ac5a:8000/v1`). The `hosted_vllm` provider does not prepend it automatically — omitting it causes LiteLLM to call `/chat/completions` directly, which vLLM does not serve, resulting in a `404`.
+> - `api_base` for **llm** and **embedding** routes **must** include a `/v1` suffix (e.g. `http://llm-52db58ac5a:8000/v1`). The `hosted_vllm` provider does not prepend it automatically — omitting it causes LiteLLM to call `/chat/completions` directly, which vLLM does not serve, resulting in a `404`. For **reranker** routes, use the **bare** base URL (no `/v1`) — the Cohere `ClientV2` constructs `/v2/rerank` itself from the base.
 > - `enable_tag_filtering` and `tags` are **top-level fields** on the `/model/new` request body, not nested inside `litellm_params`.
 > - `tags` carries the **provider ID** (e.g. `vllm-cpu`, `vllm-spyre`, `watsonx`). Consumer services pass the same provider ID in `metadata.tags` on inference requests so LiteLLM routes to the correct backend.
 > - For **embedding** and **reranker** component types, a `model_info` block is also included to tell LiteLLM the routing mode: `{ "model_info": { "mode": "embedding" } }` or `{ "model_info": { "mode": "rerank" } }`. This is omitted for `llm` type routes.
@@ -592,6 +592,29 @@ The `components` table already has a `metadata JSONB` column (no migration neede
 ```
 
 > `name` is a separate top-level column on `components`, not a key inside `metadata`.
+
+#### `litellm` section in provider `metadata.yaml`
+
+Each provider's `metadata.yaml` (e.g. `assets/components/llm/vllm-cpu/metadata.yaml`) carries a `litellm:` block that declares the LiteLLM-specific registration behaviour for that provider. This makes the values data-driven rather than hard-coded in Go switch statements:
+
+```yaml
+litellm:
+  provider: "hosted_vllm"   # prefix used in litellm_params.model: "{provider}/{model_name}"
+  api_base_suffix: "/v1"    # appended to the pod URL to form api_base ("" for reranker)
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `provider` | string | LiteLLM provider prefix — combined with the model name to form `litellm_params.model` (e.g. `hosted_vllm/ibm-granite/granite-3.3-8b-instruct`) |
+| `api_base_suffix` | string | Path suffix appended to the pod base URL before registering with LiteLLM. `/v1` for `llm` and `embedding` (vLLM serves `/v1/chat/completions`, `/v1/embeddings`). Empty string `""` for `reranker` — the Cohere `ClientV2` constructs `/v2/rerank` itself from the bare base URL |
+
+**Per-provider values:**
+
+| Provider | `component_type` | `litellm.provider` | `litellm.api_base_suffix` |
+|---|---|---|---|
+| `vllm-cpu` / `vllm-spyre` | `llm` | `hosted_vllm` | `/v1` |
+| `vllm-cpu` / `vllm-spyre` | `embedding` | `hosted_vllm` | `/v1` |
+| `vllm-cpu` / `vllm-spyre` | `reranker` | `hosted_vllm` | `""` |
 
 ---
 
@@ -1873,9 +1896,11 @@ The API layer distinguishes user-created components from infrastructure componen
 
 `DELETE /api/v1/models/:id` resolves the UUID — `components` first, then `connectors` — and removes the matched row. Local models are removed asynchronously (`202`); remote models synchronously (`204`). There is no separate delete path via `/api/v1/connectors`; that surface is read-only.
 
-### 6. `deployment_strategy` in `metadata.yaml` Drives the `modelmanager` Package Deploy Path
+### 6. `deployment_strategy` and `litellm` in `metadata.yaml` Drive the `modelmanager` Package
 
 `deployment_strategy: pod | remote` means zero provider string comparisons in Go code at deploy time. Adding a new provider (e.g., `azure-openai`) needs only a new `metadata.yaml` — no code change.
+
+The `litellm:` block in each provider's `metadata.yaml` similarly externalises LiteLLM registration behaviour — `provider` sets the `litellm_params.model` prefix and `api_base_suffix` controls whether `/v1` is appended to the pod URL. This means a new provider with different routing characteristics (e.g. one that serves on `/v2` instead of `/v1`) requires only a `metadata.yaml` change, not a Go code change.
 
 ### 7. `connected` is the Healthy State for Connectors
 

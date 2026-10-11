@@ -398,11 +398,11 @@ func (s *ModelService) deployAsync(ctx context.Context, componentID uuid.UUID, w
 				caddyHost = u.Hostname()
 			}
 		}
-		apiBase = fmt.Sprintf("http://%s:%s%s/v1", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix)
+		apiBase = fmt.Sprintf("http://%s:%s%s%s", caddyHost, proxy.DefaultEgressPort, ingressPathPrefix, litellmAPIVersionSuffix(req.Type))
 	} else {
 		// Local deploy: LiteLLM reaches the vLLM pod directly via pod DNS name.
-		// /v1 is included because hosted_vllm does NOT prepend it automatically.
-		apiBase = fmt.Sprintf("http://%s:8000/v1", podHost)
+		// /v1 for llm/embedding; reranker uses bare base (Cohere SDK appends /v2/rerank itself).
+		apiBase = fmt.Sprintf("http://%s:8000%s", podHost, litellmAPIVersionSuffix(req.Type))
 	}
 
 	// ── Step 4: register the LiteLLM route ────────────────────────────────────
@@ -728,6 +728,16 @@ func litellmModeForType(componentType string) string {
 	default:
 		return ""
 	}
+}
+
+// litellmAPIVersionSuffix returns the api_base path suffix required for a given component type.
+// hosted_vllm does not prepend a version automatically, so llm and embedding need "/v1".
+// Reranker uses the Cohere ClientV2 which constructs "/v2/rerank" itself from the bare base URL.
+func litellmAPIVersionSuffix(componentType string) string {
+	if componentType == "reranker" {
+		return ""
+	}
+	return "/v1"
 }
 
 // deleteLiteLLMRoute calls DELETE /model/delete on the LiteLLM Admin API by model_name.
