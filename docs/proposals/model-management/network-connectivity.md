@@ -144,7 +144,7 @@ summarise ──http :8080──▶ Worker-A Caddy (private egress)
 
 **Example:** `summarise` on Worker-A needs `granite-3.3-8b`, which runs on Worker-B. It sends one HTTP call to its local Caddy. LiteLLM selects the route, and the control plane forwards the request over mTLS to Worker-B. `summarise` needs no knowledge of Worker-B's address.
 
-Before the first call, the service fetches its LiteLLM virtual key through the same private path: `GET /api/v1/models/keys?instance_id=<id>`.
+The service authenticates to LiteLLM with its `internal` virtual key. That key is issued at application create and delivered to the pod through a Podman Secret, so the service makes no extra network call to obtain it.
 
 ### 5.5 OpenShift worker (Worker-C)
 
