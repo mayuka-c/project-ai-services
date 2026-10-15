@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "model_name",
+    "api_key"
+  ],
+  "properties": {
+    "model_name": {
+      "type": "string",
+      "title": "Large language model (LLM)",
+      "description": "Chat/Instruct model name for WatsonX"
+    },
+    "type": {
+      "type": "string",
+      "title": "API Base"
+    },
+    "api_base": {
+      "type": "string",
+      "title": "API Base",
+      "description": "Base URL of your WatsonX instance.",
+      "format": "uri",
+      "ui:section": "Connection"
+    },
+    "project_id": {
+      "type": "string",
+      "title": "Project ID",
+      "description": "Optional: Your Watsonx.ai Project ID.",
+      "ui:section": "Connection"
+    },
+    "api_key": {
+      "type": "string",
+      "title": "API Key",
+      "description": "IBM Cloud API key.",
+      "format": "password",
+      "minLength": 1,
+      "ui:section": "Authentication"
+    }
+  }
+}

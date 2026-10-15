@@ -329,8 +329,8 @@ type ModelProfileExclusions struct {
 | Catalog backend — deploy-options endpoint | Pass `?service=<id>` to params endpoint; subtract exclusions and attach recommendations |
 | Catalog backend — deploy handler | Validate submitted model/profile is not excluded; honor user profile override or auto-inject recommended profile |
 | Bundle upload validator — `ServiceMetadataYAML` | Add `Models []ServiceModelContract` struct and validate exclusion/recommendation references |
-| `assets/components/*/*/values.schema.json` | No change — remains canonical source of all models |
-| `assets/components/*/*/profiles.yaml` | No change — remains canonical source of all hardware profiles |
+| `assets/components/*/*/*/values.schema.json` | No change — remains canonical source of all models |
+| `assets/components/*/*/profiles.yaml` | No change — provider-level source of truth for all hardware profiles |
 | Templates | No change — consume resolved flat parameters |
 
 ---
