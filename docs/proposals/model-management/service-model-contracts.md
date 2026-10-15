@@ -88,25 +88,32 @@ Each service may declare an optional top-level `models` list in `services/<name>
 ```yaml
 models:
   - componentType: <llm | embedding | reranker>
+    # Optional: Exclude entire providers (e.g. if service cannot run on remote models)
+    excludeProviders:
+      - <provider-id-to-exclude>
+
     providers:
-      - providerId: <vllm-spyre | vllm-cpu | watsonx | ...>
-        # Primary recommendation (UI pre-selection and badging for this provider)
+      # Local Provider Example (includes hardware profile recommendations and exclusions)
+      - providerId: <vllm-spyre | vllm-cpu>
         recommended:
           modelId: <recommended-model-id>
-          profile: <recommended-profile-id>   # optional (for local providers)
-
-        # Per-model recommended profile overrides (overrides component default for a model)
+          profile: <recommended-profile-id>
         recommendedProfiles:
           - modelId: <model-id>
             profile: <recommended-profile-id>
-
-        # Exclusions (only if incompatible)
         excludeModels:
           - <model-id-to-exclude>
         excludeProfiles:
           - modelId: <model-id>
             profiles:
               - <profile-id-to-exclude>
+
+      # Remote Provider Example (WatsonX, hosted_vllm — no hardware profiles)
+      - providerId: <watsonx | hosted_vllm>
+        recommended:
+          modelId: <recommended-model-id>    # profile is omitted for remote
+        excludeModels:
+          - <model-id-to-exclude>             # excludes unsuited remote models
 ```
 
 #### Complete Key Reference
@@ -115,16 +122,17 @@ models:
 | :--- | :--- | :--- | :--- | :--- |
 | `models` | Root | `list` | Optional | Top-level section declaring model restrictions and recommendations. If omitted, all models/profiles are supported. |
 | `componentType` | `models[]` | `string` | **Yes** (if `models` present) | The component dependency type (`llm`, `embedding`, `reranker`). Must match one of `dependencies`. |
+| `excludeProviders` | `models[]` | `list<string>` | Optional | List of provider IDs (e.g. `watsonx`, `hosted_vllm`) **completely excluded** by this service. |
 | `providers` | `models[]` | `list` | **Yes** | List of provider-specific contract entries. |
-| `providerId` | `providers[]` | `string` | **Yes** | Registered provider identifier (e.g., `vllm-spyre`, `vllm-cpu`, `watsonx`). |
-| `recommended` | `providers[]` | `object` | Optional | Primary recommended model and profile combination for this service under this provider. |
+| `providerId` | `providers[]` | `string` | **Yes** | Registered provider identifier (local: `vllm-spyre`, `vllm-cpu`; remote: `watsonx`, `hosted_vllm`). |
+| `recommended` | `providers[]` | `object` | Optional | Primary recommended model (and profile for local) for this service under this provider. |
 | `modelId` | `recommended` | `string` | **Yes** (if `recommended` used) | The primary recommended model ID (pre-selected in UI with "★ Recommended" badge). |
-| `profile` | `recommended` | `string` | Optional | The primary recommended profile ID for the primary model. |
-| `recommendedProfiles` | `providers[]` | `list<object>` | Optional | List of per-model profile recommendation overrides. When a user selects a model, this profile is pre-selected and badged as recommended instead of the provider's global default profile. |
+| `profile` | `recommended` | `string` | Optional | The primary recommended profile ID for local providers (omitted for remote connectors). |
+| `recommendedProfiles` | `providers[]` | `list<object>` | Optional | List of per-model profile recommendation overrides (local providers only). |
 | `modelId` | `recommendedProfiles[]` | `string` | **Yes** | The target model ID whose recommended profile is being overridden. |
 | `profile` | `recommendedProfiles[]` | `string` | **Yes** | The recommended profile ID for that model in this service. |
-| `excludeModels` | `providers[]` | `list<string>` | Optional | List of model IDs from this provider that are **not supported** by the service. |
-| `excludeProfiles` | `providers[]` | `list<object>` | Optional | List of model-specific profile exclusions. |
+| `excludeModels` | `providers[]` | `list<string>` | Optional | List of model IDs from this provider that are **not supported** by the service (works for both local models and remote models). |
+| `excludeProfiles` | `providers[]` | `list<object>` | Optional | List of model-specific profile exclusions (local providers only). |
 | `modelId` | `excludeProfiles[]` | `string` | **Yes** (if `excludeProfiles` used) | The model ID whose profiles are being restricted. |
 | `profiles` | `excludeProfiles[]` | `list<string>` | **Yes** | List of profile IDs (e.g., `standard`, `balanced`) to exclude for this specific model. |
 
@@ -296,8 +304,9 @@ type ServiceMetadataYAML struct {
 }
 
 type ServiceModelContract struct {
-    ComponentType string                    `yaml:"componentType" json:"componentType"`
-    Providers     []ServiceProviderContract `yaml:"providers" json:"providers"`
+    ComponentType    string                    `yaml:"componentType" json:"componentType"`
+    ExcludeProviders []string                  `yaml:"excludeProviders,omitempty" json:"excludeProviders,omitempty"`
+    Providers        []ServiceProviderContract `yaml:"providers" json:"providers"`
 }
 
 type ServiceProviderContract struct {
@@ -345,18 +354,23 @@ type ModelProfileExclusions struct {
 
 ## 8. Schema endpoint changes
 
-### `GET /api/v1/components/{type}/providers/{id}/params`
+### Schema Endpoint Changes for Local & Remote Providers
 
-A `?service=<id>` query parameter is supported:
+Both local component params and remote connector params support the `?service=<id>` query parameter:
 
-1. **Without `?service=`**: Returns full unfiltered schema (used for standalone model deployments).
-2. **With `?service=<id>`**:
-   - Reads `models` block from `services/<id>/metadata.yaml`.
-   - Strips `excludeModels` from `model.oneOf`.
-   - Strips `excludeProfiles` from `x-profiles` of matching models.
-   - Annotates `recommended.modelId` as `model.default` and `recommended.profile` as `profile.default`.
-   - Includes `recommendedProfiles` map in schema metadata for dynamic per-model profile badging.
-   - If a model has only 1 surviving profile, hides the `profile` field for that model in the UI schema.
+#### 1. Local Component Params: `GET /api/v1/components/{type}/providers/{id}/params?service=<id>`
+- Reads `models` block from `services/<id>/metadata.yaml`.
+- Strips `excludeModels` from `model.oneOf`.
+- Strips `excludeProfiles` from `x-profiles` of matching models.
+- Annotates `recommended.modelId` as `model.default` and `recommended.profile` as `profile.default`.
+- Includes `recommendedProfiles` map in schema metadata.
+- If a model has only 1 surviving profile, hides the `profile` field for that model in the UI schema.
+
+#### 2. Remote Connector Params: `GET /api/v1/connectors/models/providers/{id}/params?service=<id>`
+- Reads `models` block from `services/<id>/metadata.yaml`.
+- Strips `excludeModels` from `model_name.oneOf` (e.g. for `watsonx` or `hosted_vllm`).
+- Annotates `recommended.modelId` as `model_name.default` with `"x-recommended": true`.
+- If the entire provider is in `excludeProviders`, returns `403 Forbidden` (`PROVIDER_NOT_SUPPORTED_BY_SERVICE`).
 
 ---
 
