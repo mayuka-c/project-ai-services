@@ -1383,15 +1383,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
           "resources": { "cpu": 4, "memory": 107374182400, "storage": 53687091200, "accelerators": { "ibm.com/spyre_pf": 1 } }
         }
       ],
-      "schema": "/api/v1/components/llm/providers/vllm-spyre/params",
-      "resources": {
-        "cpu": 4,
-        "memory": 214748364800,
-        "storage": 53687091200,
-        "accelerators": {
-          "ibm.com/spyre_pf": 4
-        }
-      }
+      "schema": "/api/v1/components/llm/providers/vllm-spyre/params"
     },
     {
       "id": "vllm-cpu",
@@ -1407,13 +1399,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
           "resources": { "cpu": 8, "memory": 68719476736, "storage": 53687091200, "accelerators": {} }
         }
       ],
-      "schema": "/api/v1/components/llm/providers/vllm-cpu/params",
-      "resources": {
-        "cpu": 8,
-        "memory": 68719476736,
-        "storage": 53687091200,
-        "accelerators": {}
-      }
+      "schema": "/api/v1/components/llm/providers/vllm-cpu/params"
     },
     {
       "id": "watsonx",
@@ -1720,7 +1706,7 @@ The UI sets `deployment_type=local`, `component_type`, `provider_id`, `model`, `
 
 ---
 
-### 7.5 Update a Remote Model's Credentials
+### 7.5 Update a Remote Model's Credentials (Stretch)
 
 **Endpoint:** `PUT /api/v1/models/:id`
 
@@ -2466,6 +2452,8 @@ For `llm`, `embedding`, and `reranker` components in the response, `model` and `
 
 #### GET /api/v1/architectures/:id/deploy-options and GET /api/v1/services/:id/deploy-options — `catalog` object on model providers
 
+## Use v2alpha
+
 For `llm`, `embedding`, and `reranker` component providers:
 
 - `category: "model"` is added so the UI knows to render a model + profile selector instead of a schema-driven params form
@@ -2515,8 +2503,8 @@ For `llm`, `embedding`, and `reranker` component providers:
               "default": true,
               "category": "model",
               "schema": "/api/v1/components/llm/providers/vllm-spyre/params",
-              "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" },
-              "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-spyre" },
+              "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" }, // 
+              "model_deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-spyre" },
               "recommendations": [
                 { "model_id": "ibm-granite/granite-4.1-8b-fp8",         "profile": "standard" },
                 { "model_id": "ibm-granite/granite-3.3-8b-instruct",    "profile": "balanced" }
@@ -2530,7 +2518,11 @@ For `llm`, `embedding`, and `reranker` component providers:
               "category": "model",
               "schema": "/api/v1/components/llm/providers/vllm-cpu/params",
               "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" },
-              "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-cpu" }
+              "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-cpu" },
+              "recommendations": [
+                { "model_id": "ibm-granite/granite-4.1-8b-fp8",         "profile": "standard" },
+                { "model_id": "ibm-granite/granite-3.3-8b-instruct",    "profile": "sta" }
+              ]
             },
             {
               "id": "watsonx",
