@@ -349,6 +349,7 @@ Since `models.yaml` exists directly inside each provider folder, it declares the
   description: "An 8b-parameter instruction-tuned LLM used for natural language understanding and generation tasks."
   license: Apache-2.0
   certified_by: IBM
+  component_type: llm
   about:
     - title: "Model strengths"
       sections:
