@@ -1026,7 +1026,7 @@ All endpoints require `Authorization: Bearer <access_token>`. All routes are und
 |---|---|---|---|
 | `GET` | `/api/v1/catalog/models` | List all catalog models, each with supported providers, `component_type`, and metadata. Filter with `?component_type=` | `200 OK` |
 | `GET` | `/api/v1/catalog/models/:id` | Get detailed model specs, architecture, supported languages, license, and strengths for a specific model | `200 OK` |
-| `GET` | `/api/v1/catalog/models/:id/deploy-options` | Get deployment options for a catalog model (available providers, hardware profiles, resource estimations, schema URLs). | `200 OK` |
+| `GET` | `/api/v1/catalog/models/:id/deploy-options` | Get deployment options for a catalog model (available providers, hardware profiles, resource estimations, schema URLs). Filter with `?provider_id=` and `?runtime=` | `200 OK` |
 
 ### 6.2 Model Runtime Endpoints (polymorphic — `components` + `connectors` tables)
 
@@ -1333,7 +1333,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
 
 **Endpoint:** `GET /api/v1/catalog/models/:id/deploy-options`
 
-**Description:** Returns all deployment options for deploying the specified model independently. Symmetrical to `GET /api/v1/services/:id/deploy-options`. Sourced by resolving the model against available providers and their parameter schemas. The UI uses this to render the model deploy wizard.
+**Description:** Returns all deployment options for deploying the specified model independently. Symmetrical to `GET /api/v1/services/:id/deploy-options`. Sourced by resolving the model against available providers and their parameter schemas. The UI uses this to render the model deploy wizard. Like the service and architecture deploy-options endpoints, it accepts `?runtime=` so providers, profiles and resource estimates are resolved from the target runtime's metadata (`assets/components/<type>/<provider>/<runtime>/`).
 
 **Path Parameters:**
 
@@ -1346,6 +1346,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `provider_id` | string | No | Filter response to a single provider (e.g. `vllm-spyre`). When omitted all providers are returned |
+| `runtime` | string | No | Target runtime: `podman` or `openshift`. Defaults to the server's runtime when absent. Local providers with no `<runtime>/` metadata (and therefore no profiles) are omitted; remote providers (`watsonx`, `hosted_vllm`) are runtime-independent and always returned. For a remote worker target, pass the worker's `runtime_type` |
 
 **Response `200 OK`:**
 
@@ -1383,7 +1384,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
           "resources": { "cpu": 4, "memory": 107374182400, "storage": 53687091200, "accelerators": { "ibm.com/spyre_pf": 1 } }
         }
       ],
-      "schema": "/api/v1/components/llm/providers/vllm-spyre/params"
+      "schema": "/api/v1/components/llm/providers/vllm-spyre/params?runtime=podman"
     },
     {
       "id": "vllm-cpu",
@@ -1399,7 +1400,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
           "resources": { "cpu": 8, "memory": 68719476736, "storage": 53687091200, "accelerators": {} }
         }
       ],
-      "schema": "/api/v1/components/llm/providers/vllm-cpu/params"
+      "schema": "/api/v1/components/llm/providers/vllm-cpu/params?runtime=podman"
     },
     {
       "id": "watsonx",
@@ -1415,6 +1416,7 @@ There is no endpoint to read a key back. Internal consumer services do not call 
 > **Resource Requirements Note:** Each profile entry carries its own `resources` block (`memory` in bytes, `accelerators`) so the UI can display accurate resource requirements as soon as the user selects a profile. The top-level `resources` block on the provider reflects the footprint of the **default profile** and is used as the initial estimate before any profile is selected.
 
 **Error Responses:**
+- `400 Bad Request` — Invalid `runtime` value (must be `podman` or `openshift`)
 - `401 Unauthorized`
 - `404 Not Found` — Model not found in catalog
 
@@ -2532,7 +2534,7 @@ For `llm`, `embedding`, and `reranker` component providers:
               "category": "model",
               "schema": "/api/v1/connectors/models/providers/watsonx/params",
               "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" },
-              "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=watsonx" },
+              "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=watsonx&runtime=podman" },
               "recommendations": [
                 { "model_id": "ibm/granite-3-8b-instruct" }
               ]
