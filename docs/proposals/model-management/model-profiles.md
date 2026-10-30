@@ -147,154 +147,231 @@ assets/components/
 
 ### 3.2 `models.yaml` structure (Provider-level)
 
-Since `models.yaml` exists directly inside each provider folder, it declares the models supported by that provider along with their supported hardware `profiles`, `default_profile`, and catalog metadata (`strengths`, `supported_languages`, `certified_by`):
+Since `models.yaml` exists directly inside each provider folder, it declares the models supported by that provider along with catalog metadata (`certified_by`, `license`) and an `about` section for display in the UI.
 
-**`assets/components/llm/vllm-spyre/models.yaml`**
+**Local providers** (`vllm-spyre`, `vllm-cpu`, `reranker/vllm-*`, `embedding/vllm-cpu`) also include `default_profile` and `profiles` — the list of hardware profiles the model has been validated against. **Remote connectors** (`hosted_vllm`, `watsonx`) omit `default_profile` and `profiles` since hardware profiles do not apply to remotely-hosted models.
+
+**`assets/components/llm/vllm-spyre/models.yaml`** (local — includes `default_profile` and `profiles`)
 ```yaml
 - id: ibm-granite/granite-3.3-8b-instruct
   name: Granite 3.3 8B Instruct
   description: "An 8b-parameter instruction-tuned LLM for reasoning, summarization, and tool-use."
   license: Apache-2.0
   certified_by: IBM
-  strengths:
-    - Reliable instruction-following
-    - Natural conversation and dialogue
-    - Strong reasoning and tool calling
-    - Enterprise-grade accuracy
-  supported_languages:
-    - English
-    - Spanish
-    - French
-    - German
-    - Portuguese
-    - Italian
-    - Japanese
-    - Korean
-    - Chinese
-    - Arabic
   default_profile: standard
   profiles:
     - standard
     - balanced
     - compact-4k
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Reliable instruction-following
+            - Natural conversation and dialogue
+            - Strong reasoning and tool calling
+            - Enterprise-grade accuracy
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - Spanish
+            - French
+            - German
+            - Portuguese
+            - Italian
+            - Japanese
+            - Korean
+            - Chinese
+            - Arabic
 
 - id: ibm-granite/granite-4.1-8b-fp8
   name: Granite 4.1 8B FP8
-  description: "FP8 quantized 8B instruct model with reduced memory footprint."
+  description: "An 8b-parameter instruction-tuned LLM used for natural language understanding and generation tasks."
   license: Apache-2.0
   certified_by: IBM
-  strengths:
-    - Reduced memory footprint via FP8 quantization
-    - Strong reasoning and tool calling
-    - Enterprise-grade accuracy
-  supported_languages:
-    - English
-    - Spanish
-    - French
-    - German
-    - Portuguese
-    - Italian
-    - Japanese
-    - Korean
-    - Chinese
-    - Arabic
   default_profile: standard
   profiles:
     - standard
     - balanced
     - compact-4k
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Reliable instruction-following
+            - Natural conversation and dialogue
+            - Strong reasoning and tool calling
+            - Enterprise-grade accuracy
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - Spanish
+            - French
+            - German
+            - Portuguese
+            - Italian
+            - Japanese
+            - Korean
+            - Chinese
+            - Arabic
 
 - id: meta-llama/Llama-3.1-8B-Instruct
   name: Llama 3.1 8B Instruct
   description: "Meta Llama 3.1 8B instruction-tuned model for general-purpose chat and reasoning."
   license: Llama-3.1
   certified_by: Meta
-  strengths:
-    - Strong general-purpose reasoning
-    - Multilingual capability
-    - Open-weight flexibility
-  supported_languages:
-    - English
-    - German
-    - French
-    - Italian
-    - Portuguese
-    - Spanish
-    - Thai
   default_profile: standard
   profiles:
     - standard
     - compact-4k
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Strong general-purpose reasoning
+            - Multilingual capability
+            - Open-weight flexibility
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - German
+            - French
+            - Italian
+            - Portuguese
+            - Spanish
+            - Thai
 
 - id: mistralai/Mistral-Small-3.2-24B-Instruct
   name: Mistral Small 3.2 24B Instruct
   description: "Mistral Small 24B instruct model balancing capability and efficiency."
   license: Apache-2.0
   certified_by: Mistral AI
-  strengths:
-    - Strong reasoning at mid-size scale
-    - Efficient for enterprise deployment
-    - Function calling support
-  supported_languages:
-    - English
-    - French
-    - German
-    - Spanish
-    - Italian
-    - Portuguese
   default_profile: balanced
   profiles:
     - standard
     - balanced
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Strong reasoning at mid-size scale
+            - Efficient for enterprise deployment
+            - Function calling support
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - French
+            - German
+            - Spanish
+            - Italian
+            - Portuguese
 ```
 
-**`assets/components/llm/vllm-cpu/models.yaml`**
+**`assets/components/llm/vllm-cpu/models.yaml`** (local — includes `default_profile` and `profiles`)
 ```yaml
 - id: ibm-granite/granite-3.3-8b-instruct
   name: Granite 3.3 8B Instruct
   description: "An 8b-parameter instruction-tuned LLM optimized for CPU execution."
   license: Apache-2.0
   certified_by: IBM
-  strengths:
-    - Reliable instruction-following
-    - Natural conversation and dialogue
-    - Strong reasoning and tool calling
-    - Enterprise-grade accuracy
-  supported_languages:
-    - English
-    - Spanish
-    - French
-    - German
-    - Portuguese
-    - Italian
-    - Japanese
-    - Korean
-    - Chinese
-    - Arabic
   default_profile: standard
   profiles:
     - standard
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Reliable instruction-following
+            - Natural conversation and dialogue
+            - Strong reasoning and tool calling
+            - Enterprise-grade accuracy
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - Spanish
+            - French
+            - German
+            - Portuguese
+            - Italian
+            - Japanese
+            - Korean
+            - Chinese
+            - Arabic
 
 - id: meta-llama/Llama-3.1-8B-Instruct
   name: Llama 3.1 8B Instruct
   description: "Meta Llama 3.1 8B instruction-tuned model for CPU-based inferencing."
   license: Llama-3.1
   certified_by: Meta
-  strengths:
-    - Strong general-purpose reasoning
-    - Multilingual capability
-    - Open-weight flexibility
-  supported_languages:
-    - English
-    - German
-    - French
-    - Italian
-    - Portuguese
-    - Spanish
-    - Thai
   default_profile: standard
   profiles:
     - standard
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Strong general-purpose reasoning
+            - Multilingual capability
+            - Open-weight flexibility
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - German
+            - French
+            - Italian
+            - Portuguese
+            - Spanish
+            - Thai
+```
+
+**`assets/connectors/models/hosted_vllm/models.yaml`** (remote — no `default_profile` or `profiles`)
+```yaml
+- id: ibm-granite/granite-4.1-8b-fp8
+  name: Granite 4.1 8B FP8
+  description: "An 8b-parameter instruction-tuned LLM used for natural language understanding and generation tasks."
+  license: Apache-2.0
+  certified_by: IBM
+  about:
+    - title: "Model strengths"
+      sections:
+        - title: "Strengths"
+          values:
+            - Reliable instruction-following
+            - Natural conversation and dialogue
+            - Strong reasoning and tool calling
+            - Enterprise-grade accuracy
+    - title: "Supported languages"
+      sections:
+        - title: "Languages"
+          values:
+            - English
+            - Spanish
+            - French
+            - German
+            - Portuguese
+            - Italian
+            - Japanese
+            - Korean
+            - Chinese
+            - Arabic
 ```
 
 ### 3.3 `profiles.yaml` structure (example: `llm/vllm-spyre`)
