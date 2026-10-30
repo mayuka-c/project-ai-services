@@ -1527,7 +1527,7 @@ The `modelmanager` package validates `params` against the provider's parameter s
 
 **Endpoint:** `GET /api/v1/models`
 
-**Description:** Lists all models — both local (`components` table) and remote (`connectors` table with model types). Optionally filter by component type, deployment type, provider, model name, profile or status. All filters are combined with AND. The application deploy form uses this endpoint to populate its **Instance** dropdown (see [Populating the Instance dropdown](#populating-the-instance-dropdown)).
+**Description:** Lists all models — both local (`components` table) and remote (`connectors` table with model types). Optionally filter by `provider_id`, `model`, component type, deployment type, or status. All filters are combined with AND. The deploy-options `instances.url` uses `provider_id` and `model` to populate the **Instance** dropdown (see [Populating the Instance dropdown](#populating-the-instance-dropdown)).
 
 **Query Parameters:**
 
@@ -1537,7 +1537,6 @@ The `modelmanager` package validates `params` against the provider's parameter s
 | `deployment_type` | string | No | — | Filter by kind: `local` or `remote`. Omit to return both |
 | `provider_id` | string | No | — | Filter by provider (e.g. `vllm-spyre`, `vllm-cpu`, `watsonx`). Matches `components.provider` / `connectors.provider` |
 | `model` | string | No | — | Filter by model identifier (e.g. `ibm-granite/granite-3.3-8b-instruct`). Matches `components.metadata->>'model'` for local models and `connectors.metadata->>'model_name'` for remote ones |
-| `profile` | string | No | — | Filter by hardware profile (e.g. `compact-4k`). Matches `components.metadata->>'profile'`. Remote models have no profile and never match |
 | `status` | string | No | — | Filter by status: `Running`, `Deploying`, `Error` (local) or `connected`, `offline` (remote) |
 | `page` | integer | No | 1 | Page number (1-indexed) |
 | `page_size` | integer | No | 20 | Items per page (max 100) |
@@ -2399,7 +2398,7 @@ For `llm`, `embedding`, and `reranker` component entries, `model` and `profile` 
 }
 ```
 
-**After:**
+**After — new deploy (no existing instance):**
 ```json
 {
   "component_type": "llm",
@@ -2410,6 +2409,16 @@ For `llm`, `embedding`, and `reranker` component entries, `model` and `profile` 
 }
 ```
 
+**After — user selects an existing instance (`instances.url` returned results):**
+```json
+{
+  "component_type": "llm",
+  "instance_id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f"
+}
+```
+
+When `instance_id` is set, `provider_id`, `model`, `profile`, and `params` are omitted — they are read from the referenced `components` row. The instance must be `Running` and its `component_type` must match.
+
 The same applies to `embedding` and `reranker` entries:
 ```json
 {
@@ -2418,6 +2427,14 @@ The same applies to `embedding` and `reranker` entries:
   "model": "ibm-granite/granite-embedding-278m-multilingual",
   "profile": "standard",
   "params": {}
+}
+```
+
+Or, if the user picks an existing embedding instance:
+```json
+{
+  "component_type": "embedding",
+  "instance_id": "a91b44e0-3c2d-4e7f-8a10-5b6c7d8e9f01"
 }
 ```
 
@@ -2461,9 +2478,10 @@ For `llm`, `embedding`, and `reranker` component providers:
 - `category: "model"` is added so the UI knows to render a model + profile selector instead of a schema-driven params form
 - `models` — named URL reference; UI calls `models.url` to fetch and populate the model dropdown
 - `deploy_options` — named URL reference; UI substitutes `{model_id}` with the selected model ID and calls `deploy_options.url` to get providers and their profiles
+- `instances` — named URL reference; UI substitutes `{model_id}` with the selected model ID and calls `instances.url` (`GET /api/v1/models` filtered by `provider_id`, `model`, `deployment_type`, and `status`) to populate the **Instance** dropdown with existing instances of that model the user can attach to instead of deploying a new one
 - `recommendations` — ordered list of `{ model_id, profile }` entries declared by the service for this component and provider (sourced from `models[].providers[].recommendations` in `services/<id>/metadata.yaml`; `profile` omitted for remote providers). The **first entry** is the primary: the UI pre-selects its model and shows a **"★ Recommended"** badge on it. When the user picks any model listed here, the UI pre-selects that entry's `profile`. Omitted when the service declares none
 - `schema` still points to `values.schema.json` for any remaining provider-specific config (e.g. `apiKey`); it no longer contains `model` or `profile` properties, so it carries no recommendations
-- Non-model providers (`opensearch`, `milvus`) omit `category`, `models`, `deploy_options`, and `recommendations`
+- Non-model providers (`opensearch`, `milvus`) omit `category`, `models`, `deploy_options`, `instances`, and `recommendations`
 
 **After — complete architecture deploy-options response:**
 
@@ -2505,8 +2523,9 @@ For `llm`, `embedding`, and `reranker` component providers:
               "default": true,
               "category": "model",
               "schema": "/api/v1/components/llm/providers/vllm-spyre/params",
-              "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" }, // 
-              "model_deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-spyre" },
+              "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" },
+              "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-spyre" },
+              "instances":      { "name": "Running Instances",     "url": "/api/v1/models?provider_id=vllm-spyre&model={model_id}&deployment_type=local&status=Running" },
               "recommendations": [
                 { "model_id": "ibm-granite/granite-4.1-8b-fp8",         "profile": "standard" },
                 { "model_id": "ibm-granite/granite-3.3-8b-instruct",    "profile": "balanced" }
@@ -2521,9 +2540,10 @@ For `llm`, `embedding`, and `reranker` component providers:
               "schema": "/api/v1/components/llm/providers/vllm-cpu/params",
               "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" },
               "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-cpu" },
+              "instances":      { "name": "Running Instances",     "url": "/api/v1/models?provider_id=vllm-cpu&model={model_id}&deployment_type=local&status=Running" },
               "recommendations": [
                 { "model_id": "ibm-granite/granite-4.1-8b-fp8",         "profile": "standard" },
-                { "model_id": "ibm-granite/granite-3.3-8b-instruct",    "profile": "sta" }
+                { "model_id": "ibm-granite/granite-3.3-8b-instruct",    "profile": "balanced" }
               ]
             },
             {
@@ -2535,6 +2555,7 @@ For `llm`, `embedding`, and `reranker` component providers:
               "schema": "/api/v1/connectors/models/providers/watsonx/params",
               "models":         { "name": "Large Language Models", "url": "/api/v1/catalog/models?component_type=llm" },
               "deploy_options": { "name": "Resource Profiles",     "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=watsonx&runtime=podman" },
+              "instances":      { "name": "Connected Instances",   "url": "/api/v1/models?provider_id=watsonx&model={model_id}&deployment_type=remote&status=connected" },
               "recommendations": [
                 { "model_id": "ibm/granite-3-8b-instruct" }
               ]
@@ -2554,6 +2575,7 @@ For `llm`, `embedding`, and `reranker` component providers:
               "schema": "/api/v1/components/embedding/providers/vllm-cpu/params",
               "models":         { "name": "Embedding Models",  "url": "/api/v1/catalog/models?component_type=embedding" },
               "deploy_options": { "name": "Resource Profiles", "url": "/api/v1/catalog/models/{model_id}/deploy-options?provider_id=vllm-cpu" },
+              "instances":      { "name": "Running Instances", "url": "/api/v1/models?provider_id=vllm-cpu&model={model_id}&deployment_type=local&status=Running" },
               "recommendations": [
                 { "model_id": "ibm-granite/granite-embedding-278m-multilingual", "profile": "standard" }
               ]
@@ -2566,7 +2588,7 @@ For `llm`, `embedding`, and `reranker` component providers:
 }
 ```
 
-> The UI uses `category: "model"` to switch from a schema-driven params form to a model + profile selector. It calls `models.url` to populate the model dropdown; the model and profile pre-selections come from the provider's `recommendations` list in this response (see `service-model-contracts.md`). `models.url` and `deploy_options.url` stay generic catalog endpoints with no service parameter. Once model and profile are chosen, they are submitted as top-level fields on the component entry — not inside `params`. `schema` is still called for any remaining provider-specific config (e.g. `apiKey`).
+> The UI uses `category: "model"` to switch from a schema-driven params form to a model + profile selector. It calls `models.url` to populate the model dropdown; the model and profile pre-selections come from the provider's `recommendations` list in this response (see `service-model-contracts.md`). `models.url` and `deploy_options.url` stay generic catalog endpoints with no service parameter. Once a model is chosen, the UI substitutes `{model_id}` into `instances.url` and calls `GET /api/v1/models` to populate the **Instance** dropdown with existing instances of that model. An empty result means no instance exists yet and the user must deploy one first. Once model, profile, and instance are chosen, they are submitted as top-level fields on the component entry — not inside `params`. `schema` is still called for any remaining provider-specific config (e.g. `apiKey`).
 
 ---
 
