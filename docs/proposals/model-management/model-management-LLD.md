@@ -1566,6 +1566,7 @@ The `modelmanager` package validates `params` against the provider's parameter s
         }
       },
       "status": "Running",
+      "connected_services": 2,
       "created_at": "2026-07-01T10:00:00Z",
       "updated_at": "2026-07-01T10:05:00Z"
     },
@@ -1578,9 +1579,12 @@ The `modelmanager` package validates `params` against the provider's parameter s
       "worker": null,
       "model": "ibm/granite-4-h-small",
       "profile": null,
-      "api_base": "https://us-south.ml.cloud.ibm.com",
-      "project_id": "my-watsonx-project-id",
+      "params": {
+        "api_base": "https://us-south.ml.cloud.ibm.com",
+        "project_id": "my-watsonx-project-id"
+      },
       "status": "connected",
+      "connected_services": 2,
       "created_at": "2026-07-01T11:00:00Z",
       "updated_at": "2026-07-01T11:05:00Z"
     }
@@ -1596,7 +1600,7 @@ The `modelmanager` package validates `params` against the provider's parameter s
 }
 ```
 
-> `worker` is `null` for remote models and for local models deployed on the control-plane Podman socket. The `status` field uses `component_status` values (`Running`, `Deploying`, `Error`) for local models and `connector_status` values (`connected`, `offline`) for remote models.
+> `worker` is `null` for remote models and for local models deployed on the control-plane Podman socket. The `status` field uses `component_status` values (`Running`, `Deploying`, `Error`) for local models and `connector_status` values (`connected`, `offline`) for remote models. `connected_services` is the count of application services currently using this model instance.
 
 #### Populating the Instance dropdown
 
@@ -1680,10 +1684,10 @@ The UI sets `deployment_type=local`, `component_type`, `provider_id`, `model`, `
   "component_type": "llm",
   "provider": { "id": "watsonx", "name": "WatsonX" },
   "worker": null,
+  "model": "ibm/granite-4-h-small",
   "status": "connected",
   "message": "Endpoint reachable and credentials accepted",
-  "metadata": {
-    "model": "ibm/granite-4-h-small",
+  "params": {
     "api_base": "https://us-south.ml.cloud.ibm.com",
     "project_id": "my-watsonx-project-id"
   },
@@ -1699,7 +1703,7 @@ The UI sets `deployment_type=local`, `component_type`, `provider_id`, `model`, `
 }
 ```
 
-> `worker` is `null` for remote models and for local models deployed on the control-plane Podman socket. For local models, `endpoints[].url` points to the worker Caddy — consumers always route through it. For remote models, `endpoints` is omitted; consumers route through LiteLLM. Secret fields are stripped from remote model `metadata` before serialisation.
+> `worker` is `null` for remote models and for local models deployed on the control-plane Podman socket. For local models, `endpoints[].url` points to the worker Caddy — consumers always route through it. For remote models, `endpoints` is omitted; consumers route through LiteLLM. Secret fields are stripped from remote model `params` before serialisation.
 
 > `applications` uses `dependency_type = 'component'` for local and `dependency_type = 'connector'` for remote when querying `service_dependencies`.
 
@@ -1769,8 +1773,9 @@ The UI sets `deployment_type=local`, `component_type`, `provider_id`, `model`, `
   "provider": { "id": "watsonx", "name": "WatsonX" },
   "status": "connected",
   "message": "",
-  "metadata": {
-    "model": "ibm/granite-4-h-small",
+  "model": "ibm/granite-4-h-small",
+  "params": {
+    "api_base": "https://us-south.ml.cloud.ibm.com",
     "project_id": "my-watsonx-project-id"
   },
   "created_by": "user@example.com",
