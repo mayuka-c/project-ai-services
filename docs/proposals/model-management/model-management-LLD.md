@@ -47,22 +47,21 @@
    - [7.5 Update a Remote Model's Credentials](#75-update-a-remote-models-credentials)
    - [7.6 Delete / Undeploy a Model](#76-delete--undeploy-a-model)
    - [7.7 Generate Public Key](#77-generate-public-key)
-8. [Pre-flight Resource Check](#8-pre-flight-resource-check)
-9. [Deployment Flow](#9-deployment-flow)
+8. [Deployment Flow](#8-deployment-flow)
    - [Flow: Application Create with Managed Model (model already deployed)](#flow-application-create--model-already-deployed-pre-deployed-path)
    - [Flow: Application Create with Managed Model (new deploy)](#flow-application-create--new-model-deploy)
    - [Flow: Application Create with Model Connector](#flow-application-create--model-connector-remote)
-10. [Key Design Decisions](#10-key-design-decisions)
-11. [Common Queries](#11-common-queries)
-12. [Error Handling](#12-error-handling)
-13. [Future Considerations](#13-future-considerations)
-14. [CLI Commands](#14-cli-commands)
-    - [14.0 Catalog Configure](#140-catalog-configure)
-    - [14.1 Model Commands](#141-model-commands)
-    - [14.2 Connector Commands](#142-connector-commands)
-    - [14.3 LiteLLM Gateway Commands](#143-litellm-gateway-commands)
-    - [14.4 Command Summary](#144-command-summary)
-15. [Key Rotation](#15-key-rotation)
+9. [Key Design Decisions](#9-key-design-decisions)
+10. [Common Queries](#10-common-queries)
+11. [Error Handling](#11-error-handling)
+12. [Future Considerations](#12-future-considerations)
+13. [CLI Commands](#13-cli-commands)
+    - [13.0 Catalog Configure](#130-catalog-configure)
+    - [13.1 Model Commands](#131-model-commands)
+    - [13.2 Connector Commands](#132-connector-commands)
+    - [13.3 LiteLLM Gateway Commands](#133-litellm-gateway-commands)
+    - [13.4 Command Summary](#134-command-summary)
+14. [Key Rotation](#14-key-rotation)
 
 ---
 
@@ -104,8 +103,7 @@ The current catalog deploys vLLM or WatsonX as `components` that are tightly cou
 1. Decouple model lifecycle from application lifecycle.
 2. Introduce a universal gateway (LiteLLM) so consumer services are provider-agnostic.
 3. Enable connection to external model endpoints via Connectors without deploying local pods.
-4. Gate all model deployments behind a pre-flight resource check.
-5. Persist all model state in the Catalog DB — local models in `components`, remote connectors in the shared `connectors` table. Virtual keys are **not** stored in the Catalog DB; they live only in LiteLLM.
+4. Persist all model state in the Catalog DB — local models in `components`, remote connectors in the shared `connectors` table. Virtual keys are **not** stored in the Catalog DB; they live only in LiteLLM.
 
 ---
 
@@ -129,7 +127,7 @@ LiteLLM is configured with its **own dedicated PostgreSQL instance**, separate f
 |---|---|
 | **Credential persistence** | LiteLLM stores the full `litellm_params` for every registered route — including secret fields (`api_key`, `token`, etc.) that the Catalog DB deliberately never holds. Without a DB these secrets are lost on gateway restart, breaking all connector routes. |
 | **Route table durability** | On gateway restart, LiteLLM rehydrates its in-memory route table from the DB. Without it, every registered model (local and remote alike) would need to be re-registered by the Catalog API, introducing a complex reconciliation loop at startup. |
-| **Separation of concerns** | Connector credentials must never enter the Catalog DB (design decision §11.2). Routing them through a LiteLLM-owned DB keeps the secret boundary clean — LiteLLM owns and manages what it stores; the Catalog API never reads it back. |
+| **Separation of concerns** | Connector credentials must never enter the Catalog DB (design decision §9.2). Routing them through a LiteLLM-owned DB keeps the secret boundary clean — LiteLLM owns and manages what it stores; the Catalog API never reads it back. |
 | **Spend / audit tracking** | LiteLLM uses its DB to persist request logs and spend data per virtual key. This enables per-model usage reporting without coupling it to the Catalog schema. |
 
 **Configuration:**
@@ -224,7 +222,7 @@ Every key is tagged with `metadata.type` so the two kinds can be told apart:
 
 | `metadata.type` | Used by | Generated | Delivered via | Scope (`metadata.tags`) | How many |
 |---|---|---|---|---|---|
-| `internal` | Service pods of a deployed application | At application create | Podman Secret `litellm-secret-<instance-slug>` (see §10.11) | Exactly one deployment ID (the chosen instance) | One per application and model |
+| `internal` | Service pods of a deployed application | At application create | Podman Secret `litellm-secret-<instance-slug>` (see §9.10) | Exactly one deployment ID (the chosen instance) | One per application and model |
 | `public` | Humans, CI pipelines and scripts calling LiteLLM from outside the platform | On demand, by a user, for a chosen model and deployment(s) — each deployment is a specific worker and profile | Shown **once** in the generate response | One or more deployment IDs, chosen by the user | **At most one per model** |
 
 **Internal key (application create):**
@@ -302,8 +300,8 @@ curl -k -X POST 'https://litellm-api.10.20.185.165.nip.io/key/generate' \
 
 | Consumer | Key type | How it receives the key |
 |---|---|---|
-| **Internal consumer services** (chatbot, digitize, similarity, summarize) | `internal` | Rendered into a Podman Secret at application create and mounted into the pod at `/etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY` (see §10.11). No call to the Catalog API is needed |
-| **External callers** (developers, CI pipelines) | `public` | The user generates it for a model and deployment(s) with `ai-services model litellm key generate` (see §14.3) or `POST /api/v1/models/keys`, and copies it from the one-time response |
+| **Internal consumer services** (chatbot, digitize, similarity, summarize) | `internal` | Rendered into a Podman Secret at application create and mounted into the pod at `/etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY` (see §9.10). No call to the Catalog API is needed |
+| **External callers** (developers, CI pipelines) | `public` | The user generates it for a model and deployment(s) with `ai-services model litellm key generate` (see §13.3) or `POST /api/v1/models/keys`, and copies it from the one-time response |
 
 **Usage by callers:**
 
@@ -588,7 +586,7 @@ Internal consumer services reach the LiteLLM gateway over the internal network u
 
 ### 4.1 Models
 
-A **Model** is an inference backend for a specific role (`llm`, `embedding`, `reranker`) deployed and managed independently of an application. `/api/v1/models` is a **polymorphic API**: a single surface that covers both local pod-backed models and remote connector-backed models. The `deployment_type` field in the request body selects the backend; responses always carry the same `deployment_type` field so callers can tell them apart.
+A **Model** is an inference backend for a specific role (`llm`, `embedding`, `reranker`) deployed and managed independently of an application. `/api/v1/models` is a **polymorphic API**: a single surface that covers both local pod-backed models and remote connector-backed models. The `deployment_type` field in the request body selects the backend; list and detail responses carry the same `deployment_type` field so callers can tell them apart.
 
 | Kind | `deployment_type` | Storage table | Example providers | Pod? | Credentials location |
 |---|---|---|---|---|---|
@@ -604,7 +602,6 @@ The key differences from today's application-coupled components:
 | Created by | Application deployment | `POST /api/v1/models` (either `deployment_type`) |
 | Lifecycle | Deleted with application | Explicit undeploy/delete required |
 | Provider endpoint | Exposed directly to services | Always proxied via LiteLLM Gateway |
-| Pre-flight resource check | None | Required for `local` models only |
 | WatsonX | Deploys a per-app LiteLLM proxy pod | `deployment_type=remote` → `connectors` row — credentials stored in LiteLLM, no pod |
 
 ### 4.2 Connectors
@@ -1177,7 +1174,7 @@ Error responses: `404 {"error": "connector type \"<type>\" not found"}` for an u
 |---|---|---|---|
 | `POST` | `/api/v1/models/{id}/keys` | Generate a **public** LiteLLM key for the model identified by `{id}`, for use by callers outside the platform. Any existing public key for that model is revoked first. The key is returned once and never stored | `201 Created` |
 
-There is no endpoint to read a key back. Internal consumer services do not call the Catalog API for a key; they receive theirs through a Podman Secret (§10.11).
+There is no endpoint to read a key back. Internal consumer services do not call the Catalog API for a key; they receive theirs through a Podman Secret (§9.10).
 
 ---
 
@@ -1499,7 +1496,7 @@ The `modelmanager` package validates `params` against the provider's parameter s
 **Response — `deployment_type=local`, `202 Accepted` (async):**
 
 ```json
-{ "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f", "deployment_type": "local" }
+{ "id": "7f3a1c2d-8e4b-4f5a-9d6e-1a2b3c4d5e6f" }
 ```
 
 > Use `GET /api/v1/models/:id` to poll status and full details.
@@ -1507,7 +1504,7 @@ The `modelmanager` package validates `params` against the provider's parameter s
 **Response — `deployment_type=remote`, `201 Created` (sync):**
 
 ```json
-{ "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc", "deployment_type": "remote" }
+{ "id": "c1d2e3f4-a5b6-7890-cdef-123456789abc" }
 ```
 
 **Error Responses:**
@@ -1518,7 +1515,7 @@ The `modelmanager` package validates `params` against the provider's parameter s
 | `401 Unauthorized` | Invalid or missing access token |
 | `404 Not Found` | `worker_selector` refers to an unknown worker name; or `provider_id` not found for the given `component_type` |
 | `409 Conflict` | A local model of the same `component_type` is already `Running` or `Deploying`; or a connector with the same `name` already exists |
-| `422 Unprocessable Entity` | Pre-flight resource check failed (local); or connectivity check failed (remote) |
+| `422 Unprocessable Entity` | Connectivity check failed (remote) |
 | `500 Internal Server Error` | Pod start failure (local); LiteLLM route registration failure (remote) |
 
 ---
@@ -1879,56 +1876,7 @@ No request body. `created_by` is taken from the access token.
 
 ---
 
-## 8. Pre-flight Resource Check
-
-Before any model pod is created, the platform validates that the host or cluster has sufficient CPU, memory, and Spyre accelerator cards. All constraint violations are collected and returned together — not just the first failure.
-
-**Triggered by:** `POST /api/v1/models` for `local` providers.
-
-**Check sequence:**
-
-1. Load `ResourceRequirements` from `assets/components/<type>/<provider>/<runtime>/metadata.yaml`.
-2. Query the existing `GET /api/v1/resources` for current system info (CPU, memory, accelerators).
-3. Check CPU available >= required.
-4. Check Memory available >= required.
-5. If `provider == vllm-spyre` and runtime is Podman: enumerate `/dev/vfio` for free Spyre cards; check `free >= required["ibm.com/spyre_pf"]`.
-6. If runtime is OpenShift: query node allocatable for accelerator resources via Kubernetes API.
-7. If any check fails: return `HTTP 422` with the full violations array.
-
-**Error Response (422 Unprocessable Entity):**
-
-```json
-{
-  "error": "Model deployment pre-flight check failed",
-  "violations": [
-    {
-      "resource": "memory",
-      "required": "150Gi",
-      "available": "42Gi",
-      "unit": "bytes",
-      "satisfied": false
-    },
-    {
-      "resource": "accelerators.ibm.com/spyre_pf",
-      "required": "4",
-      "available": "1",
-      "unit": "cards",
-      "satisfied": false
-    },
-    {
-      "resource": "cpu",
-      "required": "8",
-      "available": "12",
-      "unit": "cores",
-      "satisfied": true
-    }
-  ]
-}
-```
-
----
-
-## 9. Deployment Flow
+## 8. Deployment Flow
 
 ### Flow: Catalog Configure — LiteLLM Gateway (one-time setup)
 
@@ -1973,20 +1921,19 @@ POST /api/v1/models
   worker_selector absent → look up Local worker UUID → use LocalRuntime (control-plane Podman)
 
   1. Validate request fields; validate model against models.yaml; validate profile against profiles.yaml
-  2. Pre-flight check via LocalRuntime.GetSystemInfo → 422 if insufficient
-  3. INSERT into components (type=llm, provider=vllm-spyre,
+  2. INSERT into components (type=llm, provider=vllm-spyre,
                              status='Deploying', name='granite-llm', created_by=<user>,
                              worker_id=<local-worker-uuid>,
                              metadata={model: "ibm-granite/granite-3.3-8b-instruct", profile: "compact-4k"})
-  4. Return 202 { id: components.id }
-  5. [async] LoadComponentValues():
+  3. Return 202 { id: components.id }
+  4. [async] LoadComponentValues():
        a. Read values.yaml (runtime defaults)
        b. Merge params (provider-specific config e.g. apiKey) — model and profile are NOT in params
        c. Resolve profile "compact-4k" from profiles.yaml → merge resources, maxModelLen, maxBatchSize, shmSize into values
        d. Set values["model"] = "ibm-granite/granite-3.3-8b-instruct"
      LocalRuntime.CreatePod → Render vllm-server.yaml.tmpl with resolved values → podman kube play
-  6. [async] Poll InspectPod until liveness probe passes
-  7. [async] Register routes in LiteLLM Gateway:
+  5. [async] Poll InspectPod until liveness probe passes
+  6. [async] Register routes in LiteLLM Gateway:
        a. POST /model/new (model_name="ibm-granite/granite-3.3-8b-instruct",
                           model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
                           api_base="http://<pod-name>:8000/v1",
@@ -2016,16 +1963,12 @@ POST /api/v1/models
 
   1. Validate request fields; validate model against models.yaml; validate profile against profiles.yaml;
      verify lpar-1 exists in workers table and status='ready'
-  2. Pre-flight check via RemoteRuntime.GetSystemInfo:
-       WorkerGateway sends COMMAND_TYPE_GET_SYSTEM_INFO over gRPC stream to Worker Daemon
-       Daemon: podman system info + VFIO Spyre count → returns cpu/memory/spyre_count
-       → 422 if insufficient
-  3. INSERT into components (type=llm, provider=vllm-spyre,
+  2. INSERT into components (type=llm, provider=vllm-spyre,
                              status='Deploying', name='granite-llm', created_by=<user>,
                              worker_id=<lpar-1-uuid>,
                              metadata={model: "ibm-granite/granite-3.3-8b-instruct", profile: "compact-4k"})
-  4. Return 202 { id: components.id }
-  5. [async] LoadComponentValues():
+  3. Return 202 { id: components.id }
+  4. [async] LoadComponentValues():
        a. Read values.yaml (runtime defaults)
        b. Merge params (provider-specific config e.g. apiKey) — model and profile are NOT in params
        c. Resolve profile "compact-4k" from profiles.yaml → merge resources, maxModelLen, maxBatchSize, shmSize into values
@@ -2033,8 +1976,8 @@ POST /api/v1/models
      RemoteRuntime.CreatePod:
        WorkerGateway sends COMMAND_TYPE_CREATE_POD with rendered vllm-server.yaml over gRPC stream to Worker Daemon
        Daemon: podman kube play vllm-server.yaml → pod starts on worker LPAR
-  6. [async] Poll InspectPod (via gRPC COMMAND_TYPE_INSPECT_POD) until liveness probe passes
-  7. [async] Register routes in LiteLLM Gateway:
+  5. [async] Poll InspectPod (via gRPC COMMAND_TYPE_INSPECT_POD) until liveness probe passes
+  6. [async] Register routes in LiteLLM Gateway:
        a. POST /model/new (model_name="ibm-granite/granite-3.3-8b-instruct",
                           model="hosted_vllm/ibm-granite/granite-3.3-8b-instruct",
                           api_base="http://ai-services--caddy:8080/worker/lpar-1/models/<caddyRouteID>",
@@ -2060,7 +2003,7 @@ POST /api/v1/models          (deployment_type=remote)
   Read assets/connectors/models/watsonx/ (metadata.yaml + schema.json)
 
   1. Validate request fields (name uniqueness, required params)
-  2. No pod, no pre-flight resource check
+  2. No pod
   2a. Generate connectors.id up front (used as a route tag and as the row id)
   3. POST /model/new to LiteLLM Gateway (passing sensitive params, e.g. api_key, directly — never stored in Catalog DB)
             body: { model_name: "ibm/granite-4-h-small",
@@ -2095,7 +2038,7 @@ POST /api/v1/models          (deployment_type=remote)
   Read assets/connectors/models/hosted_vllm/ (metadata.yaml + schema.json)
 
   1. Validate request fields (name uniqueness, required params)
-  2. No pod, no pre-flight resource check
+  2. No pod
   2a. Generate connectors.id up front (used as a route tag, passthrough path ID, and as the row id)
   3. POST /model/new to LiteLLM Gateway:
             body: { model_name: "ibm-granite/granite-3.3-8b-instruct",
@@ -2328,7 +2271,7 @@ POST /api/v1/applications
       reject if another connectors[] entry also has role  → 400
 
   PlanDeployment:
-    no components row inserted for the connector-supplied type (no pod, no pre-flight)
+    no components row inserted for the connector-supplied type (no pod)
     INSERT service_dependencies (service_id, dependency_type='connector', dependency_id=<connector id>)
 
   executeDeploymentAsync → resolveModelsAndPrepareKeys:
@@ -2597,7 +2540,7 @@ For `llm`, `embedding`, and `reranker` component providers:
 
 ---
 
-## 10. Key Design Decisions
+## 9. Key Design Decisions
 
 ### 1. Two Tables, One `dependency_type`: `components` for Local, `connectors` for Remote
 
@@ -2651,11 +2594,7 @@ Deregistration uses `model_name` (`DELETE /model/delete { "model_name": ... }`),
 
 The `litellm_params.model` field uses the `hosted_vllm/<upstream-model-name>` prefix. LiteLLM infers the provider from this prefix — no separate `custom_llm_provider` field is required, and no `api_key` is needed for local vLLM endpoints.
 
-### 9. Pre-flight Returns All Violations, Not Just First
-
-The pre-flight response always includes every constraint result (satisfied or not) so operators see the full resource gap at once. Connector providers skip pre-flight entirely — they consume no local resources.
-
-### 10. Application Create Reuses or Deploys Managed Models
+### 9. Application Create Reuses or Deploys Managed Models
 
 When `POST /api/v1/applications` references a managed-model component type (`llm`, `embedding`, `reranker`), the component entry decides what happens:
 
@@ -2664,11 +2603,11 @@ When `POST /api/v1/applications` references a managed-model component type (`llm
 
 In both cases the component row is written with `created_by`, `worker_id`, and `name` populated so it appears in `GET /api/v1/models`.
 
-### 11. Internal Virtual Keys Are Pod-Scoped, Not DB-Scoped
+### 10. Internal Virtual Keys Are Pod-Scoped, Not DB-Scoped
 
 Each application receives a unique LiteLLM virtual key (`metadata.type = "internal"`) scoped to the model's route. This key is generated fresh at application create time, injected into `svc.Values["litellm"]["key"]`, and rendered into a Podman Secret (`litellm-secret-<instance-slug>`) by the `litellm-secret.yaml.tmpl` catalog template. Service pods read it via a volume mount at `/etc/secret/litellm-secret/LITELLM_VIRTUAL_KEY` and export it as `LLM_API_KEY` (or `EMB_API_KEY` for embedding). The key is **never stored in the Catalog DB**.
 
-### 12. LiteLLM `api_base` Differs for Local vs Remote Workers
+### 11. LiteLLM `api_base` Differs for Local vs Remote Workers
 
 When registering a LiteLLM route during application create (both pre-deployed and new-deploy paths), the `api_base` is resolved by `resolveAPIBase`:
 
@@ -2677,13 +2616,13 @@ When registering a LiteLLM route during application create (both pre-deployed an
 
 This mirrors the exact same logic used by `model_service.deployAsync`.
 
-### 13. One Public Key per Model, Identified by Metadata, Enforced by Alias
+### 12. One Public Key per Model, Identified by Metadata, Enforced by Alias
 
 Callers outside the platform need a key, but the platform must not accumulate them. Instead of persisting keys in a table, the `public` key is distinguished in LiteLLM itself: `metadata.type = "public"` marks its purpose and the alias `public-<model_name>` lets LiteLLM enforce one key per model. The key is generated for a chosen model and deployment(s), so it is tied to specific workers and profiles and grants only what the user asked for. Using the deployment ID (`components.id` / `connectors.id`) as the tag means no worker or profile string has to be composed or parsed: the ID is already unique, and the row behind it holds the worker and profile. Generating a new one for the same model revokes the old one first, shows the new value once, and stores nothing. `internal` keys carry `metadata.type = "internal"` so the two kinds can always be told apart. This removes the `keys` table, `KeyRepository`, and the read-key API, and means a leaked public key is recovered with a single regenerate.
 
 ---
 
-## 11. Common Queries
+## 10. Common Queries
 
 ### All active local models:
 ```sql
@@ -2752,21 +2691,12 @@ ORDER BY updated_at DESC;
 
 ---
 
-## 12. Error Handling
+## 11. Error Handling
 
 All error responses follow the existing catalog error format:
 
 ```json
 { "error": "Human-readable error message" }
-```
-
-Pre-flight failures extend this with a `violations` array (see §8):
-
-```json
-{
-  "error": "Model deployment pre-flight check failed",
-  "violations": [ ... ]
-}
 ```
 
 ### HTTP Status Codes
@@ -2782,12 +2712,12 @@ Pre-flight failures extend this with a `violations` array (see §8):
 | `403 Forbidden` | Authenticated but not the `created_by` owner |
 | `404 Not Found` | Component/connector/application not found |
 | `409 Conflict` | Duplicate name; model already active; connector in use by an application |
-| `422 Unprocessable Entity` | Pre-flight resource check failed (local model); connectivity check failed (connector) |
+| `422 Unprocessable Entity` | Connectivity check failed (connector) |
 | `500 Internal Server Error` | Unexpected server error |
 
 ---
 
-## 13. Future Considerations
+## 12. Future Considerations
 
 1. **Component Swap API** — `PUT /api/v1/models/:id/swap` to atomically swap the active model under a given LiteLLM alias with zero consumer-service downtime (register new route before removing the old one).
 2. **Multiple Models Per Role (Fallback)** — LiteLLM supports listing multiple models under the same alias for automatic failover. Relax the one-active-model-per-role constraint to allow a primary + fallback pair per role.
@@ -2795,18 +2725,17 @@ Pre-flight failures extend this with a `violations` array (see §8):
 4. **RBAC on Connectors** — Connectors currently belong to the creating user. Future: share connectors across a team, or mark them platform-wide, via a `visibility` field (`private` / `shared` / `global`).
 5. **Connector Key Rotation** — Scheduled validation jobs to proactively detect stale API keys before they impact deployed models.
 6. **Audit Logging** — Add `updated_by` to `connectors` and populate it on credential update or status change.
-7. **OpenShift Accelerator Pre-flight** — Extend `GetSystemInfo` on the OpenShift runtime to surface node-level allocatable GPU/accelerator counts from the Kubernetes node API, replacing the VFIO-based Spyre enumeration used on Podman.
-8. **Deployment History** — Consider adding an audit/history table to record past component deployments if operators need a record after row deletion.
+7. **Deployment History** — Consider adding an audit/history table to record past component deployments if operators need a record after row deletion.
 
 ---
 
-## 14. CLI Commands
+## 13. CLI Commands
 
 All model commands live under `ai-services model` and map to the `/api/v1/models` endpoints. Both local (pod) and remote (connector) model operations use the same command group — distinguished by `--deployment-type local|remote`. All commands follow the same flag style as `ai-services application`.
 
 ---
 
-### 14.0 Catalog Configure
+### 13.0 Catalog Configure
 
 `catalog configure` is extended to deploy the LiteLLM Gateway as part of the one-time platform setup sequence. No new top-level command is added — the existing command picks up the new steps automatically.
 
@@ -2845,7 +2774,7 @@ This is a one-time call made by the platform immediately after the LiteLLM pod r
 
 ---
 
-### 14.1 Model Commands
+### 13.1 Model Commands
 
 #### Deploy a local model
 
@@ -2940,7 +2869,7 @@ ai-services model delete granite-llm -y --runtime podman
 
 ---
 
-### 14.2 Remote Model Commands
+### 13.2 Remote Model Commands
 
 Remote model operations use the same `ai-services model` command group. The `--deployment-type remote` flag (or provider inference) selects the remote path on `POST /api/v1/models`.
 
@@ -2998,7 +2927,7 @@ ai-services model update prod-watsonx \
 
 ---
 
-### 14.3 LiteLLM Gateway Commands
+### 13.3 LiteLLM Gateway Commands
 
 #### Generate a public virtual key
 
@@ -3031,7 +2960,7 @@ curl -s http://litellm:4000/chat/completions \
 
 ---
 
-### 14.4 Command Summary
+### 13.4 Command Summary
 
 | Command | Maps to | Description |
 |---|---|---|
@@ -3046,7 +2975,7 @@ curl -s http://litellm:4000/chat/completions \
 
 ---
 
-## 15. Key Rotation
+## 14. Key Rotation
 
 Virtual keys are generated with `"duration": null` and have no built-in expiry. Rotation depends on the key type (see [Virtual Key Provisioning](#virtual-key-provisioning)).
 
